@@ -1,0 +1,25 @@
+{
+  "name": "cf-experiments",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "lint": "oxlint . --deny-warnings",
+    "lint:fix": "oxlint . --fix",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "typecheck": "pnpm -r typecheck",
+    "cf:types": "pnpm -r cf:types"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@typescript/native-preview": "^7.0.0-dev.20260315.1",
+    "oxfmt": "^0.35.0",
+    "oxlint": "^1.50.0",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=24",
+    "pnpm": ">=10"
+  },
+  "packageManager": "pnpm@10.24.0"
+}

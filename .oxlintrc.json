@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": ["**/node_modules/", "**/.wrangler/", "**/worker-configuration.d.ts"],
+  "env": {
+    "builtin": true
+  },
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-debugger": "error"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.ts"],
+      "plugins": ["typescript"],
+      "rules": {
+        "no-unused-vars": "off",
+        "@typescript-eslint/no-unused-vars": [
+          "warn",
+          {
+            "argsIgnorePattern": "^_",
+            "varsIgnorePattern": "^_"
+          }
+        ]
+      }
+    }
+  ]
+}

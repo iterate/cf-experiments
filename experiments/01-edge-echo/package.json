@@ -1,0 +1,17 @@
+{
+  "name": "@cf-experiments/01-edge-echo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf:types": "wrangler types",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@cf-experiments/utils": "workspace:*"
+  },
+  "devDependencies": {
+    "wrangler": "catalog:cloudflare"
+  }
+}

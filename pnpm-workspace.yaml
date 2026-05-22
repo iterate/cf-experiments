@@ -1,0 +1,14 @@
+packages:
+  - experiments/*
+  - packages/*
+
+minimumReleaseAge: 1440
+
+onlyBuiltDependencies:
+  - esbuild
+  - workerd
+  - sharp
+
+catalogs:
+  cloudflare:
+    wrangler: ^4.85.0

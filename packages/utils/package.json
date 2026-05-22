@@ -1,0 +1,11 @@
+{
+  "name": "@cf-experiments/utils",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*"
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit"
+  }
+}
