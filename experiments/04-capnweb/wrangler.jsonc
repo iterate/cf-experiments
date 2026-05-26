@@ -1,0 +1,25 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "account_id": "376ef7ed81b0573f93524de763666c15",
+  "name": "04-capnweb",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-05-01",
+  "worker_loaders": [
+    {
+      "binding": "LOADER",
+    },
+  ],
+  "upload_source_maps": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1,
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+    },
+  },
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "account_id": "376ef7ed81b0573f93524de763666c15",
+  "name": "03-kv-unconfirmed-ceiling",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-05-01",
+  "upload_source_maps": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1,
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+    },
+  },
+  "limits": {
+    "cpu_ms": 300000,
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "KV_WRITE_BENCH", "class_name": "KvWriteBench" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KvWriteBench"] }],
+}

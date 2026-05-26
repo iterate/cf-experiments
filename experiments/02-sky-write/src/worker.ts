@@ -1,4 +1,4 @@
-import { greet } from "@cf-experiments/utils/greet";
+import { greet } from "@cf-experiments/shared/greet";
 
 export default {
   fetch() {

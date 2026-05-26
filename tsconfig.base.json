@@ -11,7 +11,7 @@
     "isolatedModules": true,
     "noUncheckedSideEffectImports": true,
     "paths": {
-      "@cf-experiments/utils/*": ["./packages/utils/src/*"]
+      "@cf-experiments/shared/*": ["./packages/shared/src/*"]
     }
   }
 }

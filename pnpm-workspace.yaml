@@ -1,5 +1,6 @@
 packages:
   - experiments/*
+  - experiments/streams/*
   - packages/*
 
 minimumReleaseAge: 1440
@@ -11,4 +12,5 @@ onlyBuiltDependencies:
 
 catalogs:
   cloudflare:
+    "@cloudflare/workers-types": ^4.20260426.1
     wrangler: ^4.85.0

@@ -1,0 +1,21 @@
+{
+  "name": "@cf-experiments/03-kv-unconfirmed-ceiling",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "ceiling": "node scripts/run-kv-ceiling.ts",
+    "test:no-sync": "node scripts/run-kv-extended.ts --suite no-sync",
+    "test:flush": "node scripts/run-kv-extended.ts --suite flush",
+    "test:pressure": "node scripts/run-kv-extended.ts --suite pressure",
+    "cf:types": "wrangler types",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@cf-experiments/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "wrangler": "catalog:cloudflare"
+  }
+}

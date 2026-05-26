@@ -1,0 +1,20 @@
+{
+  "name": "@cf-experiments/02-do-write-ceiling",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "ceiling": "node scripts/run-ceiling.ts",
+    "plot": "node scripts/plot-sweep.ts",
+    "sweep:deployed": "node scripts/run-ceiling.ts https://02-do-write-ceiling.iterate-dev-preview.workers.dev --modes in-do --messages 100000 --payload-bytes 0,16,64,128,256,512,1024,2048,4096 --variants shared,autoinc --repeats 3 --out findings/deployed-sweep.jsonl && node scripts/plot-sweep.ts findings/deployed-sweep.jsonl findings/payload-curve.svg",
+    "cf:types": "wrangler types",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@cf-experiments/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "wrangler": "catalog:cloudflare"
+  }
+}

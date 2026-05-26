@@ -1,0 +1,25 @@
+{
+  "name": "@cf-experiments/04-capnweb",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:pipelining": "vitest run scripts/project-pipelining.test.ts",
+    "test:tools": "vitest run scripts/tools-harness.test.ts",
+    "cf:types": "wrangler types",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "capnweb": "^0.8.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260521.1",
+    "@octokit/rest": "^22.0.1",
+    "@slack/web-api": "^7.16.0",
+    "@types/node": "^24.12.4",
+    "vitest": "^4.1.7",
+    "wrangler": "catalog:cloudflare"
+  }
+}

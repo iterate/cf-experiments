@@ -1,0 +1,31 @@
+{
+  "name": "@cf-experiments/00-max-throughput-stream",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "benchmark": "node scripts/benchmark-append.ts",
+    "benchmark:runners": "node scripts/benchmark-runners.ts",
+    "capnweb-benchmark": "node scripts/capnweb-benchmark-append.ts",
+    "orpc": "node scripts/orpc-cli.ts",
+    "test": "vitest run",
+    "test:pipelining": "vitest run scripts/assert-capnweb-project-pipelining.test.ts",
+    "cf:types": "wrangler types",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@cf-experiments/shared": "workspace:*",
+    "@orpc/client": "^1.14.3",
+    "@orpc/openapi": "^1.14.3",
+    "@orpc/server": "^1.14.3",
+    "@orpc/zod": "^1.14.3",
+    "capnweb": "^0.8.0",
+    "trpc-cli": "^0.14.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.7",
+    "wrangler": "catalog:cloudflare"
+  }
+}

@@ -9,7 +9,7 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
-    "@cf-experiments/utils": "workspace:*"
+    "@cf-experiments/shared": "workspace:*"
   },
   "devDependencies": {
     "wrangler": "catalog:cloudflare"

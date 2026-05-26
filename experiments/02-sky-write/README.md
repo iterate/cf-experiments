@@ -1,3 +1,3 @@
 # 02-sky-write
 
-Returns plain text with a timestamp from utils.
+Returns plain text with a timestamp from shared.
