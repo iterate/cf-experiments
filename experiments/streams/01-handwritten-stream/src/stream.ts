@@ -298,7 +298,7 @@ export class Stream extends DurableObject {
 
   releaseSessionSubscribers(sessionSubscribers: Set<StreamSubscriber>): void {
     for (const subscriber of sessionSubscribers) {
-      this.#streamSubscribers.delete(subscriber);
+      this.#removeSubscriber(subscriber);
     }
     sessionSubscribers.clear();
   }
@@ -345,6 +345,7 @@ export class Stream extends DurableObject {
         for (let offset = 1; offset <= latestOffset; offset++) {
           const event = kv.get<StreamEvent>(`event:${offset}`);
           if (event === undefined) {
+            this.#removeSubscriber(subscriber);
             throw new Error(
               `Missing stream event at offset ${offset} while replaying through ${latestOffset}`,
             );
@@ -365,9 +366,13 @@ export class Stream extends DurableObject {
            * the session disposer both remove from the same sets. See "removes
            * locally cancelled streams from live fan-out" and "removes cancelled
            * subscribers from live fan-out" in `scripts/stream-capnweb.test.ts`.
+           *
+           * Replay-start errors must also remove the subscriber. Otherwise a
+           * stream that failed before subscription completed would remain in
+           * live fan-out with `desiredSize: null`. See "removes replay
+           * subscribers when committed history is corrupt".
            */
-          this.#streamSubscribers.delete(subscriber);
-          subscriber.sessionSubscribers?.delete(subscriber);
+          this.#removeSubscriber(subscriber);
         }
       },
     });
@@ -422,9 +427,13 @@ export class Stream extends DurableObject {
        * `scripts/stream-capnweb.test.ts`.
        */
       console.error("Error enqueuing event to subscriber", event, error, subscriber);
-      this.#streamSubscribers.delete(subscriber);
-      subscriber.sessionSubscribers?.delete(subscriber);
+      this.#removeSubscriber(subscriber);
     }
+  }
+
+  #removeSubscriber(subscriber: StreamSubscriber): void {
+    this.#streamSubscribers.delete(subscriber);
+    subscriber.sessionSubscribers?.delete(subscriber);
   }
 
   #resolveAppendDurability(durability: AppendDurability | undefined): {

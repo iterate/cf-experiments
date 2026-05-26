@@ -407,6 +407,30 @@ describe("handwritten stream capnweb", () => {
     );
   });
 
+  it("removes replay subscribers when committed history is corrupt", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await fixture.rpc.appendBatch({
+      events: [
+        { type: "test.replay.gap-cleanup", payload: { n: 1 } },
+        { type: "test.replay.gap-cleanup", payload: { n: 2 } },
+      ],
+    });
+    await fixture.rpc.debugDeleteEventForReplay({ offset: 1 });
+
+    const readable = await fixture.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+    await expect(withTimeout(streamReader.read(), 500)).rejects.toThrow(
+      /Missing stream event at offset 1 while replaying through 2/,
+    );
+
+    expect(await fixture.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("removes cancelled subscribers from live fan-out", async () => {
     const path = `stream-${crypto.randomUUID()}`;
 

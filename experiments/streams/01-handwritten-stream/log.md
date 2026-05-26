@@ -5,6 +5,21 @@
 
 # Notes
 
+## 2026-05-26 23:35 UTC+1
+
+- Added "removes replay subscribers when committed history is corrupt". This covers the failure path
+  introduced by the explicit replay-gap invariant: if replay throws after registering the subscriber,
+  the failed stream must be removed from live fan-out.
+- Red result before the fix: `debug().subscribers` still contained one subscriber with
+  `desiredSize: null` after the read failed with `Missing stream event ...`.
+- Fixed cleanup by routing session disposal, stream cancel, enqueue failure, and replay-start failure
+  through the same small `#removeSubscriber()` helper.
+- Local verification: root `pnpm typecheck` and
+  `pnpm vitest run scripts/stream-capnweb.test.ts` passed with 35 tests.
+- Deployed version `e95981a3-6ea1-4ab3-a44a-d68742534eaa`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 35 tests.
+
 ## 2026-05-26 23:32 UTC+1
 
 - Added "fails corrupted idempotent retries before conflicting validation can reject them". The test
