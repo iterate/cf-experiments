@@ -863,6 +863,31 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects invalid checkpoint thresholds even on non-checkpointed object durability", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.invalid-unused-threshold" },
+        durability: { mode: "best-effort", checkpointEveryUnconfirmedAppends: 0 },
+      }),
+    ).rejects.toThrow(/checkpointEveryUnconfirmedAppends/);
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.invalid-confirmed-threshold" },
+        durability: { mode: "confirmed", checkpointEveryUnconfirmedAppends: 0 },
+      }),
+    ).rejects.toThrow(/checkpointEveryUnconfirmedAppends/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects invalid per-call durability modes before allocating an offset", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });

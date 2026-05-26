@@ -409,8 +409,12 @@ export class Stream extends DurableObject {
     /**
      * Per-call durability wins over persisted stream settings, but object-form
      * modes and checkpoint thresholds still need validation before any write is
-     * allocated. The default/override/settings/invalid-mode/invalid-threshold tests in
-     * `scripts/stream-capnweb.test.ts` cover each branch here.
+     * allocated. We validate a present threshold even when the mode is not
+     * checkpointed so malformed option objects do not get silently accepted.
+     * The default/override/settings/invalid-mode/invalid-threshold tests,
+     * including "rejects invalid checkpoint thresholds even on non-checkpointed
+     * object durability", in `scripts/stream-capnweb.test.ts` cover each branch
+     * here.
      */
     this.#validateDurabilityMode(mode);
     return {

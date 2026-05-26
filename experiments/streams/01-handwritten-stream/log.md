@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-26 23:19 UTC+1
+
+- Added "rejects invalid checkpoint thresholds even on non-checkpointed object durability" to cover
+  the `#resolveAppendDurability()` branch that validates a present
+  `checkpointEveryUnconfirmedAppends` field even when `mode` is `best-effort` or `confirmed`.
+- Mutation check: changing the resolver to validate the threshold only for `mode === "checkpointed"`
+  made the new test fail before any offset was allocated.
+- Local verification: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck` and
+  `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 31 tests.
+- Deployed version `8c1f6110-b4b3-46f6-b27b-1055cff4a9ac`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/01-handwritten-stream test`
+  passed with 31 tests.
+
 ## 2026-05-26 23:16 UTC+1
 
 - Simplified checkpoint scheduling by replacing the `while` loop with a single guarded sync. Under
