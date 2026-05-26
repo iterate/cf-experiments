@@ -416,7 +416,7 @@ describe("handwritten stream capnweb", () => {
     expect(await fixture.rpc.durabilityDebug()).toMatchObject({
       settings: {
         defaultAppendDurabilityMode: "confirmed",
-        checkpointEveryUnconfirmedWrites: 100,
+        checkpointEveryUnconfirmedAppends: 100,
       },
       unconfirmedWriteCount: 0,
       checkpointInProgress: false,
@@ -504,7 +504,7 @@ describe("handwritten stream capnweb", () => {
 
     await fixture.rpc.appendBatch({
       events,
-      durability: { mode: "checkpointed", checkpointEveryUnconfirmedWrites: 2 },
+      durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 2 },
     });
 
     expect(await fixture.rpc.count()).toBe(events.length);
@@ -516,19 +516,67 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("checkpointed appendBatch reports scheduled checkpoint before the follow-up RPC observes completion", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const events: StreamEventInput[] = Array.from({ length: 5 }, (_, i) => ({
+      type: "test.durability.checkpointed-debug",
+      payload: { n: i + 1 },
+    }));
+    await using fixture = await withStream({ path });
+
+    const result = await fixture.rpc.appendBatchDebug({
+      events,
+      durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 2 },
+    });
+
+    expect(result.events.map((event) => event.offset)).toEqual([1, 2, 3, 4, 5]);
+    expect(result.durability).toMatchObject({
+      unconfirmedWriteCount: 5,
+      checkpointInProgress: true,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 0,
+    });
+
+    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointInProgress: false,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 1,
+    });
+  });
+
+  it("rejects invalid per-call checkpoint thresholds", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.invalid-threshold" },
+        durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 0 },
+      }),
+    ).rejects.toThrow();
+
+    expect(await fixture.rpc.count()).toBe(0);
+    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("uses checkpointed stream settings when append does not pass a per-call override", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
     await fixture.rpc.patchSettings({
       defaultAppendDurabilityMode: "checkpointed",
-      checkpointEveryUnconfirmedWrites: 2,
+      checkpointEveryUnconfirmedAppends: 2,
     });
 
     await fixture.rpc.append({ event: { type: "test.durability.settings", payload: { n: 1 } } });
     expect(await fixture.rpc.durabilityDebug()).toMatchObject({
       settings: {
         defaultAppendDurabilityMode: "checkpointed",
-        checkpointEveryUnconfirmedWrites: 2,
+        checkpointEveryUnconfirmedAppends: 2,
       },
       unconfirmedWriteCount: 1,
       checkpointStartedCount: 0,

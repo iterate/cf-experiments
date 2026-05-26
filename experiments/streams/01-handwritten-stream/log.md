@@ -5,6 +5,16 @@
 
 # Notes
 
+## 2026-05-26 20:04 UTC+1
+
+- Renamed checkpoint settings/API from unconfirmed writes to unconfirmed appends to match the actual
+  accounting unit.
+- Added validation for per-call checkpoint thresholds and a debug test that observes checkpoint
+  scheduling before the follow-up RPC observes checkpoint completion.
+- Deployed version `7176c2ef-0db9-43e4-bebc-62c1ea9166f1`.
+- Ran `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`.
+- Result: 17 tests passed in one test file.
+
 ## 2026-05-26 19:53 UTC+1
 
 - Deployed `01-handwritten-stream` to `https://01-handwritten-stream.iterate-dev-preview.workers.dev`

@@ -39,7 +39,7 @@ export const StreamDoSettings = z.object({
    * the DO starts a `storage.sync()` checkpoint under `blockConcurrencyWhile()` so later externally
    * delivered events wait behind the barrier.
    */
-  checkpointEveryUnconfirmedWrites: z.number().int().positive().default(100),
+  checkpointEveryUnconfirmedAppends: z.number().int().positive().default(100),
 });
 
 export type StreamDoSettings = z.infer<typeof StreamDoSettings>;

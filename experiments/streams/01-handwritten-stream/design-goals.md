@@ -15,16 +15,14 @@ Streams must be configurable across an active durability/throughput spectrum:
   through the platform's confirmation path before externally observing success.
 - **Fast append:** `append()` returns as soon as the Durable Object has accepted the event locally and
   enqueued the storage writes. Durability is best-effort until a later checkpoint.
-- **Windowed append:** the stream permits up to `N` locally accepted, unconfirmed appends, then forces
-  a durability checkpoint before accepting more append work.
+- **Checkpointed append:** the stream permits locally accepted, unconfirmed appends, then forces a
+  durability checkpoint after a configured number of appends.
 
-Outbound network bytes must not be held by ordinary Durable Object storage writes. Most stream
-instances are expected to be durable and should not allow any unconfirmed writes, but stream fan-out
-and Cap'n Web/RPC bytes should not accidentally depend on the default Durable Object output gate.
-
-That last point rules out relying on default-gated storage writes as the durable mode. Durable mode
-should be explicit: write with `allowUnconfirmed: true` to avoid the output gate, then use an explicit
-durability barrier when the selected policy requires one.
+Outbound network timing should be an explicit part of the contract. If the caller wants an observed
+offset to mean "confirmed durable", `confirmed` mode uses normal Durable Object output gates and may
+hold RPC/WebSocket bytes. If the caller wants outbound bytes to leave immediately, `best-effort` and
+`checkpointed` use `allowUnconfirmed: true`, but then the observed offset only means local acceptance
+until an explicit durability barrier completes.
 
 ## Platform Semantics This Design Depends On
 
@@ -56,12 +54,12 @@ If `append()` cannot be `async`, then `await storage.sync()` cannot happen insid
 The likely escape hatch is to move the durability wait to an earlier boundary:
 
 - a stream-level policy can block entering the next append until the previous checkpoint has finished;
-- `append()` can synchronously return only after observing that no unconfirmed writes are outstanding;
+- `append()` can synchronously return only after observing that no unconfirmed appends are outstanding;
 - the call that fills a durability window may trigger a checkpoint that delays later appends, but it
   cannot truthfully claim its own returned offset was confirmed unless the method blocks somehow.
 
-This distinction matters for the API contract. "No more than N unconfirmed appends will be admitted"
-is weaker than "this append's returned offset is confirmed before the caller observes it."
+This distinction matters for the API contract. "Run a checkpoint every N unconfirmed appends" is
+weaker than "this append's returned offset is confirmed before the caller observes it."
 
 ## Implemented Configuration Shape
 
@@ -72,7 +70,7 @@ type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
 
 type StreamDoSettings = {
   defaultAppendDurabilityMode: AppendDurabilityMode;
-  checkpointEveryUnconfirmedWrites: number;
+  checkpointEveryUnconfirmedAppends: number;
 };
 ```
 
@@ -80,7 +78,7 @@ Per-call overrides use the same language:
 
 ```ts
 append({ event, durability: "best-effort" });
-append({ event, durability: { mode: "checkpointed", checkpointEveryUnconfirmedWrites: 10 } });
+append({ event, durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 10 } });
 ```
 
 The intentionally sharp edge is `confirmed`: this is the only mode where observing the returned offset
@@ -151,7 +149,7 @@ The current implementation path is:
 1. `confirmed`: shared `writeEventFromKv(..., { allowUnconfirmedWrites: false })`.
 2. `best-effort`: shared `writeEventFromKv(..., { allowUnconfirmedWrites: true })`.
 3. `checkpointed`: same as best-effort, plus `storage.sync()` under `blockConcurrencyWhile()` once the
-   unconfirmed-write count reaches the configured threshold.
+   unconfirmed-append count reaches the configured threshold.
 4. `sync()` is an explicit async durability barrier for tests and callers that want to separate fast
    offset allocation from later durability confirmation.
 5. `kill()` exists as a reset probe for deployed fault tests; local Miniflare can check API sequencing

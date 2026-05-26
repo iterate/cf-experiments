@@ -4,6 +4,7 @@ import { writeEventFromKv, type StreamEvent, type StreamEventInput } from "@cf-e
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import {
   type AppendDurabilityMode,
+  StreamDoSettings as StreamDoSettingsSchema,
   type StreamDoSettings,
   readStreamDoSettingsFromKv,
   streamDoSettingsDefaults,
@@ -20,10 +21,11 @@ type AppendDurability =
   | AppendDurabilityMode
   | {
       mode: AppendDurabilityMode;
-      checkpointEveryUnconfirmedWrites?: number;
+      checkpointEveryUnconfirmedAppends?: number;
     };
 
 export class Stream extends DurableObject {
+  #incarnationId = crypto.randomUUID();
   #settings = streamDoSettingsDefaults();
   #unconfirmedWriteCount = 0;
   #checkpointInProgress = false;
@@ -108,7 +110,7 @@ export class Stream extends DurableObject {
     if (durability.mode !== "confirmed") {
       this.#unconfirmedWriteCount += 1;
       if (durability.mode === "checkpointed") {
-        this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedWrites);
+        this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedAppends);
       }
     }
 
@@ -117,6 +119,13 @@ export class Stream extends DurableObject {
 
   appendBatch(args: { events: StreamEventInput[]; durability?: AppendDurability }): StreamEvent[] {
     return args.events.map((event) => this.append({ event, durability: args.durability }));
+  }
+
+  appendBatchDebug(args: { events: StreamEventInput[]; durability?: AppendDurability }) {
+    return {
+      events: this.appendBatch(args),
+      durability: this.durabilityDebug(),
+    };
   }
 
   count() {
@@ -136,6 +145,7 @@ export class Stream extends DurableObject {
   durabilityDebug() {
     return {
       settings: this.settings,
+      incarnationId: this.#incarnationId,
       unconfirmedWriteCount: this.#unconfirmedWriteCount,
       checkpointInProgress: this.#checkpointInProgress,
       checkpointStartedCount: this.#checkpointStartedCount,
@@ -268,7 +278,7 @@ export class Stream extends DurableObject {
 
   #resolveAppendDurability(durability: AppendDurability | undefined): {
     mode: AppendDurabilityMode;
-    checkpointEveryUnconfirmedWrites: number;
+    checkpointEveryUnconfirmedAppends: number;
   } {
     const mode =
       typeof durability === "string"
@@ -276,17 +286,20 @@ export class Stream extends DurableObject {
         : durability?.mode ?? this.settings.defaultAppendDurabilityMode;
     return {
       mode,
-      checkpointEveryUnconfirmedWrites:
-        typeof durability === "object" && durability.checkpointEveryUnconfirmedWrites !== undefined
-          ? durability.checkpointEveryUnconfirmedWrites
-          : this.settings.checkpointEveryUnconfirmedWrites,
+      checkpointEveryUnconfirmedAppends:
+        typeof durability === "object" &&
+        durability.checkpointEveryUnconfirmedAppends !== undefined
+          ? StreamDoSettingsSchema.shape.checkpointEveryUnconfirmedAppends.parse(
+              durability.checkpointEveryUnconfirmedAppends,
+            )
+          : this.settings.checkpointEveryUnconfirmedAppends,
     };
   }
 
-  #scheduleCheckpointIfNeeded(checkpointEveryUnconfirmedWrites: number): void {
+  #scheduleCheckpointIfNeeded(checkpointEveryUnconfirmedAppends: number): void {
     if (
       this.#checkpointInProgress ||
-      this.#unconfirmedWriteCount < checkpointEveryUnconfirmedWrites
+      this.#unconfirmedWriteCount < checkpointEveryUnconfirmedAppends
     ) {
       return;
     }
@@ -295,16 +308,16 @@ export class Stream extends DurableObject {
     this.#checkpointStartedCount += 1;
 
     void this.ctx.blockConcurrencyWhile(async () => {
+      // Let the current synchronous handler finish (notably appendBatch()) before
+      // deciding which unconfirmed append window this checkpoint should cover.
+      await Promise.resolve();
+
       while (this.#unconfirmedWriteCount > 0) {
-        const writesIncludedInThisSync = this.#unconfirmedWriteCount;
         await this.ctx.storage.sync();
-        this.#unconfirmedWriteCount = Math.max(
-          0,
-          this.#unconfirmedWriteCount - writesIncludedInThisSync,
-        );
+        this.#unconfirmedWriteCount = 0;
         this.#checkpointCompletedCount += 1;
 
-        if (this.#unconfirmedWriteCount < checkpointEveryUnconfirmedWrites) {
+        if (this.#unconfirmedWriteCount < checkpointEveryUnconfirmedAppends) {
           break;
         }
       }
