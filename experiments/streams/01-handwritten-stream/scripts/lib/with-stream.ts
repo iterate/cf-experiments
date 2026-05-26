@@ -1,18 +1,12 @@
 /**
- * Cap'n Web test fixture: typed ProjectCapability RPC + recorded WebSocket frames.
- * Used by vitest scripts in this experiment.
+ * Cap'n Web test fixture: WebSocket RPC to a named Stream DO + recorded frames.
  *
- * `using` vs `await using`:
- * - `using` — sync [Symbol.dispose] at scope exit
- * - `await using` — async teardown; use here because we await WebSocket open/close
- *
- *   await using fixture = await withProject({ projectId: "vitest" });
- *   await fixture.rpc.streams.get("foo").append({ type: "test" });
- *   fixture.printWire(); // round trips + timings
+ *   await using fixture = await withStream({ name: "my-stream" });
+ *   await fixture.rpc.append({ event: { type: "test" } });
  */
 
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
-import type { ProjectCapability } from "../../src/worker.js";
+import type { StreamRpc } from "../../src/stream.js";
 import { analyzeCapnwebWire, formatCapnwebWire, type WireAnalysis } from "./capnweb-wire.js";
 
 const defaultWorkerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
@@ -20,7 +14,6 @@ const defaultWorkerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 export type WsMessage = {
   direction: "out" | "in";
   data: string;
-  /** ms since recording started (performance.now()) */
   tMs: number;
 };
 
@@ -29,8 +22,8 @@ export type ParsedWsMessage = {
   data: unknown;
 };
 
-export type ProjectFixture = AsyncDisposable & {
-  rpc: RpcStub<ProjectCapability>;
+export type StreamFixture = AsyncDisposable & {
+  rpc: RpcStub<StreamRpc>;
   wsMessages: WsMessage[];
   parsedWsMessages(): ParsedWsMessage[];
   wireAnalysis(): WireAnalysis;
@@ -38,32 +31,31 @@ export type ProjectFixture = AsyncDisposable & {
   printWire(): string;
 };
 
-export type WithProjectOptions = {
-  projectId: string;
+export type WithStreamOptions = {
+  name: string;
   workerUrl?: string;
   log?: Pick<Console, "log">;
-  /** print wire timeline on fixture dispose (default false) */
   printWireOnDispose?: boolean;
 };
 
-export async function withProject({
-  projectId,
+export async function withStream({
+  name,
   workerUrl = defaultWorkerUrl,
   log = console,
   printWireOnDispose = false,
-}: WithProjectOptions): Promise<ProjectFixture> {
-  const url = toWebSocketUrl(workerUrl, projectId);
-  log.log(`[with-project] connecting ${url}`);
+}: WithStreamOptions): Promise<StreamFixture> {
+  const url = toWebSocketUrl(workerUrl, name);
+  log.log(`[with-stream] connecting ${url}`);
 
   const startedAt = performance.now();
   const wsMessages: WsMessage[] = [];
   const webSocket = newRecordingWebSocket(url, wsMessages, startedAt);
   await waitForWebSocketOpen(webSocket);
-  log.log(`[with-project] connected projectId=${projectId}`);
+  log.log(`[with-stream] connected name=${name}`);
 
-  const rpc = newWebSocketRpcSession<ProjectCapability>(webSocket);
+  const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
 
-  const fixture: ProjectFixture = {
+  const fixture: StreamFixture = {
     rpc,
     wsMessages,
     parsedWsMessages: () =>
@@ -79,13 +71,13 @@ export async function withProject({
       return report;
     },
     async [Symbol.asyncDispose]() {
-      log.log(`[with-project] disconnecting projectId=${projectId}`);
+      log.log(`[with-stream] disconnecting name=${name}`);
       if (printWireOnDispose) fixture.printWire();
       rpc[Symbol.dispose]();
       await closeWebSocket(webSocket);
       const { resultWaits, waves, spanMs } = fixture.wireAnalysis();
       log.log(
-        `[with-project] disconnected projectId=${projectId} (${wsMessages.length} frames, ${resultWaits.length} pulled results, ${waves.length} latency waves, ${spanMs.toFixed(1)}ms span)`,
+        `[with-stream] disconnected name=${name} (${wsMessages.length} frames, ${resultWaits.length} pulled results, ${waves.length} latency waves, ${spanMs.toFixed(1)}ms span)`,
       );
     },
   };
@@ -124,9 +116,9 @@ function describeWebSocketFrameData(data: unknown) {
   throw new TypeError(`unexpected WebSocket frame data: ${String(data)}`);
 }
 
-function toWebSocketUrl(raw: string, projectId: string) {
+function toWebSocketUrl(raw: string, name: string) {
   const url = new URL(raw);
-  url.searchParams.set("projectId", projectId);
+  url.pathname = `/${name}`;
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   return url.toString();

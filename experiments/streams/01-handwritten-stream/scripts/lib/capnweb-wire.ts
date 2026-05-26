@@ -1,4 +1,4 @@
-import type { ParsedWsMessage, WsMessage } from "./with-project.js";
+import type { ParsedWsMessage, WsMessage } from "./with-stream.js";
 
 /**
  * A client `pull` followed by the matching server `resolve` / `reject`.

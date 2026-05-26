@@ -42,13 +42,13 @@ export class BenchmarkRunner extends DurableObject {
 
     if (mode === "rpc-serial") {
       for (let n = 1; n <= messages; n++) {
-        await stub.append(buildEvent(n, runId, payloadBytes));
+        await stub.append({ event: buildEvent(n, runId, payloadBytes) });
         committed += 1;
       }
     } else if (mode === "rpc-pipelined") {
       const pending: Promise<unknown>[] = [];
       for (let n = 1; n <= messages; n++) {
-        pending.push(stub.append(buildEvent(n, runId, payloadBytes)));
+        pending.push(stub.append({ event: buildEvent(n, runId, payloadBytes) }));
       }
       dispatchMs = Date.now() - startedAt;
       await Promise.all(pending);
@@ -59,7 +59,7 @@ export class BenchmarkRunner extends DurableObject {
         const events = Array.from({ length: count }, (_, i) =>
           buildEvent(offset + i + 1, runId, payloadBytes),
         );
-        await stub.appendBatch(events);
+        await stub.appendBatch({ events });
         committed += count;
       }
     }
