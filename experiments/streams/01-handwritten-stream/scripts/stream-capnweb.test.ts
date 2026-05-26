@@ -654,6 +654,36 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("fails corrupted idempotent retries before conflicting validation can reject them", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const idempotencyKey = crypto.randomUUID();
+    await using fixture = await withStream({ path });
+
+    await fixture.rpc.append({
+      event: { type: "test.durability.idempotent-corrupt", idempotencyKey },
+      durability: "best-effort",
+    });
+    await fixture.rpc.debugDeleteEventForReplay({ offset: 1 });
+
+    await expect(
+      fixture.rpc.append({
+        event: {
+          type: "test.durability.idempotent-corrupt",
+          idempotencyKey,
+          offset: 99,
+        },
+        durability: JSON.parse('"not-a-mode"'),
+      }),
+    ).rejects.toThrow(/Idempotency index points at missing stream event offset 1/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(1);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 1,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("allows a confirmed per-call override on a best-effort stream", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });

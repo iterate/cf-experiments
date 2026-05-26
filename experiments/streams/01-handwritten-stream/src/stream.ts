@@ -86,6 +86,7 @@ export class Stream extends DurableObject {
        *
        * - "idempotent append returns the original event and emits once to live subscribers"
        * - "does not count idempotent best-effort retries as new unconfirmed writes"
+       * - "fails corrupted idempotent retries before conflicting validation can reject them"
        *
        * in `scripts/stream-capnweb.test.ts`.
        */
@@ -93,6 +94,7 @@ export class Stream extends DurableObject {
       if (existingOffset !== undefined) {
         const existing = kv.get<StreamEvent>(`event:${existingOffset}`);
         if (existing !== undefined) return existing;
+        throw new Error(`Idempotency index points at missing stream event offset ${existingOffset}`);
       }
     }
 

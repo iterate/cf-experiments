@@ -318,6 +318,7 @@ export function writeEventFromKv({
       if (existingOffset !== undefined) {
         const existing = storage.kv.get<StreamEvent>(streamEventKvKey(existingOffset));
         if (existing !== undefined) return { kind: "existing", event: existing };
+        throw new Error(`Idempotency index points at missing stream event offset ${existingOffset}`);
       }
     }
 

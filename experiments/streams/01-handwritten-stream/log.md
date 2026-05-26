@@ -5,6 +5,22 @@
 
 # Notes
 
+## 2026-05-26 23:32 UTC+1
+
+- Added "fails corrupted idempotent retries before conflicting validation can reject them". The test
+  deletes the original event while leaving the idempotency index, then retries with both the same key
+  and invalid retry options.
+- Red result before the fix: the retry failed with `Unknown append durability mode: not-a-mode`,
+  proving the corrupted idempotency index was not treated as the first-class append invariant.
+- Fixed the stream boundary and shared KV writer to throw
+  `Idempotency index points at missing stream event offset ...` instead of falling through to later
+  validation or allocating a second offset.
+- Local verification: root `pnpm typecheck` and
+  `pnpm vitest run scripts/stream-capnweb.test.ts` passed with 34 tests.
+- Deployed version `7ddcdef7-5d10-47b7-bffc-a5ea380dcf0f`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 34 tests.
+
 ## 2026-05-26 23:29 UTC+1
 
 - Added "fails replay loudly when committed history has a missing event key". The test uses a
