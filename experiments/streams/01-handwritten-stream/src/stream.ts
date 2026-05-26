@@ -237,6 +237,20 @@ export class Stream extends DurableObject {
     };
   }
 
+  debugInstallErroredLocalSubscriber() {
+    let controller: ReadableStreamDefaultController<StreamEvent> | undefined;
+    void new ReadableStream<StreamEvent>({
+      start(streamController) {
+        controller = streamController;
+      },
+    });
+    if (controller === undefined) throw new Error("debug stream controller was not created");
+    const subscriber: StreamSubscriber = { controller, enqueuedEvents: 0 };
+    controller.error(new Error("debug enqueue failure"));
+    this.#streamSubscribers.add(subscriber);
+    return this.debug();
+  }
+
   ping() {
     return {
       incarnationId: this.#incarnationId,
@@ -371,6 +385,13 @@ export class Stream extends DurableObject {
       subscriber.controller.enqueue(event);
       subscriber.enqueuedEvents += 1;
     } catch (error) {
+      /**
+       * A broken stream controller must be isolated to its own subscriber. If we
+       * keep it registered after `enqueue()` throws, every later append keeps
+       * re-hitting the same dead sink and `debug()` reports a leaked subscriber.
+       * See "removes subscribers whose stream controller rejects enqueue" in
+       * `scripts/stream-capnweb.test.ts`.
+       */
       console.error("Error enqueuing event to subscriber", event, error, subscriber);
       this.#streamSubscribers.delete(subscriber);
       subscriber.sessionSubscribers?.delete(subscriber);

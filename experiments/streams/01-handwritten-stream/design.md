@@ -68,6 +68,7 @@ passes, but that a competing implementation choice should fail a named probe.
 | Register subscriber once, replay history, then keep it for live fan-out | Replay/live ordering or multi-subscriber fan-out could skip, duplicate, or reorder events | "replays committed history before switching to live appends" and "delivers global offset order to multiple subscribers with no per-event RPC from readers or writers" |
 | Model subscriptions as returned `ReadableStream`, not `onEvent()` callback RPC | A pure subscriber would originate per-event return traffic/acks | "pure subscribers do not originate per-event websocket traffic" |
 | Do not await per-subscriber delivery in `#broadcast()` | One unread subscriber could slow active subscribers | "delivers to an active subscriber while another subscriber does not read" |
+| Remove a subscriber when its stream controller rejects `enqueue()` | One broken stream sink could remain registered and be retried on every append | "removes subscribers whose stream controller rejects enqueue" |
 | Release subscribers on both stream cancel and Cap'n Web session disposal | Dead sessions could stay in fan-out forever | "removes locally cancelled streams from live fan-out" and "removes cancelled subscribers from live fan-out" |
 
 ## Checkpoints

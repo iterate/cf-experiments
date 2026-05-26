@@ -425,6 +425,23 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("removes subscribers whose stream controller rejects enqueue", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    expect(await fixture.rpc.debugInstallErroredLocalSubscriber()).toMatchObject({
+      subscribers: [{ enqueuedEvents: 0 }],
+    });
+
+    await fixture.rpc.append({
+      event: { type: "test.stream.enqueue-error", payload: { shouldRemoveSubscriber: true } },
+    });
+
+    expect(await fixture.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("idempotent append returns the original event and emits once to live subscribers", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();

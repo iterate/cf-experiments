@@ -5,6 +5,20 @@
 
 # Notes
 
+## 2026-05-26 23:13 UTC+1
+
+- Added "removes subscribers whose stream controller rejects enqueue" to cover the defensive
+  `#enqueueToSubscriber()` catch path. The test installs an errored local stream controller through a
+  debug hook, appends once, and asserts the broken subscriber is removed.
+- Mutation check: commenting out `this.#streamSubscribers.delete(subscriber)` inside the
+  `#enqueueToSubscriber()` catch made the new test fail with the errored subscriber still present.
+- Updated `design.md` and the `stream.ts` catch comment to tie the cleanup behavior to the test.
+- Local verification: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck` and
+  `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 30 tests.
+- Deployed version `8ee25586-748a-44cb-a815-0c4d94614a15`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/01-handwritten-stream test`
+  passed with 30 tests.
+
 ## 2026-05-26 23:10 UTC+1
 
 - Ran a deployed A/B mutation for the remaining weak `allowUnconfirmedWrites` behavioral question.
