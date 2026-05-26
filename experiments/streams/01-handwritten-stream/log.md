@@ -5,6 +5,39 @@
 
 # Notes
 
+## 2026-05-26 23:10 UTC+1
+
+- Ran a deployed A/B mutation for the remaining weak `allowUnconfirmedWrites` behavioral question.
+  Current intended code (`allowUnconfirmedWrites: true`) was deployed as version
+  `7efc3173-d007-4321-b90d-a712412602be`; the one-line mutation
+  `allowUnconfirmedWrites: false` was deployed temporarily as
+  `81a6e55e-9a36-478e-98d6-08e631e20308` for the small probe and
+  `fe5cbdb2-7472-4c13-a59e-65608cd5afd9` for the full-shape probe, then restored.
+- Small DO-side probe, 1 publisher / 1 subscriber / 200 frames / no pacing / best-effort:
+  - intended: `allSubscribersCreatedAtLatencyMs.p95 = 126`, `publisherSelfEchoCreatedAtLatencyMs.p95 = 233`,
+    `publisherAppendAckLatencyMs.p95 = 206`;
+  - mutated false: `allSubscribersCreatedAtLatencyMs.p95 = 153`, `publisherSelfEchoCreatedAtLatencyMs.p95 = 172`,
+    `publisherAppendAckLatencyMs.p95 = 131`.
+- Full DO-side probe, 10 publishers / 36 active subscribers / 1 passive subscriber / 50 frames each /
+  20 ms pacing / best-effort:
+  - intended: `allSubscribersCreatedAtLatencyMs.p95 = 2054`, `publisherSelfEchoCreatedAtLatencyMs.p95 = 804`,
+    `publisherAppendAckLatencyMs.p95 = 557`;
+  - mutated false: `allSubscribersCreatedAtLatencyMs.p95 = 2581`, `publisherSelfEchoCreatedAtLatencyMs.p95 = 912`,
+    `publisherAppendAckLatencyMs.p95 = 719`.
+- Interpretation: the full-shape deployed mutation was worse with gated writes, but the small probe
+  was mixed and the latency distributions are noisy. This is useful evidence, not a crisp correctness
+  test. The source sentinel remains the only deterministic guard for that exact option.
+- Added deterministic settings-path coverage:
+  - "rejects invalid stream settings without changing append defaults" covers settings validation and
+    protects the default confirmed append path from invalid persisted config.
+  - "persists stream settings across durable object restart" uses `kill()` to prove settings are read
+    in the constructor after restart and still drive default checkpointed append behavior.
+- Local verification: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck` and
+  `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 29 tests.
+- Deployed version `88be5303-e324-45d0-8657-e30cb7e67699`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/01-handwritten-stream test`
+  passed with 29 tests.
+
 ## 2026-05-26 23:02 UTC+1
 
 - Mutation-checked `append()` around the two most suspicious design choices:

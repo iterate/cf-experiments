@@ -46,6 +46,10 @@ function expectContiguousOffsets(events: StreamEvent[], count: number) {
   );
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function expectTimesOut(promise: Promise<unknown>, ms: number) {
   await expect(withTimeout(promise, ms)).rejects.toThrow(/timed out/);
 }
@@ -620,6 +624,73 @@ describe("handwritten stream capnweb", () => {
     expect(await fixture.rpc.debug()).toMatchObject({
       settings: { defaultAppendDurabilityMode: "best-effort" },
       unconfirmedWriteCount: 1,
+    });
+  });
+
+  it("rejects invalid stream settings without changing append defaults", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.patchSettings({ defaultAppendDurabilityMode: JSON.parse('"later"') }),
+    ).rejects.toThrow(/Unknown append durability mode/);
+    await expect(fixture.rpc.patchSettings({ checkpointEveryUnconfirmedAppends: 0 })).rejects
+      .toThrow(/checkpointEveryUnconfirmedAppends/);
+    await expect(fixture.rpc.patchSettings({ debugConfirmedSyncDelayMs: -1 })).rejects.toThrow(
+      /debugConfirmedSyncDelayMs/,
+    );
+    await expect(fixture.rpc.patchSettings({ debugCheckpointSyncDelayMs: -1 })).rejects.toThrow(
+      /debugCheckpointSyncDelayMs/,
+    );
+
+    await fixture.rpc.append({
+      event: { type: "test.settings.invalid-defaults", payload: { mode: "still-confirmed" } },
+    });
+
+    expect(await fixture.rpc.debug()).toMatchObject({
+      settings: {
+        defaultAppendDurabilityMode: "confirmed",
+        checkpointEveryUnconfirmedAppends: 100,
+        debugConfirmedSyncDelayMs: 0,
+        debugCheckpointSyncDelayMs: 0,
+      },
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
+  it("persists stream settings across durable object restart", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+
+    {
+      await using fixture = await withStream({ path });
+      await fixture.rpc.patchSettings({
+        defaultAppendDurabilityMode: "checkpointed",
+        checkpointEveryUnconfirmedAppends: 1,
+      });
+      await expect(fixture.rpc.kill({ reason: "restart settings persistence test" })).rejects
+        .toThrow();
+    }
+
+    await sleep(250);
+
+    await using restarted = await withStream({ path });
+    expect(await restarted.rpc.debug()).toMatchObject({
+      settings: {
+        defaultAppendDurabilityMode: "checkpointed",
+        checkpointEveryUnconfirmedAppends: 1,
+      },
+    });
+
+    await restarted.rpc.append({
+      event: { type: "test.settings.restart-default", payload: { mode: "checkpointed" } },
+    });
+
+    expect(await restarted.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 1,
     });
   });
 

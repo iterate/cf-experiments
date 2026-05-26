@@ -52,7 +52,18 @@ export class Stream extends DurableObject {
     this.#settings = this.#readSettings();
   }
 
-  /** Merge patch, persist to sync KV, update in-memory copy. */
+  /**
+   * Merge patch, validate, persist to sync KV, update in-memory copy.
+   *
+   * This is on the append path because `#resolveAppendDurability()` falls back
+   * to persisted settings when a caller omits per-call durability. If invalid
+   * settings were accepted, future appends could start allocating offsets under
+   * an unknown mode or threshold. If settings were not persisted/read in the
+   * constructor, a DO restart would silently reset stream behavior. See
+   * "rejects invalid stream settings without changing append defaults" and
+   * "persists stream settings across durable object restart" in
+   * `scripts/stream-capnweb.test.ts`.
+   */
   patchSettings(settings: Partial<StreamSettings>): StreamSettings {
     this.#settings = this.#parseSettings({ ...this.#readSettings(), ...settings });
     this.ctx.storage.kv.put(STREAM_SETTINGS_KEY, this.#settings);
