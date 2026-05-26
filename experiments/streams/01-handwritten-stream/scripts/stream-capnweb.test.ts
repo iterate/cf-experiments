@@ -323,6 +323,27 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("removes locally cancelled streams from live fan-out", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    const result = await fixture.rpc.debugOpenAndCancelLocalStream();
+
+    expect(result.beforeCancel).toMatchObject({
+      subscribers: [{ enqueuedEvents: 0 }],
+    });
+    expect(result.afterCancel).toMatchObject({
+      subscribers: [],
+    });
+
+    await fixture.rpc.append({
+      event: { type: "test.stream.local-cancel", payload: { shouldFanOut: false } },
+    });
+    expect(await fixture.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("idempotent append returns the original event and emits once to live subscribers", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();

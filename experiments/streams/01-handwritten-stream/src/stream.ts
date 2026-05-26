@@ -210,6 +210,16 @@ export class Stream extends DurableObject {
     };
   }
 
+  async debugOpenAndCancelLocalStream() {
+    const readable = this.stream();
+    const beforeCancel = this.debug();
+    await readable.cancel("debug local stream cancel");
+    return {
+      beforeCancel,
+      afterCancel: this.debug(),
+    };
+  }
+
   ping() {
     return {
       incarnationId: this.#incarnationId,
@@ -291,8 +301,8 @@ export class Stream extends DurableObject {
            * `StreamRpcTarget[Symbol.dispose]()` rather than a prompt client-side
            * `ReadableStream.cancel()`, so this local Web Streams cancel hook and
            * the session disposer both remove from the same sets. See "removes
-           * cancelled subscribers from live fan-out" in
-           * `scripts/stream-capnweb.test.ts`.
+           * locally cancelled streams from live fan-out" and "removes cancelled
+           * subscribers from live fan-out" in `scripts/stream-capnweb.test.ts`.
            */
           this.#streamSubscribers.delete(subscriber);
           subscriber.sessionSubscribers?.delete(subscriber);

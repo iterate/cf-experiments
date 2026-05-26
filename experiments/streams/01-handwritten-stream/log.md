@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-26 22:22 UTC+1
+
+- Added `debugOpenAndCancelLocalStream()` so the Web Streams `cancel` callback inside
+  `#openStream()` is directly covered, separately from Cap'n Web session disposal.
+- Added "removes locally cancelled streams from live fan-out", which verifies local stream cancel
+  removes the subscriber and later appends do not fan out to a dead subscriber.
+- Local result: `pnpm typecheck` and `pnpm vitest run scripts/stream-capnweb.test.ts` passed
+  with 21 tests.
+- Deployed version `334ff2ae-8ef0-4e9e-8613-e4b79d4a60e6`.
+- Ran `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`.
+- Result: 21 tests passed in one test file.
+
 ## 2026-05-26 22:17 UTC+1
 
 - Tightened `append()` / `stream()` implementation comments so each non-obvious branch names the
