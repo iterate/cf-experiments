@@ -36,6 +36,23 @@
   audio-call workload. Next design candidates should reduce per-event fan-out work in the DO, e.g.
   partition subscribers, send smaller/binary frames, or separate hot audio media transport from the
   durable event log.
+- Follow-up durability comparison, same deployed worker and same audio event format:
+  - Full shape, 10 publishers / 36 active subscribers / 1 passive subscriber / 500 total events /
+    20 ms pacing:
+    - best-effort: `publisherSelfEchoLatencyMs.p95 = 2189.7`, `allSubscribersLatencyMs.p95 =
+      2279.2`, reader outbound frames after subscription still `0`;
+    - checkpointed (`checkpoint-every = 100`): `publisherSelfEchoLatencyMs.p95 = 549.3`,
+      `allSubscribersLatencyMs.p95 = 1081.6`, reader outbound frames after subscription still `0`;
+    - confirmed: `publisherSelfEchoLatencyMs.p95 = 1905.8`, `allSubscribersLatencyMs.p95 = 1930.8`,
+      reader outbound frames after subscription still `0`.
+  - Isolated shape, 1 publisher / 1 active subscriber / 100 total events / 20 ms pacing:
+    - best-effort: `publisherSelfEchoLatencyMs.p95 = 32.2`;
+    - checkpointed: `publisherSelfEchoLatencyMs.p95 = 82.0`;
+    - confirmed: `publisherSelfEchoLatencyMs.p95 = 38.4`.
+- Interpretation: the high read-your-own-append latency is not fundamentally caused by awaiting
+  durability; in the isolated shape confirmed and best-effort are both tens of milliseconds. The
+  bad latency appears under fan-out/connection pressure. Checkpointed was the best full-shape run in
+  this sample, but still missed real-time audio expectations by a wide margin.
 
 ## 2026-05-26 22:22 UTC+1
 

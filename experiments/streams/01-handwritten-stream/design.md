@@ -93,7 +93,14 @@ the DO-side `desiredSize` signal for observation only.
 The current audio-shaped benchmark suggests this simple one-DO fan-out design is not sufficient for a
 10 publisher / 36 active subscriber / 24 kHz PCM16 base64 / 20 ms frame workload if sub-second p95
 delivery to every subscriber is required. In the 2026-05-26 deployed run, p95 append-to-all-subscribers
-was about 1.27 s and p95 same-session publisher self-echo was about 912 ms.
+was about 1.08-2.28 s depending on durability mode/run, and p95 same-session publisher self-echo was
+about 550 ms-2.19 s under load.
+
+The same benchmark with one publisher and one subscriber does not show that pathology: p95
+same-session self-echo was about 32 ms for best-effort, 82 ms for checkpointed, and 38 ms for
+confirmed in one deployed run. So the high read-your-own-append latency is not explained simply by
+awaiting `storage.sync()`; it appears with many subscribers/publishers and the resulting fan-out /
+transport pressure.
 
 ## Debug hooks
 

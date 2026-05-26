@@ -50,7 +50,8 @@ node scripts/audio-chaos-benchmark.ts \
   --subscribers 36 \
   --frames-per-publisher 50 \
   --slow-subscribers 1 \
-  --pace-ms 20
+  --pace-ms 20 \
+  --durability best-effort
 ```
 
 Deploy current code:

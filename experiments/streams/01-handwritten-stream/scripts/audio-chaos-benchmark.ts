@@ -9,7 +9,7 @@
  *
  *   node scripts/audio-chaos-benchmark.ts http://localhost:8787
  *   node scripts/audio-chaos-benchmark.ts https://01-handwritten-stream.iterate-dev-preview.workers.dev \
- *     --publishers 10 --subscribers 36 --frames-per-publisher 50 --pace-ms 20
+ *     --publishers 10 --subscribers 36 --frames-per-publisher 50 --pace-ms 20 --durability best-effort
  */
 
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
@@ -32,6 +32,8 @@ type FrameRecord = {
   deliveries: number;
 };
 
+type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
+
 const args = parseArgs(process.argv.slice(2));
 const workerUrl = (args.url ?? process.env.WORKER_URL ?? "http://localhost:8787").replace(/\/$/, "");
 const streamPath = args.stream ?? `audio-chaos-${crypto.randomUUID().slice(0, 8)}`;
@@ -45,6 +47,11 @@ const sampleRate = positiveInt(args["sample-rate"] ?? "24000", "sample-rate");
 const channels = positiveInt(args.channels ?? "1", "channels");
 const bytesPerSample = positiveInt(args["bytes-per-sample"] ?? "2", "bytes-per-sample");
 const timeoutMs = positiveInt(args["timeout-ms"] ?? "30000", "timeout-ms");
+const durability = parseDurability(args.durability ?? "best-effort");
+const checkpointEveryUnconfirmedAppends = positiveInt(
+  args["checkpoint-every"] ?? "100",
+  "checkpoint-every",
+);
 const totalEvents = publishers * framesPerPublisher;
 const rawFrameBytes = Math.ceil((sampleRate * frameMs * channels * bytesPerSample) / 1000);
 const audio = Buffer.alloc(rawFrameBytes, 0x7f).toString("base64");
@@ -77,7 +84,7 @@ async function measureSameSessionEcho() {
   const startedAt = performance.now();
   await fixture.rpc.append({
     event: buildAudioEvent({ publisher: "echo", frame: 1, frameId: "echo-1" }),
-    durability: "best-effort",
+    durability: appendDurability(),
   });
   const delivered = await withTimeout(read, timeoutMs);
   if (delivered.done) throw new Error("same-session echo stream ended");
@@ -157,6 +164,9 @@ async function runFanoutBenchmark() {
     slowSubscribers,
     framesPerPublisher,
     totalEvents,
+    durability,
+    checkpointEveryUnconfirmedAppends:
+      durability === "checkpointed" ? checkpointEveryUnconfirmedAppends : undefined,
     audio: {
       frameMs,
       paceMs,
@@ -232,10 +242,17 @@ async function collectSelfEcho(args: {
 }
 
 function fireAndForgetAppend(rpc: RpcStub<StreamRpc>, event: StreamEventInput) {
-  const append = rpc.append({ event, durability: "best-effort" }) as unknown as {
+  const append = rpc.append({ event, durability: appendDurability() }) as unknown as {
     [Symbol.dispose](): void;
   };
   append[Symbol.dispose]();
+}
+
+function appendDurability() {
+  if (durability === "checkpointed") {
+    return { mode: durability, checkpointEveryUnconfirmedAppends };
+  }
+  return durability;
 }
 
 function buildAudioEvent(args: { publisher: string; frame: number; frameId: string }): StreamEventInput {
@@ -382,6 +399,13 @@ function nonNegativeInt(raw: string, name: string) {
     throw new Error(`${name} must be a non-negative integer`);
   }
   return value;
+}
+
+function parseDurability(raw: string): AppendDurabilityMode {
+  if (raw !== "confirmed" && raw !== "best-effort" && raw !== "checkpointed") {
+    throw new Error("durability must be confirmed, best-effort, or checkpointed");
+  }
+  return raw;
 }
 
 function parseArgs(argv: string[]) {
