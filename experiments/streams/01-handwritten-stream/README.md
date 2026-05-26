@@ -3,17 +3,17 @@
 This experiment explores a Cap'n Web RPC interface directly on a `Stream` Durable Object.
 
 See [design-goals.md](./design-goals.md) for the durability/throughput contract we are trying to make
-precise.
+precise, and [stream-design-notes.md](./stream-design-notes.md) for implementation notes.
 
 ## What we're trying to find out
 
-Can a `Stream` DO expose synchronous `append()` over Cap'n Web while making the durability trade-off
+Can a `Stream` DO expose `append()` over Cap'n Web while making the durability and egress trade-off
 explicit?
 
 The current API separates three modes:
 
-- `confirmed`: sync append code, but normal Durable Object output gates may hold RPC/WebSocket bytes
-  until writes are confirmed durable.
+- `confirmed`: `append()` waits for `storage.sync()` before resolving or broadcasting the new event,
+  while unrelated RPC/stream egress should keep flowing.
 - `best-effort`: `allowUnconfirmed: true` for fastest offset allocation and fan-out.
 - `checkpointed`: best-effort writes plus periodic `storage.sync()` barriers to bound the
   unconfirmed window.
@@ -53,8 +53,9 @@ pnpm run deploy
 - Tests should pass both locally and against the deployed worker.
 - Cap'n Web wire assertions should show no avoidable `pull` / `push` RPCs while subscribers receive
   live events.
-- Durability tests should keep the contracts distinct: `confirmed` may use output gates, while
-  `best-effort` and `checkpointed` expose offsets before an explicit `sync()` barrier completes.
+- Durability tests should keep the contracts distinct: `confirmed` waits before exposing the new
+  offset/event, while `best-effort` and `checkpointed` expose offsets before an explicit `sync()`
+  barrier completes.
 - Deployed-only fault probes should log the stream path, offsets, checkpoint timings, and Cloudflare
   ray IDs where available so failures can be traced in Cloudflare observability.
 

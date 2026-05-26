@@ -45,6 +45,13 @@ function expectContiguousOffsets(events: StreamEvent[], count: number) {
   );
 }
 
+async function expectReadTimesOut(
+  read: Promise<ReadableStreamReadResult<StreamEvent>>,
+  ms: number,
+) {
+  await expect(withTimeout(read, ms)).rejects.toThrow(/timed out/);
+}
+
 describe("handwritten stream capnweb", () => {
   it("append returns committed event over capnweb", async () => {
     const path = `stream-${crypto.randomUUID()}`;
@@ -417,6 +424,7 @@ describe("handwritten stream capnweb", () => {
       settings: {
         defaultAppendDurabilityMode: "confirmed",
         checkpointEveryUnconfirmedAppends: 100,
+        debugConfirmedSyncDelayMs: 0,
       },
       unconfirmedWriteCount: 0,
       checkpointInProgress: false,
@@ -590,5 +598,67 @@ describe("handwritten stream capnweb", () => {
       checkpointStartedCount: 1,
       checkpointCompletedCount: 1,
     });
+  });
+
+  it("lets unrelated RPC resolve while confirmed append waits for durability", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using writer = await withStream({ path });
+    await using probe = await withStream({ path });
+    await writer.rpc.patchSettings({ debugConfirmedSyncDelayMs: 300 });
+
+    const append = writer.rpc.append({
+      event: { type: "test.causal.confirmed", payload: { path } },
+      durability: "confirmed",
+    });
+
+    const winner = await Promise.race([
+      probe.rpc.ping().then(() => "ping"),
+      append.then(() => "append"),
+    ]);
+
+    expect(winner).toBe("ping");
+    expect(await append).toMatchObject({
+      type: "test.causal.confirmed",
+      offset: 1,
+      payload: { path },
+    });
+  });
+
+  it("lets subscribers drain old events but not the new confirmed event before durability", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const history: StreamEventInput[] = Array.from({ length: 3 }, (_, i) => ({
+      type: "test.causal.history",
+      payload: { n: i + 1 },
+    }));
+    const live: StreamEventInput = {
+      type: "test.causal.live",
+      payload: { marker: "must-not-leak-before-confirm" },
+    };
+
+    await using writer = await withStream({ path });
+    await writer.rpc.appendBatch({ events: history, durability: "best-effort" });
+    await writer.rpc.sync();
+    await writer.rpc.patchSettings({ debugConfirmedSyncDelayMs: 300 });
+
+    await using reader = await withStream({ path });
+    const readable = await reader.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+
+    const append = writer.rpc.append({ event: live, durability: "confirmed" });
+    const backlog = await readEvents(streamReader, history.length, 100);
+    expectContiguousOffsets(backlog, history.length);
+
+    const liveRead = streamReader.read();
+    await expectReadTimesOut(liveRead, 100);
+
+    const appended = await append;
+    expect(appended).toMatchObject({ offset: 4, payload: live.payload });
+
+    const delivered = await withTimeout(liveRead, 1_000);
+    expect(delivered.done).toBe(false);
+    expect(delivered.value).toMatchObject({ offset: 4, payload: live.payload });
+
+    streamReader.releaseLock();
   });
 });

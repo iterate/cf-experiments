@@ -17,9 +17,9 @@ export const StreamDoSettings = z.object({
   /**
    * Default acknowledgement/durability contract for `Stream.append()`.
    *
-   * - `confirmed`: writes use normal Durable Object output-gate semantics. `append()` still returns
-   *   synchronously to DO code, but RPC/WebSocket bytes that expose the offset can be held by the
-   *   platform until the write is confirmed durable.
+   * - `confirmed`: writes use `allowUnconfirmed: true`, then `append()` awaits an explicit
+   *   `storage.sync()` before resolving or broadcasting the new event. Unrelated RPC/stream egress is
+   *   not intentionally held by the append acknowledgement.
    * - `best-effort`: writes use `allowUnconfirmed: true`; `append()` exposes the offset as fast as
    *   possible, and durability is only eventual/best-effort until a later platform flush or explicit
    *   barrier.
@@ -40,6 +40,15 @@ export const StreamDoSettings = z.object({
    * delivered events wait behind the barrier.
    */
   checkpointEveryUnconfirmedAppends: z.number().int().positive().default(100),
+  /**
+   * Test-only fault-injection delay for confirmed appends.
+   *
+   * When non-zero, `Stream.append({ durability: "confirmed" })` waits this many milliseconds after
+   * allocating/writing the event but before `storage.sync()`. This creates a crisp window where the
+   * append is locally accepted but not durably acknowledged, so tests can prove unrelated egress can
+   * continue and event-specific egress does not leak.
+   */
+  debugConfirmedSyncDelayMs: z.number().int().nonnegative().default(0),
 });
 
 export type StreamDoSettings = z.infer<typeof StreamDoSettings>;

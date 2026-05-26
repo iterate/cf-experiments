@@ -54,7 +54,7 @@ export class Stream extends DurableObject {
     return this.#settings;
   }
 
-  append(args: { event: StreamEventInput; durability?: AppendDurability }): StreamEvent {
+  async append(args: { event: StreamEventInput; durability?: AppendDurability }): Promise<StreamEvent> {
     const kv = this.ctx.storage.kv;
     if (args.event.idempotencyKey !== undefined) {
       const existingOffset = kv.get<number>(`stream:idem:${args.event.idempotencyKey}`);
@@ -65,65 +65,75 @@ export class Stream extends DurableObject {
     }
 
     const durability = this.#resolveAppendDurability(args.durability);
-    const allowUnconfirmedWrites = durability.mode !== "confirmed";
     const committed = writeEventFromKv({
       storage: this.ctx.storage,
       input: args.event,
-      allowUnconfirmedWrites,
+      allowUnconfirmedWrites: true,
     });
+
+    /**
+     * Durability/egress contract for append.
+     *
+     * Every mode writes with `allowUnconfirmed: true`. That is deliberate: the
+     * default Durable Object output gate is global to outgoing messages after a
+     * write, so using it would also hold unrelated RPC responses and subscriber
+     * stream chunks behind this append. Cloudflare documents the default gate and
+     * the `allowUnconfirmed` opt-out here:
+     * https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#supported-options
+     *
+     * The confirmed mode rebuilds a narrower, append-causal acknowledgement:
+     *
+     * 1. Allocate the offset and enqueue the KV writes synchronously before the
+     *    first await (`writeEventFromKv` does the multi-key append plan).
+     * 2. Await `storage.sync()`, which Cloudflare documents as resolving once
+     *    pending writes, including `allowUnconfirmed` writes, have persisted:
+     *    https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#sync
+     * 3. Only after that barrier resolves do we broadcast the new event and
+     *    resolve the append RPC.
+     *
+     * This means unrelated DO work can still make progress while this async RPC
+     * method is suspended: for example a subscriber draining already-persisted
+     * backlog, or a `ping()` RPC that does not depend on this new offset. What we
+     * do NOT allow in confirmed mode is bytes about this just-appended event to
+     * leave before the explicit durability barrier completes.
+     *
+     * `best-effort` and `checkpointed` intentionally choose the opposite trade:
+     * broadcast and resolve immediately, accepting that a crash before a later
+     * platform flush / explicit `sync()` may lose those offsets. `checkpointed`
+     * adds periodic barriers to bound the window, but the append that triggers a
+     * checkpoint still returns before that checkpoint resolves.
+     */
+    if (durability.mode === "confirmed") {
+      await this.#delayForConfirmedAppendDebug();
+      await this.ctx.storage.sync();
+      this.#broadcast(committed);
+      return committed;
+    }
 
     this.#broadcast(committed);
 
-    /**
-     * IMPORTANT: `append()` is intentionally synchronous. Do not make it `async`.
-     *
-     * The durability modes are intentionally named by what the caller may
-     * believe after observing the returned offset:
-     *
-     * - `confirmed`: sync KV writes (`allowUnconfirmedWrites: false`) use normal
-     *   Durable Object output-gate semantics. DO code gets a `StreamEvent`
-     *   synchronously, but RPC/WebSocket bytes that expose the offset may be held
-     *   until Cloudflare confirms the writes durable.
-     * - `best-effort`: async KV writes use `allowUnconfirmed: true`; outgoing
-     *   bytes are not held by these writes, so the offset is only locally
-     *   accepted until a later platform flush or explicit `sync()`.
-     * - `checkpointed`: same fast egress as `best-effort`, plus periodic
-     *   explicit `storage.sync()` barriers to bound the unconfirmed window. The
-     *   append that fills the window still returns before the barrier resolves.
-     *
-     * Cloudflare docs:
-     * - `allowUnconfirmed`: by default outgoing network messages are paused
-     *   until previous writes are flushed; `allowUnconfirmed: true` opts out:
-     *   https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#supported-options
-     * - `sync()`: resolves once pending writes, including unconfirmed writes,
-     *   have been persisted:
-     *   https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#sync
-     * - `blockConcurrencyWhile()`: runs an async callback while blocking other
-     *   events from being delivered to this DO:
-     *   https://developers.cloudflare.com/durable-objects/api/state/#blockconcurrencywhile
-     *
-     * A checkpoint is a later durability barrier, not an acknowledgement for the
-     * current append. We enter `blockConcurrencyWhile()` synchronously, but do
-     * not await it here. That keeps `append()` sync while making later delivered
-     * events wait behind the checkpoint callback.
-     */
-    if (durability.mode !== "confirmed") {
-      this.#unconfirmedWriteCount += 1;
-      if (durability.mode === "checkpointed") {
-        this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedAppends);
-      }
+    this.#unconfirmedWriteCount += 1;
+    if (durability.mode === "checkpointed") {
+      this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedAppends);
     }
 
     return committed;
   }
 
-  appendBatch(args: { events: StreamEventInput[]; durability?: AppendDurability }): StreamEvent[] {
-    return args.events.map((event) => this.append({ event, durability: args.durability }));
+  async appendBatch(args: {
+    events: StreamEventInput[];
+    durability?: AppendDurability;
+  }): Promise<StreamEvent[]> {
+    const events: StreamEvent[] = [];
+    for (const event of args.events) {
+      events.push(await this.append({ event, durability: args.durability }));
+    }
+    return events;
   }
 
-  appendBatchDebug(args: { events: StreamEventInput[]; durability?: AppendDurability }) {
+  async appendBatchDebug(args: { events: StreamEventInput[]; durability?: AppendDurability }) {
     return {
-      events: this.appendBatch(args),
+      events: await this.appendBatch(args),
       durability: this.durabilityDebug(),
     };
   }
@@ -150,6 +160,13 @@ export class Stream extends DurableObject {
       checkpointInProgress: this.#checkpointInProgress,
       checkpointStartedCount: this.#checkpointStartedCount,
       checkpointCompletedCount: this.#checkpointCompletedCount,
+    };
+  }
+
+  ping() {
+    return {
+      incarnationId: this.#incarnationId,
+      t: Date.now(),
     };
   }
 
@@ -308,8 +325,23 @@ export class Stream extends DurableObject {
     this.#checkpointStartedCount += 1;
 
     void this.ctx.blockConcurrencyWhile(async () => {
-      // Let the current synchronous handler finish (notably appendBatch()) before
-      // deciding which unconfirmed append window this checkpoint should cover.
+      /**
+       * `blockConcurrencyWhile()` prevents later delivered events from entering
+       * the Durable Object while this callback is awaiting. Cloudflare calls out
+       * this use case for async operations where state must not change while the
+       * event loop yields:
+       * https://developers.cloudflare.com/durable-objects/api/state/#blockconcurrencywhile
+       *
+       * We only use that broad gate for checkpointed mode, not for confirmed
+       * append acknowledgement. A checkpoint is a stream-level throttle: once the
+       * unconfirmed append window is full, pause later delivered events until the
+       * explicit durability barrier has caught up.
+       */
+
+      // Let the current handler reach its next turn before deciding which
+      // unconfirmed append window this checkpoint should cover. In practice this
+      // lets a single appendBatch() finish allocating its offsets before the
+      // checkpoint snapshots the unconfirmed append count.
       await Promise.resolve();
 
       while (this.#unconfirmedWriteCount > 0) {
@@ -324,6 +356,15 @@ export class Stream extends DurableObject {
 
       this.#checkpointInProgress = false;
     });
+  }
+
+  async #delayForConfirmedAppendDebug(): Promise<void> {
+    const delayMs = this.settings.debugConfirmedSyncDelayMs;
+    if (delayMs === 0) return;
+    // Test-only delay: widens the gap between "event locally accepted" and
+    // "storage.sync() completed" so causal-egress tests can assert ordering
+    // without depending on natural SRS latency.
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
 }

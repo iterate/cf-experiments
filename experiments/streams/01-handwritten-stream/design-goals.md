@@ -5,8 +5,9 @@ durability, throughput, and outbound network timing are all first-class concerns
 
 ## Primary Goals
 
-`append()` must remain synchronous from the caller's point of view. It should return a committed
-`StreamEvent` with a new offset directly, not a `Promise<StreamEvent>`.
+`append()` is now async at the remote RPC boundary. The Durable Object should allocate offsets in a
+synchronous critical section, but a remote caller should receive the `StreamEvent` only when the
+selected durability mode says the offset is safe to observe.
 
 Streams must be configurable across an active durability/throughput spectrum:
 
@@ -19,10 +20,24 @@ Streams must be configurable across an active durability/throughput spectrum:
   durability checkpoint after a configured number of appends.
 
 Outbound network timing should be an explicit part of the contract. If the caller wants an observed
-offset to mean "confirmed durable", `confirmed` mode uses normal Durable Object output gates and may
-hold RPC/WebSocket bytes. If the caller wants outbound bytes to leave immediately, `best-effort` and
-`checkpointed` use `allowUnconfirmed: true`, but then the observed offset only means local acceptance
-until an explicit durability barrier completes.
+offset to mean "confirmed durable", `confirmed` mode waits on an explicit `storage.sync()` before
+resolving the append or broadcasting the new event. If the caller wants the fastest possible
+acknowledgement, `best-effort` and `checkpointed` expose offsets before an explicit durability barrier
+completes.
+
+The behavior we would prefer for most streams is more specific than the current implementation:
+
+- `append()` should return to its remote caller only after the appended offset is confirmed durable.
+- That durability wait should apply only to the append result and any work causally downstream of that
+  append.
+- Unrelated egress should keep flowing while the append write is being confirmed. For example, if a
+  stream has 100 subscribers and some are far behind the front of the log, those subscribers should be
+  able to keep receiving already-stored events while a new append is waiting for durability.
+- Other RPC calls into the same Durable Object that do not depend on the unconfirmed append should
+  still be able to receive responses.
+
+In other words: the desired primitive is a per-append / per-causal-chain durability gate, not the
+Durable Object's global output gate for all outgoing messages after a storage write.
 
 ## Platform Semantics This Design Depends On
 
@@ -38,25 +53,24 @@ should be committed as one storage batch.
 write buffer, including writes submitted with `allowUnconfirmed`, have persisted.
 
 `ctx.blockConcurrencyWhile()` is not a durability acknowledgement to the current caller. It is useful
-for preventing later events from entering the Durable Object while a checkpoint is in progress, but a
-synchronous `append()` that starts `blockConcurrencyWhile(async () => storage.sync())` and then returns
-has still returned before the checkpoint has resolved.
+for preventing later events from entering the Durable Object while a checkpoint is in progress, but it
+is the wrong primitive for `confirmed` append acknowledgement because it blocks unrelated delivered
+events too broadly.
 
 ## Open Design Tension
 
-There are three desirable properties that may not all be compatible in one method shape:
+The old sync-append shape could not satisfy all three desirable properties:
 
-- `append()` is synchronous.
+- `append()` returns a concrete event to the remote caller immediately.
 - durable mode means "returned offset is already durably confirmed."
-- durable writes do not hold outbound network bytes via the platform output gate.
+- durability waits only gate the append result and causally downstream work, not unrelated outbound
+  bytes from the same Durable Object.
 
-If `append()` cannot be `async`, then `await storage.sync()` cannot happen inside the returned method.
-The likely escape hatch is to move the durability wait to an earlier boundary:
+Making `append()` async is the escape hatch:
 
-- a stream-level policy can block entering the next append until the previous checkpoint has finished;
-- `append()` can synchronously return only after observing that no unconfirmed appends are outstanding;
-- the call that fills a durability window may trigger a checkpoint that delays later appends, but it
-  cannot truthfully claim its own returned offset was confirmed unless the method blocks somehow.
+- allocate the offset and write storage keys before the first `await`;
+- for `confirmed`, wait on `storage.sync()` before resolving the append or broadcasting the new event;
+- for `best-effort` / `checkpointed`, return and broadcast without waiting for that barrier.
 
 This distinction matters for the API contract. "Run a checkpoint every N unconfirmed appends" is
 weaker than "this append's returned offset is confirmed before the caller observes it."
@@ -82,18 +96,17 @@ append({ event, durability: { mode: "checkpointed", checkpointEveryUnconfirmedAp
 ```
 
 The intentionally sharp edge is `confirmed`: this is the only mode where observing the returned offset
-over RPC can mean "Cloudflare confirmed the writes durable", and it gets that guarantee from normal
-Durable Object output gates. `best-effort` and `checkpointed` use `allowUnconfirmed: true`, so outbound
-bytes are not held by storage writes, but their returned offsets only mean local acceptance until an
-explicit barrier completes.
+over RPC can mean "Cloudflare confirmed the writes durable". It gets that guarantee by writing with
+`allowUnconfirmed: true`, then awaiting `storage.sync()` before resolving or broadcasting.
+`best-effort` and `checkpointed` use the same unconfirmed write path, but their returned offsets only
+mean local acceptance until an explicit barrier completes.
 
-This means there is no mode that simultaneously provides all three properties:
+This means the implemented API can provide all three desired properties for `confirmed`, with one
+important caveat: while `storage.sync()` is actually pending, Cloudflare input-gate behavior may still
+limit which later events are delivered. The debug delay creates a crisp test window before `sync()` so
+we can prove the causal contract around our own code.
 
-- `append()` is synchronous;
-- outbound bytes are never held by storage writes;
-- the returned offset is already durably confirmed when observed by a remote caller.
-
-The API keeps those trade-offs explicit instead of naming a periodic checkpoint "confirmed".
+The API keeps the remaining trade-offs explicit instead of naming a periodic checkpoint "confirmed".
 
 ## Test Strategy
 
@@ -101,9 +114,8 @@ Unit/integration tests should separate three claims that are easy to conflate.
 
 ### 1. Append API Shape
 
-Assert that `append()` and `appendBatch()` still return synchronously from the RPC target's point of
-view. If the implementation needs an async method for confirmed durability, that should be an explicit
-new API rather than an accidental change to `append()`.
+Assert that `append()` and `appendBatch()` allocate offsets in order, but that confirmed append RPCs do
+not resolve until the durability barrier completes.
 
 ### 2. Output-Gate Independence
 
