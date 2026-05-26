@@ -1,6 +1,19 @@
-import type { StreamEventInput } from "@cf-experiments/shared/event";
+import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { describe, expect, it } from "vitest";
 import { withProject } from "./lib/with-project.js";
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
+function decodeStreamEvent(chunk: Uint8Array): StreamEvent {
+  return JSON.parse(new TextDecoder().decode(chunk)) as StreamEvent;
+}
 
 describe("handwritten stream capnweb", () => {
   it("pipelines dependent calls without pulling intermediate promises", async () => {
@@ -162,4 +175,62 @@ describe("handwritten stream capnweb", () => {
     expect(analysis.waves).toHaveLength(1);
     expect(analysis.resultWaits[0]?.awaitedPromiseIds).toEqual([-1, -2]);
   });
+
+  it(
+    "receives live appends on a separate connection with no read-side outbound traffic",
+    async () => {
+      const path = `stream-${crypto.randomUUID()}`;
+      const events: StreamEventInput[] = [
+        { type: "test.stream", payload: { n: 1 } },
+        { type: "test.stream", payload: { n: 2 } },
+      ];
+
+      await using reader = await withProject({ projectId: "vitest" });
+
+      // Cap'n Web pass-by-value types include ReadableStream:
+      // https://github.com/cloudflare/capnweb/blob/main/README.md#pass-by-value-types
+      //
+      // Chunks are NDJSON bytes: DO -> worker uses Workers native byte streams; capnweb
+      // forwards ReadableStream<Uint8Array> to the client unchanged.
+      const readable = await reader.rpc.streams.get(path).stream();
+      const streamReader = readable.getReader();
+      const outboundAfterSubscribe = reader.wsMessages.length;
+
+      const firstRead = streamReader.read();
+      const secondRead = streamReader.read();
+
+      await using writer = await withProject({ projectId: "vitest" });
+      await writer.rpc.streams.get(path).appendBatch({ events });
+
+      const first = await withTimeout(firstRead, 500);
+      expect(first.done).toBe(false);
+      expect(decodeStreamEvent(first.value!)).toMatchObject({
+        type: events[0].type,
+        offset: 1,
+        payload: events[0].payload,
+        createdAt: expect.any(String),
+      });
+
+      const second = await withTimeout(secondRead, 500);
+      expect(second.done).toBe(false);
+      expect(decodeStreamEvent(second.value!)).toMatchObject({
+        type: events[1].type,
+        offset: 2,
+        payload: events[1].payload,
+        createdAt: expect.any(String),
+      });
+
+      const outboundWhileReading = reader.wsMessages
+        .slice(outboundAfterSubscribe)
+        .filter((frame) => frame.direction === "out")
+        .map((frame) => JSON.parse(frame.data))
+        .filter((data) => data[0] === "pull" || data[0] === "push");
+      // Stream chunks arrive server-push; the client may still send `resolve` acks
+      // for capnweb stream flow control, but must not pull each event as RPC.
+      expect(outboundWhileReading).toEqual([]);
+
+      streamReader.releaseLock();
+    },
+    2_000,
+  );
 });

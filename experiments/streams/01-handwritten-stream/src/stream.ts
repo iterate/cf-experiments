@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
   countStreamEventsFromKv,
   readEventByIdempotencyKeyFromKv,
-  STREAM_EVENT_UNCONFIRMED_KV_PUT,
+  readEventByOffsetFromKv,
   STREAM_EVENTS_META_NEXT_OFFSET_KEY,
   type StreamEvent,
   type StreamEventInput,
@@ -21,6 +21,8 @@ import {
 export class Stream extends DurableObject {
   #settings = streamDoSettingsDefaults();
   #unconfirmedWrites = 0;
+  #streamControllers = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  #textEncoder = new TextEncoder();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -64,13 +66,12 @@ export class Stream extends DurableObject {
       throw new Error(`Offset precondition failed: expected ${nextOffset}, got ${event.offset}`);
     }
 
-    const committed = {
+    const committed = streamEventInputToCommitted({
       input: event,
       offset: nextOffset,
       createdAt: new Date().toISOString(),
-    };
+    });
 
-    // Write to sqlite table
     // We use the lower level kv API because it allows us to set { allowUnconfirmed: true } .
     // That way we can decide when to call .sync() to persist the writes to other machines.
     // This is controlled by settings.maxUnconfirmedWrites.
@@ -96,13 +97,10 @@ export class Stream extends DurableObject {
       noCache: false,
     });
 
-    // This is where I think we'd immediately broadcast to all websocket listeners
+    this.#broadcast(this.#textEncoder.encode(`${JSON.stringify(committed)}\n`));
 
     this.checkpointIfUnconfirmedWindowIsFull();
-    return {
-      ...committed,
-      type: event.type,
-    };
+    return committed;
   }
 
   appendBatch(args: { events: StreamEventInput[] }): StreamEvent[] {
@@ -113,8 +111,86 @@ export class Stream extends DurableObject {
     return { kv: countStreamEventsFromKv({ kv: this.ctx.storage.kv }) };
   }
 
+  /**
+   * Live event feed; replays committed history, then pushes each new append.
+   *
+   * ## Wire format: NDJSON `Uint8Array` chunks, not `StreamEvent` objects
+   *
+   * Cap'n Web docs say ReadableStreams can carry "arbitrarily-typed chunks" — and they
+   * can, **when the stream never crosses Workers native RPC**. Our call path has two hops:
+   *
+   *   vitest client  --capnweb websocket-->  worker (`ProjectCapability`)
+   *                                           --DO stub (Workers RPC)-->  `Stream` DO
+   *
+   * 1. **Cap'n Web** (client ↔ worker): JSON pipe per chunk; object chunks work if created
+   *    in the worker isolate. See capnweb `__tests__/index.test.ts` "supports complex chunk
+   *    types" and protocol.md (`write(chunk)` accepts any RPC-compatible value).
+   *
+   * 2. **Workers native RPC** (worker ↔ DO stub): `ReadableStream` is serialized as a
+   *    Cap'n Proto **ByteStream** — bytes only. Docs:
+   *    https://developers.cloudflare.com/workers/runtime-apis/rpc/#readablestream-writeablestream-request-and-response
+   *    workerd enforces this in `ReadableStream::serialize()` → `pumpTo()`; object chunks
+   *    throw `This ReadableStream did not return bytes`, and open byte pipes that end early
+   *    throw `ReadableStream received over RPC disconnected prematurely`.
+   *
+   * Because `StreamRpcTarget` wraps `DurableObjectStub<Stream>` (`makeRpcTargetClass`),
+   * `stream()` runs inside the DO but the **returned** `ReadableStream` is proxied back
+   * through the stub before Cap'n Web can forward it to the client. That middle hop is
+   * Workers RPC, not Cap'n Web — so chunks must be `Uint8Array` (or other byte views).
+   *
+   * We encode each `StreamEvent` as one NDJSON line (`JSON.stringify(event)\n`). Cap'n Web
+   * then forwards `ReadableStream<Uint8Array>` to websocket clients unchanged; clients
+   * decode with `TextDecoder` + `JSON.parse`. Stream flow-control `resolve` acks on the
+   * websocket are normal; what we avoid is per-event `pull`/`push` RPC round trips.
+   *
+   * ## In-memory fan-out
+   *
+   * `#streamControllers` holds every open subscription on this DO. `append()` broadcasts
+   * the same encoded chunk to all of them so a writer on connection A can push events to
+   * a reader that called `stream()` on connection B (same `projectId` + stream path).
+   *
+   * To use object chunks end-to-end you'd need `stream()` to live in the **worker** isolate
+   * (same isolate as the Cap'n Web session), with a separate DO→worker notification path
+   * that does not return a `ReadableStream` across the stub.
+   */
+  stream(): ReadableStream<Uint8Array> {
+    const kv = this.ctx.storage.kv;
+    const latestOffset = countStreamEventsFromKv({ kv });
+
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    return new ReadableStream<Uint8Array>({
+      start: (streamController) => {
+        controller = streamController;
+        this.#streamControllers.add(streamController);
+        for (let offset = 1; offset <= latestOffset; offset++) {
+          const event = readEventByOffsetFromKv({ kv, offset });
+          if (event !== null) {
+            streamController.enqueue(this.#textEncoder.encode(`${JSON.stringify(event)}\n`));
+          }
+        }
+      },
+      cancel: () => {
+        if (controller !== undefined) {
+          this.#streamControllers.delete(controller);
+        }
+      },
+    });
+  }
+
   getCapability(_policy?: unknown) {
     return new StreamRpcTarget(this);
+  }
+
+  #broadcast(chunk: Uint8Array): void {
+    for (const controller of this.#streamControllers) {
+      try {
+        controller.enqueue(chunk);
+      } catch (error) {
+        console.error("Error broadcasting event to controller", error);
+        this.#streamControllers.delete(controller);
+      }
+    }
   }
 
   private checkpointIfUnconfirmedWindowIsFull(): void {
