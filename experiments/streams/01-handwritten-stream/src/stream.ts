@@ -316,11 +316,13 @@ export class Stream extends DurableObject {
           sessionSubscribers,
         };
         /**
-         * Register before replay and keep the same subscriber for live fan-out.
-         * The multi-subscriber and live-stream tests fail if each reader is not
-         * added to `#streamSubscribers`, if `#broadcast()` does not fan out to
-         * all registered subscribers, or if replay is not delivered through the
-         * same enqueue path as live events.
+         * Keep one subscriber object for replay and live fan-out. Replay is
+         * synchronous, so "before vs after replay registration" is not itself a
+         * meaningful race boundary; the observable contract is that each stream
+         * is registered exactly once for later live broadcasts and that replay
+         * uses the same enqueue/error-cleanup path as live delivery. The
+         * multi-subscriber, replay/live, and enqueue-error tests in
+         * `scripts/stream-capnweb.test.ts` fail if those properties change.
          */
         this.#streamSubscribers.add(subscriber);
         sessionSubscribers?.add(subscriber);

@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-26 23:25 UTC+1
+
+- Tightened the replay/live fan-out language in `stream.ts` and `design.md`. The previous wording
+  treated "register before replay" as a sharp race boundary, but replay is synchronous and contains no
+  `await`, so another append cannot interleave in the middle of replay. The real invariant is:
+  capture one replay boundary, register each stream once for later live fan-out, and use the same
+  enqueue/error-cleanup path for replay and live events.
+- Local verification: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck` and
+  `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 32 tests.
+- Deployed version `8e527595-9e4a-4594-b8d2-77a0bc4f64e5`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/01-handwritten-stream test`
+  passed with 32 tests.
+
 ## 2026-05-26 23:23 UTC+1
 
 - Mutation-checked the two checkpoint scheduling early-return guards:
