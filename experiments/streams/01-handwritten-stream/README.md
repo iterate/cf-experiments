@@ -55,6 +55,13 @@ node scripts/audio-chaos-benchmark.ts \
   --measure-append-ack
 ```
 
+Run the same audio-shaped benchmark from Durable Objects, so local WiFi/browser/Node networking is
+not in the publisher/subscriber timing path:
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?publishers=10&subscribers=36&slow-subscribers=1&frames-per-publisher=50&pace-ms=20&durability=best-effort&checkpoint-every=100&measure-append-ack=true'
+```
+
 Deploy current code:
 
 ```sh
@@ -72,5 +79,8 @@ pnpm run deploy
 - Audio-shaped benchmark output should be read as latency evidence, not just pass/fail:
   `allSubscribersLatencyMs` measures append-to-all-active-subscribers, and
   `publisherSelfEchoLatencyMs` measures same-session append-to-own-stream delivery under load.
+- The `/benchmark/audio-chaos` route reports `*CreatedAtLatencyMs` from the stream DO's committed
+  event timestamp to delivery inside runner DOs. Use it when local network quality could contaminate
+  the external WebSocket benchmark.
 - Deployed-only fault probes should log the stream path, offsets, checkpoint timings, and Cloudflare
   ray IDs where available so failures can be traced in Cloudflare observability.

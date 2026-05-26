@@ -1,7 +1,16 @@
 import { DurableObject } from "cloudflare:workers";
-import type { StreamEventInput } from "@cf-experiments/shared/event";
+import { newWebSocketRpcSession, type RpcStub } from "capnweb";
+import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import type { StreamRpc } from "./stream.js";
 
 export type BenchmarkMode = "rpc-serial" | "rpc-batch" | "rpc-pipelined";
+type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
+type AppendDurability =
+  | AppendDurabilityMode
+  | {
+      mode: AppendDurabilityMode;
+      checkpointEveryUnconfirmedAppends?: number;
+    };
 
 export type RunBenchmarkArgs = {
   stream: string;
@@ -24,6 +33,124 @@ export type BenchmarkResult = {
   serverMaxOffset: number;
   runId: string;
   dispatchMs?: number;
+};
+
+export type RunAudioChaosArgs = {
+  stream?: string;
+  runId?: string;
+  publishers?: number;
+  subscribers?: number;
+  slowSubscribers?: number;
+  framesPerPublisher?: number;
+  frameMs?: number;
+  paceMs?: number;
+  sampleRate?: number;
+  channels?: number;
+  bytesPerSample?: number;
+  timeoutMs?: number;
+  durability?: AppendDurabilityMode;
+  checkpointEveryUnconfirmedAppends?: number;
+  measureAppendAck?: boolean;
+};
+
+type AudioChaosConfig = {
+  stream: string;
+  runId: string;
+  publishers: number;
+  subscribers: number;
+  slowSubscribers: number;
+  framesPerPublisher: number;
+  frameMs: number;
+  paceMs: number;
+  sampleRate: number;
+  channels: number;
+  bytesPerSample: number;
+  timeoutMs: number;
+  durability: AppendDurabilityMode;
+  checkpointEveryUnconfirmedAppends: number;
+  measureAppendAck: boolean;
+};
+
+type AudioSample = {
+  frameId: string;
+  latencyMs: number;
+};
+
+type AudioSubscriberResult = {
+  runner: string;
+  subscriber: string;
+  received: number;
+  samples: AudioSample[];
+  latencyMs: Summary;
+};
+
+type AudioPublisherResult = {
+  runner: string;
+  publisher: number;
+  sent: number;
+  elapsedMs: number;
+  appendAckLatencyMs: Summary;
+  selfEchoLatencyMs: Summary;
+  ackToSelfEchoLatencyMs: Summary;
+};
+
+export type AudioChaosResult = {
+  type: "audio-chaos-benchmark-result";
+  runner: string;
+  streamPath: string;
+  runId: string;
+  publishers: number;
+  subscribers: number;
+  slowSubscribers: number;
+  framesPerPublisher: number;
+  totalEvents: number;
+  durability: AppendDurabilityMode;
+  measureAppendAck: boolean;
+  checkpointEveryUnconfirmedAppends?: number;
+  audio: {
+    frameMs: number;
+    paceMs: number;
+    sampleRate: number;
+    channels: number;
+    bytesPerSample: number;
+    rawFrameBytes: number;
+    base64Chars: number;
+  };
+  elapsedMs: number;
+  eventsPerSecond: number;
+  subscriberCreatedAtLatencyMs: Summary;
+  firstSubscriberCreatedAtLatencyMs: Summary;
+  allSubscribersCreatedAtLatencyMs: Summary;
+  publisherSelfEchoCreatedAtLatencyMs: Summary;
+  publisherAppendAckLatencyMs: Summary;
+  publisherAckToSelfEchoLatencyMs: Summary;
+  subscriberResults: Pick<AudioSubscriberResult, "subscriber" | "received" | "latencyMs">[];
+  publisherResults: Pick<
+    AudioPublisherResult,
+    | "publisher"
+    | "sent"
+    | "elapsedMs"
+    | "appendAckLatencyMs"
+    | "selfEchoLatencyMs"
+    | "ackToSelfEchoLatencyMs"
+  >[];
+  serverDebug: unknown;
+};
+
+type Summary = {
+  count: number;
+  min: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  max: number;
+  avg: number;
+};
+
+type StreamRpcFixture = {
+  rpc: RpcStub<StreamRpc>;
+  webSocket: WebSocket;
+  dispose(): void;
 };
 
 export class BenchmarkRunner extends DurableObject {
@@ -81,6 +208,291 @@ export class BenchmarkRunner extends DurableObject {
       ...(dispatchMs !== undefined ? { dispatchMs } : {}),
     };
   }
+
+  async runAudioChaos(args: RunAudioChaosArgs): Promise<AudioChaosResult> {
+    const config = normalizeAudioChaosConfig(args);
+    const totalEvents = config.publishers * config.framesPerPublisher;
+    const audio = makeAudioFixture(config);
+    const stream = this.env.STREAM.getByName(config.stream);
+    await stream.patchSettings({
+      defaultAppendDurabilityMode: config.durability,
+      checkpointEveryUnconfirmedAppends: config.checkpointEveryUnconfirmedAppends,
+    });
+
+    /**
+     * This benchmark deliberately runs publisher/subscriber clients in separate
+     * BenchmarkRunner Durable Objects, then connects them to the Stream DO over
+     * the same Cap'n Web WebSocket endpoint external clients use. That keeps
+     * laptop WiFi out of the timing path without switching to native DO RPC,
+     * whose typed `ReadableStream` support is byte-stream-oriented rather than
+     * our pass-by-value `StreamEvent` chunks.
+     */
+    const activeSubscribers = Array.from({ length: config.subscribers }, (_, i) =>
+      this.env.BENCHMARK_RUNNER.getByName(`${config.runId}:subscriber:${i}`).runAudioSubscriber({
+        ...config,
+        subscriber: `active-${i}`,
+      }),
+    );
+
+    const passiveSubscribers = Array.from({ length: config.slowSubscribers }, (_, i) =>
+      this.env.BENCHMARK_RUNNER.getByName(`${config.runId}:passive:${i}`).runAudioPassiveSubscriber(
+        {
+          ...config,
+          subscriber: `passive-${i}`,
+          holdMs: config.framesPerPublisher * Math.max(config.paceMs, 1) + 3_000,
+        },
+      ),
+    );
+
+    // Give every subscriber DO a chance to attach before publishers start appending.
+    await sleep(250);
+
+    const publishStartedAt = Date.now();
+    const publishers = Array.from({ length: config.publishers }, (_, publisher) =>
+      this.env.BENCHMARK_RUNNER.getByName(`${config.runId}:publisher:${publisher}`).runAudioPublisher(
+        {
+          ...config,
+          audio,
+          publisher,
+          selfEcho: publisher === 0,
+        },
+      ),
+    );
+
+    const [subscriberResults, publisherResults] = await Promise.all([
+      Promise.all(activeSubscribers),
+      Promise.all(publishers),
+    ]);
+    await Promise.allSettled(passiveSubscribers);
+
+    const elapsedMs = Date.now() - publishStartedAt;
+    const frameLatencies = new Map<string, number[]>();
+    for (const subscriber of subscriberResults) {
+      for (const sample of subscriber.samples) {
+        const latencies = frameLatencies.get(sample.frameId) ?? [];
+        latencies.push(sample.latencyMs);
+        frameLatencies.set(sample.frameId, latencies);
+      }
+    }
+
+    const subscriberLatencies = subscriberResults.flatMap((subscriber) =>
+      subscriber.samples.map((sample) => sample.latencyMs),
+    );
+    const firstSubscriberLatencies = Array.from(frameLatencies.values(), (latencies) =>
+      Math.min(...latencies),
+    );
+    const allSubscriberLatencies = Array.from(frameLatencies.values(), (latencies) =>
+      latencies.length === config.subscribers ? Math.max(...latencies) : 0,
+    ).filter((latency) => latency > 0);
+    const selfEchoPublisher = publisherResults.find((publisher) => publisher.publisher === 0);
+    const serverDebug = await stream.debug();
+
+    return {
+      type: "audio-chaos-benchmark-result",
+      runner: this.ctx.id.name ?? this.ctx.id.toString(),
+      streamPath: config.stream,
+      runId: config.runId,
+      publishers: config.publishers,
+      subscribers: config.subscribers,
+      slowSubscribers: config.slowSubscribers,
+      framesPerPublisher: config.framesPerPublisher,
+      totalEvents,
+      durability: config.durability,
+      measureAppendAck: config.measureAppendAck,
+      ...(config.durability === "checkpointed"
+        ? { checkpointEveryUnconfirmedAppends: config.checkpointEveryUnconfirmedAppends }
+        : {}),
+      audio: {
+        frameMs: config.frameMs,
+        paceMs: config.paceMs,
+        sampleRate: config.sampleRate,
+        channels: config.channels,
+        bytesPerSample: config.bytesPerSample,
+        rawFrameBytes: audio.rawFrameBytes,
+        base64Chars: audio.base64.length,
+      },
+      elapsedMs,
+      eventsPerSecond: totalEvents / (elapsedMs / 1_000),
+      subscriberCreatedAtLatencyMs: summarize(subscriberLatencies),
+      firstSubscriberCreatedAtLatencyMs: summarize(firstSubscriberLatencies),
+      allSubscribersCreatedAtLatencyMs: summarize(allSubscriberLatencies),
+      publisherSelfEchoCreatedAtLatencyMs: selfEchoPublisher?.selfEchoLatencyMs ?? summarize([]),
+      publisherAppendAckLatencyMs: selfEchoPublisher?.appendAckLatencyMs ?? summarize([]),
+      publisherAckToSelfEchoLatencyMs: selfEchoPublisher?.ackToSelfEchoLatencyMs ?? summarize([]),
+      subscriberResults: subscriberResults.map(({ subscriber, received, latencyMs }) => ({
+        subscriber,
+        received,
+        latencyMs,
+      })),
+      publisherResults: publisherResults.map(
+        ({
+          publisher,
+          sent,
+          elapsedMs: publisherElapsedMs,
+          appendAckLatencyMs,
+          selfEchoLatencyMs,
+          ackToSelfEchoLatencyMs,
+        }) => ({
+          publisher,
+          sent,
+          elapsedMs: publisherElapsedMs,
+          appendAckLatencyMs,
+          selfEchoLatencyMs,
+          ackToSelfEchoLatencyMs,
+        }),
+      ),
+      serverDebug,
+    };
+  }
+
+  async runAudioSubscriber(
+    args: AudioChaosConfig & { subscriber: string },
+  ): Promise<AudioSubscriberResult> {
+    const fixture = await connectStreamRpc(this.env, args.stream);
+    const reader = await objectStreamReader(fixture.rpc);
+    const samples: AudioSample[] = [];
+    try {
+      for (let received = 0; received < args.publishers * args.framesPerPublisher; received += 1) {
+        const result = await withTimeout(reader.read(), args.timeoutMs);
+        if (result.done) throw new Error(`${args.subscriber} stream ended early`);
+        samples.push({
+          frameId: readFrameId(result.value),
+          latencyMs: Math.max(0, Date.now() - Date.parse(result.value.createdAt)),
+        });
+      }
+    } finally {
+      reader.releaseLock();
+      fixture.dispose();
+    }
+
+    return {
+      runner: this.ctx.id.name ?? this.ctx.id.toString(),
+      subscriber: args.subscriber,
+      received: samples.length,
+      samples,
+      latencyMs: summarize(samples.map((sample) => sample.latencyMs)),
+    };
+  }
+
+  async runAudioPassiveSubscriber(args: AudioChaosConfig & { subscriber: string; holdMs: number }) {
+    const fixture = await connectStreamRpc(this.env, args.stream);
+    await fixture.rpc.stream();
+    try {
+      await sleep(args.holdMs);
+      return {
+        runner: this.ctx.id.name ?? this.ctx.id.toString(),
+        subscriber: args.subscriber,
+        heldMs: args.holdMs,
+      };
+    } finally {
+      fixture.dispose();
+    }
+  }
+
+  async runAudioPublisher(
+    args: AudioChaosConfig & {
+      audio: AudioFixture;
+      publisher: number;
+      selfEcho: boolean;
+    },
+  ): Promise<AudioPublisherResult> {
+    const fixture = await connectStreamRpc(this.env, args.stream);
+    const appendPromises: Promise<StreamEvent>[] = [];
+    const ackLatencyByFrame = new Map<string, number>();
+    const ackAtByFrame = new Map<string, number>();
+    const selfEchoLatencyByFrame = new Map<string, number>();
+    const selfEchoAtByFrame = new Map<string, number>();
+    const selfEcho =
+      args.selfEcho
+        ? this.collectAudioSelfEcho({
+            ...args,
+            rpc: fixture.rpc,
+            selfEchoLatencyByFrame,
+            selfEchoAtByFrame,
+          })
+        : Promise.resolve();
+
+    try {
+      const startedAt = Date.now();
+      for (let frame = 1; frame <= args.framesPerPublisher; frame += 1) {
+        const frameId = `p${args.publisher}-f${frame}`;
+        const appendStartedAt = Date.now();
+        const append = fixture.rpc.append({
+          event: buildAudioEvent({
+            config: args,
+            audio: args.audio,
+            publisher: String(args.publisher),
+            frame,
+            frameId,
+          }),
+          durability: appendDurability(args),
+        });
+        appendPromises.push(
+          append.then((event) => {
+            if (args.measureAppendAck && args.publisher === 0) {
+              const ackAt = Date.now();
+              ackLatencyByFrame.set(frameId, ackAt - appendStartedAt);
+              ackAtByFrame.set(frameId, ackAt);
+            }
+            return event;
+          }),
+        );
+        if (args.paceMs > 0) {
+          const nextFrameAt = startedAt + frame * args.paceMs;
+          await sleep(Math.max(0, nextFrameAt - Date.now()));
+        }
+      }
+
+      await Promise.all(appendPromises);
+      await selfEcho;
+      const elapsedMs = Date.now() - startedAt;
+      const ackToSelfEchoLatencyMs =
+        args.measureAppendAck && args.publisher === 0
+          ? Array.from(ackAtByFrame, ([frameId, ackAt]) => {
+              const selfEchoAt = selfEchoAtByFrame.get(frameId);
+              return selfEchoAt === undefined ? 0 : selfEchoAt - ackAt;
+            }).filter((latency) => latency >= 0)
+          : [];
+
+      return {
+        runner: this.ctx.id.name ?? this.ctx.id.toString(),
+        publisher: args.publisher,
+        sent: args.framesPerPublisher,
+        elapsedMs,
+        appendAckLatencyMs: summarize(Array.from(ackLatencyByFrame.values())),
+        selfEchoLatencyMs: summarize(Array.from(selfEchoLatencyByFrame.values())),
+        ackToSelfEchoLatencyMs: summarize(ackToSelfEchoLatencyMs),
+      };
+    } finally {
+      fixture.dispose();
+    }
+  }
+
+  private async collectAudioSelfEcho(args: AudioChaosConfig & {
+    rpc: RpcStub<StreamRpc>;
+    selfEchoLatencyByFrame: Map<string, number>;
+    selfEchoAtByFrame: Map<string, number>;
+    publisher: number;
+  }) {
+    const reader = await objectStreamReader(args.rpc);
+    try {
+      for (let delivered = 0; delivered < args.publishers * args.framesPerPublisher; delivered += 1) {
+        const result = await withTimeout(reader.read(), args.timeoutMs);
+        if (result.done) throw new Error("publisher self-echo stream ended early");
+        const frameId = readFrameId(result.value);
+        if (frameId.startsWith(`p${args.publisher}-`)) {
+          const selfEchoAt = Date.now();
+          args.selfEchoAtByFrame.set(frameId, selfEchoAt);
+          args.selfEchoLatencyByFrame.set(
+            frameId,
+            Math.max(0, selfEchoAt - Date.parse(result.value.createdAt)),
+          );
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
 }
 
 function buildEvent(n: number, runId: string, payloadBytes: number): StreamEventInput {
@@ -89,4 +501,140 @@ function buildEvent(n: number, runId: string, payloadBytes: number): StreamEvent
     payload: { n, runId, pad: "x".repeat(Math.max(0, payloadBytes)) },
     metadata: { runId },
   };
+}
+
+type AudioFixture = {
+  rawFrameBytes: number;
+  base64: string;
+};
+
+function normalizeAudioChaosConfig(args: RunAudioChaosArgs): AudioChaosConfig {
+  return {
+    stream: args.stream ?? `audio-chaos-${crypto.randomUUID().slice(0, 8)}`,
+    runId: args.runId ?? crypto.randomUUID(),
+    publishers: args.publishers ?? 10,
+    subscribers: args.subscribers ?? 36,
+    slowSubscribers: args.slowSubscribers ?? 0,
+    framesPerPublisher: args.framesPerPublisher ?? 50,
+    frameMs: args.frameMs ?? 20,
+    paceMs: args.paceMs ?? 0,
+    sampleRate: args.sampleRate ?? 24_000,
+    channels: args.channels ?? 1,
+    bytesPerSample: args.bytesPerSample ?? 2,
+    timeoutMs: args.timeoutMs ?? 30_000,
+    durability: args.durability ?? "best-effort",
+    checkpointEveryUnconfirmedAppends: args.checkpointEveryUnconfirmedAppends ?? 100,
+    measureAppendAck: args.measureAppendAck ?? false,
+  };
+}
+
+function makeAudioFixture(config: AudioChaosConfig): AudioFixture {
+  const rawFrameBytes = Math.ceil(
+    (config.sampleRate * config.frameMs * config.channels * config.bytesPerSample) / 1_000,
+  );
+  return {
+    rawFrameBytes,
+    base64: btoa(String.fromCharCode(...new Uint8Array(rawFrameBytes).fill(0x7f))),
+  };
+}
+
+function appendDurability(config: AudioChaosConfig): AppendDurability {
+  if (config.durability === "checkpointed") {
+    return {
+      mode: config.durability,
+      checkpointEveryUnconfirmedAppends: config.checkpointEveryUnconfirmedAppends,
+    };
+  }
+  return config.durability;
+}
+
+function buildAudioEvent(args: {
+  config: AudioChaosConfig;
+  audio: AudioFixture;
+  publisher: string;
+  frame: number;
+  frameId: string;
+}): StreamEventInput {
+  return {
+    type: "benchmark.audio-frame",
+    payload: {
+      runId: args.config.runId,
+      frameId: args.frameId,
+      publisher: args.publisher,
+      frame: args.frame,
+      codec: "pcm16-base64",
+      sampleRate: args.config.sampleRate,
+      frameMs: args.config.frameMs,
+      audio: args.audio.base64,
+    },
+    metadata: { runId: args.config.runId },
+  };
+}
+
+function readFrameId(event: StreamEvent) {
+  if (
+    event.payload === null ||
+    typeof event.payload !== "object" ||
+    !("frameId" in event.payload) ||
+    typeof event.payload.frameId !== "string"
+  ) {
+    throw new Error(`event ${event.offset} did not contain a frameId`);
+  }
+  return event.payload.frameId;
+}
+
+async function connectStreamRpc(env: Env, stream: string): Promise<StreamRpcFixture> {
+  const response = await env.STREAM.getByName(stream).fetch("https://stream.internal/", {
+    headers: { Upgrade: "websocket" },
+  });
+  const webSocket = response.webSocket;
+  if (webSocket === null) throw new Error("stream DO did not return a WebSocket");
+  webSocket.accept();
+  const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
+  return {
+    rpc,
+    webSocket,
+    dispose() {
+      rpc[Symbol.dispose]();
+      webSocket.close();
+    },
+  };
+}
+
+async function objectStreamReader(rpc: RpcStub<StreamRpc>) {
+  const readable = await rpc.stream();
+  // capnweb@0.8.0's TS surface only models ReadableStream<Uint8Array>, but this
+  // experiment intentionally sends pass-by-value StreamEvent objects over Cap'n Web.
+  return (readable as unknown as ReadableStream<StreamEvent>).getReader();
+}
+
+function summarize(values: number[]): Summary {
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    count: sorted.length,
+    min: sorted[0] ?? 0,
+    p50: percentile(sorted, 0.5),
+    p95: percentile(sorted, 0.95),
+    p99: percentile(sorted, 0.99),
+    max: sorted.at(-1) ?? 0,
+    avg: sorted.reduce((sum, value) => sum + value, 0) / Math.max(sorted.length, 1),
+  };
+}
+
+function percentile(sorted: number[], p: number) {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))]!;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs),
+    ),
+  ]);
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

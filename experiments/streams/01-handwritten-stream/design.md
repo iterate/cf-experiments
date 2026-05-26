@@ -110,6 +110,14 @@ itself had hundreds of milliseconds of p95 latency. That means the slow read-you
 "time until the append work is serviced under fan-out pressure", not "event was appended but stream
 delivery was delayed behind an unnecessary await".
 
+To separate platform/runtime behavior from local WiFi or client machine effects, the worker also
+exposes `/benchmark/audio-chaos`. That route starts one orchestrator `BenchmarkRunner` DO plus
+separate publisher/subscriber `BenchmarkRunner` DOs, and those runner DOs connect to the `Stream` DO
+through the same Cap'n Web WebSocket endpoint external clients use. The DO-side benchmark reports
+`*CreatedAtLatencyMs`, measured from the stream DO's committed `createdAt` timestamp to delivery in
+the runner DO. This is not a substitute for the websocket-frame tests, but it is the better latency
+probe when the question is whether the user's local network is polluting the result.
+
 ## Debug hooks
 
 The experiment keeps a small debug surface:

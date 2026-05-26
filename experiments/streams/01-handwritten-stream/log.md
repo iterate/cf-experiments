@@ -5,6 +5,42 @@
 
 # Notes
 
+## 2026-05-26 22:56 UTC+1
+
+- Added `/benchmark/audio-chaos`, a worker route that runs the audio-shaped benchmark from Durable
+  Objects rather than from the local Node/WebSocket client. One orchestrator `BenchmarkRunner` DO
+  starts separate publisher/subscriber/passive-subscriber `BenchmarkRunner` DOs, and each runner DO
+  connects to the `Stream` DO through the normal Cap'n Web WebSocket endpoint. This keeps local WiFi
+  and laptop scheduling out of the publisher/subscriber timing path while preserving the stream
+  transport shape under test.
+- The DO-side benchmark keeps the same audio event format as `scripts/audio-chaos-benchmark.ts`:
+  `benchmark.audio-frame`, 24 kHz PCM16 mono, 20 ms frames, 960 raw bytes / 1280 base64 chars.
+- Fixed the DO-side `publisherAckToSelfEchoLatencyMs` measurement to use absolute timestamps inside
+  publisher runner 0. The initial implementation subtracted two latency values with different bases.
+- Local verification:
+  - `pnpm --filter @cf-experiments/01-handwritten-stream typecheck`
+  - `pnpm --filter @cf-experiments/01-handwritten-stream test`
+  - Result: 24 tests passed.
+- Deployed version `e261db43-d227-42a6-a440-b141ad284fab`.
+- DO-side smoke command:
+  `curl -sS --fail 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?publishers=2&subscribers=2&frames-per-publisher=5&pace-ms=20&durability=best-effort&measure-append-ack=true'`
+  Result: `allSubscribersCreatedAtLatencyMs.p95 = 22`, `publisherSelfEchoCreatedAtLatencyMs.p95 =
+  19`, `publisherAppendAckLatencyMs.p95 = 17`, `publisherAckToSelfEchoLatencyMs.p95 = 0`.
+- First full DO-side comparison, all with 10 publishers / 36 active subscribers / 1 passive
+  subscriber / 50 frames per publisher / 20 ms pacing / `--measure-append-ack=true`:
+  - best-effort: `allSubscribersCreatedAtLatencyMs.p95 = 1388`,
+    `publisherSelfEchoCreatedAtLatencyMs.p95 = 980`, `publisherAppendAckLatencyMs.p95 = 664`,
+    `publisherAckToSelfEchoLatencyMs.p95 = 0`, unconfirmed writes at end `500`.
+  - checkpointed (`checkpoint-every = 100`): `allSubscribersCreatedAtLatencyMs.p95 = 2735`,
+    `publisherSelfEchoCreatedAtLatencyMs.p95 = 1836`, `publisherAppendAckLatencyMs.p95 = 797`,
+    `publisherAckToSelfEchoLatencyMs.p95 = 982`, checkpoints started/completed `5/5`.
+  - confirmed: `allSubscribersCreatedAtLatencyMs.p95 = 1087`,
+    `publisherSelfEchoCreatedAtLatencyMs.p95 = 771`, `publisherAppendAckLatencyMs.p95 = 446`,
+    `publisherAckToSelfEchoLatencyMs.p95 = 4`.
+- Interpretation: moving clients into DOs does not make the full fan-out shape look real-time; the
+  bottleneck is still visible without local WiFi. However, these are single DO-side samples and the
+  relative ordering varied from the local-client runs, so this is not ready for `docs/findings.md`.
+
 ## 2026-05-26 22:35 UTC+1
 
 - Documented the stream-vs-callback subscription decision in `design.md` and `stream.ts`: subscribers
