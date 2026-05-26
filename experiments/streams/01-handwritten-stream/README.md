@@ -82,5 +82,8 @@ pnpm run deploy
 - The `/benchmark/audio-chaos` route reports `*CreatedAtLatencyMs` from the stream DO's committed
   event timestamp to delivery inside runner DOs. Use it when local network quality could contaminate
   the external WebSocket benchmark.
+- For `/benchmark/audio-chaos`, also check `framesFullyDelivered`, `framesMissingFullDelivery`,
+  `minFrameDeliveries`, and `maxFrameDeliveries`; these make partial fan-out coverage explicit
+  instead of relying on a percentile sample count.
 - Deployed-only fault probes should log the stream path, offsets, checkpoint timings, and Cloudflare
   ray IDs where available so failures can be traced in Cloudflare observability.

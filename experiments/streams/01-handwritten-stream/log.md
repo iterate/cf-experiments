@@ -5,6 +5,54 @@
 
 # Notes
 
+## 2026-05-26 23:44 UTC+1
+
+- Added explicit DO-side audio benchmark delivery coverage fields:
+  `framesFullyDelivered`, `framesMissingFullDelivery`, `minFrameDeliveries`, and
+  `maxFrameDeliveries`. This keeps partial fan-out coverage visible instead of burying it in
+  `allSubscribersCreatedAtLatencyMs.count`.
+- Deployed version `d768c0aa-8db9-4a1d-9924-54dfa176f605`.
+- Verification: root `pnpm typecheck` passed.
+- Deployed Cap'n Web verification:
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 35 tests.
+- Smoke run:
+  `/benchmark/audio-chaos?publishers=10&subscribers=36&slow-subscribers=0&frames-per-publisher=50&frame-ms=20&pace-ms=20&sample-rate=24000&channels=1&bytes-per-sample=2&timeout-ms=60000&durability=best-effort&measure-append-ack=true`
+  returned `framesFullyDelivered: 500`, `framesMissingFullDelivery: 0`,
+  `minFrameDeliveries: 36`, `maxFrameDeliveries: 36`,
+  `allSubscribersCreatedAtLatencyMs.p95: 1032`,
+  `publisherSelfEchoCreatedAtLatencyMs.p95: 732`, and
+  `publisherAppendAckLatencyMs.p95: 429`.
+
+## 2026-05-26 23:42 UTC+1
+
+- Ran DO-side audio-shaped benchmarks from `/benchmark/audio-chaos`, with 24 kHz mono PCM16,
+  20 ms frames, 960 raw bytes / 1280 base64 chars per event, `measureAppendAck=true`, 10
+  publishers, 36 active subscribers, 50 frames per publisher, and 20 ms publisher pacing.
+- Mode comparison from one run:
+  - `best-effort`: `allSubscribersCreatedAtLatencyMs.p95` 1248 ms,
+    `publisherSelfEchoCreatedAtLatencyMs.p95` 748 ms,
+    `publisherAppendAckLatencyMs.p95` 469 ms.
+  - `checkpointed`: `allSubscribersCreatedAtLatencyMs.p95` 939 ms,
+    `publisherSelfEchoCreatedAtLatencyMs.p95` 798 ms,
+    `publisherAppendAckLatencyMs.p95` 530 ms.
+  - `confirmed`: `allSubscribersCreatedAtLatencyMs.p95` 709 ms,
+    `publisherSelfEchoCreatedAtLatencyMs.p95` 682 ms,
+    `publisherAppendAckLatencyMs.p95` 326 ms.
+- Ran a best-effort passive-subscriber comparison with the same active load:
+  - 0 passive subscribers: all-subs p95 2014 ms, self-echo p95 1440 ms, append-ack p95 568 ms.
+  - 10 passive subscribers: all-subs p95 1042 ms, self-echo p95 820 ms, append-ack p95 475 ms.
+  - 36 passive subscribers: all-subs p95 1882 ms, self-echo p95 1079 ms, append-ack p95 690 ms.
+  The run is noisy and does not show a clean "one unread consumer stalls active consumers" effect;
+  the bigger signal remains active fan-out / append service pressure.
+- Ran a 1 publisher / 1 subscriber DO-side baseline:
+  - `best-effort`: all-subs p95 38 ms, self-echo p95 32 ms, append-ack p95 20 ms.
+  - `checkpointed`: all-subs p95 24 ms, self-echo p95 20 ms, append-ack p95 11 ms.
+  - `confirmed`: all-subs p95 22 ms, self-echo p95 22 ms, append-ack p95 12 ms.
+  This reinforces that the high read-your-own latency is not simply "we awaited storage sync";
+  under low load it is tens of milliseconds, while under 10x36 fan-out it is hundreds of
+  milliseconds to seconds.
+
 ## 2026-05-26 23:37 UTC+1
 
 - Re-ran the `allowUnconfirmedWrites: true` mutation check locally by temporarily changing it to

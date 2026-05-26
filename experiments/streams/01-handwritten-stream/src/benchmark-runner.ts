@@ -118,6 +118,10 @@ export type AudioChaosResult = {
   };
   elapsedMs: number;
   eventsPerSecond: number;
+  framesFullyDelivered: number;
+  framesMissingFullDelivery: number;
+  minFrameDeliveries: number;
+  maxFrameDeliveries: number;
   subscriberCreatedAtLatencyMs: Summary;
   firstSubscriberCreatedAtLatencyMs: Summary;
   allSubscribersCreatedAtLatencyMs: Summary;
@@ -278,12 +282,19 @@ export class BenchmarkRunner extends DurableObject {
     const subscriberLatencies = subscriberResults.flatMap((subscriber) =>
       subscriber.samples.map((sample) => sample.latencyMs),
     );
-    const firstSubscriberLatencies = Array.from(frameLatencies.values(), (latencies) =>
-      Math.min(...latencies),
-    );
-    const allSubscriberLatencies = Array.from(frameLatencies.values(), (latencies) =>
-      latencies.length === config.subscribers ? Math.max(...latencies) : 0,
-    ).filter((latency) => latency > 0);
+    const frameDeliveryCounts: number[] = [];
+    const firstSubscriberLatencies: number[] = [];
+    const allSubscriberLatencies: number[] = [];
+    for (let publisher = 0; publisher < config.publishers; publisher += 1) {
+      for (let frame = 1; frame <= config.framesPerPublisher; frame += 1) {
+        const latencies = frameLatencies.get(`p${publisher}-f${frame}`) ?? [];
+        frameDeliveryCounts.push(latencies.length);
+        if (latencies.length > 0) firstSubscriberLatencies.push(Math.min(...latencies));
+        if (latencies.length === config.subscribers) {
+          allSubscriberLatencies.push(Math.max(...latencies));
+        }
+      }
+    }
     const selfEchoPublisher = publisherResults.find((publisher) => publisher.publisher === 0);
     const serverDebug = await stream.debug();
 
@@ -313,6 +324,12 @@ export class BenchmarkRunner extends DurableObject {
       },
       elapsedMs,
       eventsPerSecond: totalEvents / (elapsedMs / 1_000),
+      framesFullyDelivered: frameDeliveryCounts.filter((count) => count === config.subscribers)
+        .length,
+      framesMissingFullDelivery: frameDeliveryCounts.filter((count) => count !== config.subscribers)
+        .length,
+      minFrameDeliveries: Math.min(...frameDeliveryCounts),
+      maxFrameDeliveries: Math.max(...frameDeliveryCounts),
       subscriberCreatedAtLatencyMs: summarize(subscriberLatencies),
       firstSubscriberCreatedAtLatencyMs: summarize(firstSubscriberLatencies),
       allSubscribersCreatedAtLatencyMs: summarize(allSubscriberLatencies),
