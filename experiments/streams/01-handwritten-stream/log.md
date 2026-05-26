@@ -5,6 +5,21 @@
 
 # Notes
 
+## 2026-05-26 23:29 UTC+1
+
+- Added "fails replay loudly when committed history has a missing event key". The test uses a
+  test-only corruption hook to delete `event:1` while `maxOffset` remains 2, then asserts the
+  Cap'n Web stream errors instead of replaying sparse history.
+- Red result before the fix: the first read resolved with offset 2, proving the old replay loop
+  silently skipped the missing offset.
+- Fixed `#openStream()` to treat `maxOffset` as a contiguous committed-history claim and throw
+  `Missing stream event at offset ...` when an event key is absent.
+- Local verification: `pnpm typecheck` and `pnpm vitest run scripts/stream-capnweb.test.ts` passed
+  with 33 tests.
+- Deployed version `8d387da1-633a-45bd-a3aa-a5bbee4ed4fc`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 33 tests.
+
 ## 2026-05-26 23:25 UTC+1
 
 - Tightened the replay/live fan-out language in `stream.ts` and `design.md`. The previous wording

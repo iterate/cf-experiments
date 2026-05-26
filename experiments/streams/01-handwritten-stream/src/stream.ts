@@ -251,6 +251,13 @@ export class Stream extends DurableObject {
     return this.debug();
   }
 
+  debugDeleteEventForReplay(args: { offset: number }) {
+    // Test-only corruption hook: lets the replay invariant test prove that a
+    // maxOffset/event-key gap fails loudly instead of producing sparse history.
+    this.ctx.storage.kv.delete(`event:${args.offset}`);
+    return this.debug();
+  }
+
   ping() {
     return {
       incarnationId: this.#incarnationId,
@@ -323,13 +330,24 @@ export class Stream extends DurableObject {
          * uses the same enqueue/error-cleanup path as live delivery. The
          * multi-subscriber, replay/live, and enqueue-error tests in
          * `scripts/stream-capnweb.test.ts` fail if those properties change.
+         *
+         * `maxOffset` is also a contiguity claim: every offset from 1 through
+         * that boundary must have an `event:${offset}` value. Silently skipping
+         * a missing key would turn storage corruption into a sparse stream. See
+         * "fails replay loudly when committed history has a missing event key"
+         * in `scripts/stream-capnweb.test.ts`.
          */
         this.#streamSubscribers.add(subscriber);
         sessionSubscribers?.add(subscriber);
 
         for (let offset = 1; offset <= latestOffset; offset++) {
           const event = kv.get<StreamEvent>(`event:${offset}`);
-          if (event !== undefined) this.#enqueueToSubscriber(subscriber, event);
+          if (event === undefined) {
+            throw new Error(
+              `Missing stream event at offset ${offset} while replaying through ${latestOffset}`,
+            );
+          }
+          this.#enqueueToSubscriber(subscriber, event);
         }
       },
       cancel: () => {
