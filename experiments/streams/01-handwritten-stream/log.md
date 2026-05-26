@@ -53,6 +53,25 @@
   durability; in the isolated shape confirmed and best-effort are both tens of milliseconds. The
   bad latency appears under fan-out/connection pressure. Checkpointed was the best full-shape run in
   this sample, but still missed real-time audio expectations by a wide margin.
+- Added `--measure-append-ack` to the audio benchmark. This keeps publisher 0's append result for
+  timing while other publishers remain fire-and-forget. It adds two diagnostics:
+  `publisherAppendAckLatencyMs` and `publisherAckToSelfEchoLatencyMs`.
+- Follow-up full-shape runs with ack timing:
+  - checkpointed (`checkpoint-every = 100`, one passive slow subscriber):
+    `publisherSelfEchoLatencyMs.p95 = 813.1`, `publisherAppendAckLatencyMs.p95 = 832.5`,
+    `publisherAckToSelfEchoLatencyMs.p95 = 33.3`;
+  - best-effort: `publisherSelfEchoLatencyMs.p95 = 778.9`, `publisherAppendAckLatencyMs.p95 =
+    783.7`, `publisherAckToSelfEchoLatencyMs.p95 = -0.04`;
+  - confirmed: `publisherSelfEchoLatencyMs.p95 = 840.8`, `publisherAppendAckLatencyMs.p95 =
+    776.5`, `publisherAckToSelfEchoLatencyMs.p95 = 429.4`.
+- Follow-up checkpointed run without the passive slow subscriber was not materially better:
+  `publisherSelfEchoLatencyMs.p95 = 1236.9`, `allSubscribersLatencyMs.p95 = 1294.1`,
+  `publisherAckToSelfEchoLatencyMs.p95 = -0.07`.
+- Interpretation update: for best-effort/checkpointed, own stream echo is generally delivered before
+  or almost immediately after append acknowledgement. The high read-your-own latency under the full
+  shape is therefore mostly before append acknowledgement: DO event scheduling / fan-out / WebSocket
+  transport pressure, not an event that was already appended and then blocked behind an unnecessary
+  durability await.
 
 ## 2026-05-26 22:22 UTC+1
 

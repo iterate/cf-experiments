@@ -102,6 +102,14 @@ confirmed in one deployed run. So the high read-your-own-append latency is not e
 awaiting `storage.sync()`; it appears with many subscribers/publishers and the resulting fan-out /
 transport pressure.
 
+With `--measure-append-ack`, the full-load benchmark also records publisher 0's append RPC
+acknowledgement for the same events it reads back from its own stream. In best-effort and
+checkpointed runs, the stream echo usually arrived at or before the append acknowledgement
+(`publisherAckToSelfEchoLatencyMs.p95` near zero / tens of ms), while the append acknowledgement
+itself had hundreds of milliseconds of p95 latency. That means the slow read-your-own path is mostly
+"time until the append work is serviced under fan-out pressure", not "event was appended but stream
+delivery was delayed behind an unnecessary await".
+
 ## Debug hooks
 
 The experiment keeps a small debug surface:

@@ -9,7 +9,8 @@
  *
  *   node scripts/audio-chaos-benchmark.ts http://localhost:8787
  *   node scripts/audio-chaos-benchmark.ts https://01-handwritten-stream.iterate-dev-preview.workers.dev \
- *     --publishers 10 --subscribers 36 --frames-per-publisher 50 --pace-ms 20 --durability best-effort
+ *     --publishers 10 --subscribers 36 --frames-per-publisher 50 --pace-ms 20 --durability best-effort \
+ *     --measure-append-ack
  */
 
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
@@ -27,6 +28,8 @@ type Fixture = {
 
 type FrameRecord = {
   sentAtMs: number;
+  appendAckAtMs?: number;
+  selfEchoAtMs?: number;
   firstDeliveryMs?: number;
   allDeliveryMs?: number;
   deliveries: number;
@@ -48,6 +51,7 @@ const channels = positiveInt(args.channels ?? "1", "channels");
 const bytesPerSample = positiveInt(args["bytes-per-sample"] ?? "2", "bytes-per-sample");
 const timeoutMs = positiveInt(args["timeout-ms"] ?? "30000", "timeout-ms");
 const durability = parseDurability(args.durability ?? "best-effort");
+const measureAppendAck = args["measure-append-ack"] === "true";
 const checkpointEveryUnconfirmedAppends = positiveInt(
   args["checkpoint-every"] ?? "100",
   "checkpoint-every",
@@ -59,6 +63,7 @@ const runId = args["run-id"] ?? crypto.randomUUID();
 
 const frames = new Map<string, FrameRecord>();
 const fixtures: Fixture[] = [];
+const appendAckPromises: Promise<StreamEvent>[] = [];
 
 try {
   const echo = await measureSameSessionEcho();
@@ -136,10 +141,12 @@ async function runFanoutBenchmark() {
     for (let publisher = 0; publisher < publishers; publisher += 1) {
       const frameId = `p${publisher}-f${frame}`;
       frames.set(frameId, { sentAtMs: performance.now(), deliveries: 0 });
-      fireAndForgetAppend(
-        publisherFixtures[publisher]!.rpc,
-        buildAudioEvent({ publisher: String(publisher), frame, frameId }),
-      );
+      const event = buildAudioEvent({ publisher: String(publisher), frame, frameId });
+      if (measureAppendAck && publisher === 0) {
+        appendAndTrackAck(publisherFixtures[publisher]!.rpc, event, frameId);
+      } else {
+        fireAndForgetAppend(publisherFixtures[publisher]!.rpc, event);
+      }
     }
     if (paceMs > 0) {
       const nextFrameAt = publishStartedAt + frame * paceMs;
@@ -147,7 +154,7 @@ async function runFanoutBenchmark() {
     }
   }
 
-  await Promise.all([...readers, selfEcho]);
+  await Promise.all([...readers, selfEcho, ...appendAckPromises]);
   const finishedAt = performance.now();
   const debug = await publisherFixtures[0]!.rpc.debug();
 
@@ -165,6 +172,7 @@ async function runFanoutBenchmark() {
     framesPerPublisher,
     totalEvents,
     durability,
+    measureAppendAck,
     checkpointEveryUnconfirmedAppends:
       durability === "checkpointed" ? checkpointEveryUnconfirmedAppends : undefined,
     audio: {
@@ -185,6 +193,16 @@ async function runFanoutBenchmark() {
       Array.from(frames.values(), (frame) => frame.allDeliveryMs! - frame.sentAtMs),
     ),
     publisherSelfEchoLatencyMs: summarize(selfEchoLatencies),
+    publisherAppendAckLatencyMs: summarize(
+      Array.from(frames.values())
+        .filter((frame) => frame.appendAckAtMs !== undefined)
+        .map((frame) => frame.appendAckAtMs! - frame.sentAtMs),
+    ),
+    publisherAckToSelfEchoLatencyMs: summarize(
+      Array.from(frames.values())
+        .filter((frame) => frame.appendAckAtMs !== undefined && frame.selfEchoAtMs !== undefined)
+        .map((frame) => frame.selfEchoAtMs! - frame.appendAckAtMs!),
+    ),
     publisherSelfEchoOutboundPullPushFrames: countOutboundPullPushFrames(
       selfEchoPublisher.wsMessages,
       selfEchoSubscribedFrameCount,
@@ -237,8 +255,25 @@ async function collectSelfEcho(args: {
     if (!frameId.startsWith("p0-")) continue;
     const frame = frames.get(frameId);
     if (frame === undefined) throw new Error(`publisher saw unknown self frame ${frameId}`);
-    args.latencies.push(performance.now() - frame.sentAtMs);
+    const deliveredAt = performance.now();
+    frame.selfEchoAtMs = deliveredAt;
+    args.latencies.push(deliveredAt - frame.sentAtMs);
   }
+}
+
+function appendAndTrackAck(rpc: RpcStub<StreamRpc>, event: StreamEventInput, frameId: string) {
+  const append = rpc.append({ event, durability: appendDurability() }) as unknown as Promise<StreamEvent> & {
+    [Symbol.dispose](): void;
+  };
+  appendAckPromises.push(
+    append
+      .then((committed) => {
+        const frame = frames.get(frameId);
+        if (frame !== undefined) frame.appendAckAtMs = performance.now();
+        return committed;
+      })
+      .finally(() => append[Symbol.dispose]()),
+  );
 }
 
 function fireAndForgetAppend(rpc: RpcStub<StreamRpc>, event: StreamEventInput) {
