@@ -238,6 +238,15 @@ export class Stream extends DurableObject {
    *
    * Cap'n Web runs on this DO (`fetch()` → `newWebSocketRpcSession(server, getCapability())`),
    * so chunks are RPC pass-by-value `StreamEvent` objects — no NDJSON byte encoding.
+   *
+   * The API is deliberately modeled as a returned `ReadableStream`, not as a
+   * subscriber passing an `onEvent(event)` callback capability into the DO. This
+   * stream is one-directional: after the initial `stream()` RPC, delivery does
+   * not require per-event subscriber acknowledgements, return values, or callback
+   * method calls from the DO to the subscriber. See "pure subscribers do not
+   * originate per-event websocket traffic" in `scripts/stream-capnweb.test.ts`,
+   * which records the subscriber WebSocket and asserts no outbound pull/push
+   * frames after subscription while events are delivered.
    */
   stream(): ReadableStream<StreamEvent> {
     return this.#openStream();
@@ -329,6 +338,13 @@ export class Stream extends DurableObject {
 
   #broadcast(event: StreamEvent): void {
     for (const subscriber of this.#streamSubscribers) {
+      /**
+       * Fan-out is deliberately synchronous and per-subscriber independent: one
+       * slow client can build up its own stream/WebSocket queues, but there is
+       * no await or shared backpressure point here that can stall delivery to
+       * the next subscriber. See "delivers to an active subscriber while another
+       * subscriber does not read" in `scripts/stream-capnweb.test.ts`.
+       */
       this.#enqueueToSubscriber(subscriber, event);
     }
   }
@@ -398,7 +414,9 @@ export class Stream extends DurableObject {
        * would turn the append that fills the window into a confirmed append,
        * hiding the mode difference this experiment is measuring. See
        * "checkpointed appendBatch returns after scheduling but before awaiting
-       * the checkpoint" in `scripts/stream-capnweb.test.ts`.
+       * the checkpoint" and "checkpointed passes the live-before-durability
+       * probe that confirmed intentionally fails" in
+       * `scripts/stream-capnweb.test.ts`.
        */
 
       // Let the current handler reach its next turn before deciding which

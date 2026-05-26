@@ -41,6 +41,18 @@ WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev \
   pnpm vitest run scripts/stream-capnweb.test.ts
 ```
 
+Run the audio-shaped fan-out benchmark:
+
+```sh
+node scripts/audio-chaos-benchmark.ts \
+  https://01-handwritten-stream.iterate-dev-preview.workers.dev \
+  --publishers 10 \
+  --subscribers 36 \
+  --frames-per-publisher 50 \
+  --slow-subscribers 1 \
+  --pace-ms 20
+```
+
 Deploy current code:
 
 ```sh
@@ -55,6 +67,8 @@ pnpm run deploy
 - Durability tests should keep the contracts distinct: `confirmed` waits before exposing the new
   offset/event, while `best-effort` and `checkpointed` expose offsets before an explicit `sync()`
   barrier completes.
+- Audio-shaped benchmark output should be read as latency evidence, not just pass/fail:
+  `allSubscribersLatencyMs` measures append-to-all-active-subscribers, and
+  `publisherSelfEchoLatencyMs` measures same-session append-to-own-stream delivery under load.
 - Deployed-only fault probes should log the stream path, offsets, checkpoint timings, and Cloudflare
   ray IDs where available so failures can be traced in Cloudflare observability.
-

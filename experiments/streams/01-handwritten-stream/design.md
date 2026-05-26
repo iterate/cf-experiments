@@ -37,6 +37,39 @@ The key causal rule: confirmed mode must not send bytes about the new offset bef
 barrier completes, but unrelated bytes should continue flowing. For example, a subscriber draining old
 history and a `ping()` RPC should not be blocked by a new confirmed append waiting for `storage.sync()`.
 
+## Subscriber shape: stream, not callback
+
+Subscribers receive a returned `ReadableStream<StreamEvent>`. They do not pass an `onEvent()`
+callback capability into the DO.
+
+That shape is intentional. The stream is one-directional fan-out: after the initial `stream()` RPC
+sets up the pipe, event delivery does not require subscriber return traffic, per-event method calls,
+or acknowledgements. A callback-shaped API would make every event a DO-to-client RPC call with a
+return path; this experiment wants append fan-out to be just stream chunks flowing out.
+
+The isolated websocket-frame proof is "pure subscribers do not originate per-event websocket
+traffic" in `scripts/stream-capnweb.test.ts`: after subscription, the subscriber receives a burst and
+its recorded websocket frames contain no outbound `pull` or `push` frames.
+
+## Design-space guardrails
+
+These are the sharp edges currently protected by tests. The point is not only that the happy path
+passes, but that a competing implementation choice should fail a named probe.
+
+| Design decision | If changed | Guarding test |
+| --- | --- | --- |
+| Use `allowUnconfirmed: true` for all writes, then explicitly `sync()` confirmed appends | Platform output gate would hold unrelated RPC/stream egress behind confirmed appends | "lets unrelated RPC resolve while confirmed append waits for durability" |
+| Broadcast confirmed events only after `storage.sync()` | Subscribers could observe a confirmed event before the append has crossed its durability barrier | "lets subscribers drain old events but not the new confirmed event before durability" |
+| Broadcast best-effort events before an explicit sync barrier | Best-effort mode would collapse into confirmed semantics and lose the latency/throughput distinction | "best-effort appends fan out while write debt is still unconfirmed" |
+| Resolve per-call durability before allocating an offset | Invalid modes or thresholds could partially mutate the stream | "rejects invalid per-call durability modes before allocating an offset" and "rejects invalid per-call checkpoint thresholds" |
+| Return idempotent retries before durability accounting/fan-out | Retries could duplicate events, write debt, or checkpoints | "idempotent append returns the original event and emits once to live subscribers" and "does not count idempotent best-effort retries as new unconfirmed writes" |
+| Fire-and-forget checkpoint `blockConcurrencyWhile()` from the triggering append | Awaiting it would turn checkpointed append into a confirmed append at the boundary | "checkpointed appendBatch returns after scheduling but before awaiting the checkpoint" |
+| Keep checkpointed delivery best-effort while confirmed delivery waits for durability | The two durability modes would become indistinguishable at the subscriber boundary | "checkpointed passes the live-before-durability probe that confirmed intentionally fails" |
+| Register subscriber once, replay history, then keep it for live fan-out | Replay/live ordering or multi-subscriber fan-out could skip, duplicate, or reorder events | "replays committed history before switching to live appends" and "delivers global offset order to multiple subscribers with no per-event RPC from readers or writers" |
+| Model subscriptions as returned `ReadableStream`, not `onEvent()` callback RPC | A pure subscriber would originate per-event return traffic/acks | "pure subscribers do not originate per-event websocket traffic" |
+| Do not await per-subscriber delivery in `#broadcast()` | One unread subscriber could slow active subscribers | "delivers to an active subscriber while another subscriber does not read" |
+| Release subscribers on both stream cancel and Cap'n Web session disposal | Dead sessions could stay in fan-out forever | "removes locally cancelled streams from live fan-out" and "removes cancelled subscribers from live fan-out" |
+
 ## Checkpoints
 
 Checkpointed mode is a throttle for best-effort writes, not confirmed append. Once
@@ -56,6 +89,11 @@ There are several queues that would need separate investigation before making th
 contract: the DO-created `ReadableStream`, Cap'n Web's pipe into WebSocket frames, the client-side
 `ReadableStream`, and WebSocket/runtime transport buffers between isolates/processes. `debug()` exposes
 the DO-side `desiredSize` signal for observation only.
+
+The current audio-shaped benchmark suggests this simple one-DO fan-out design is not sufficient for a
+10 publisher / 36 active subscriber / 24 kHz PCM16 base64 / 20 ms frame workload if sub-second p95
+delivery to every subscriber is required. In the 2026-05-26 deployed run, p95 append-to-all-subscribers
+was about 1.27 s and p95 same-session publisher self-echo was about 912 ms.
 
 ## Debug hooks
 

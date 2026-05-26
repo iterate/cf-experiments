@@ -191,6 +191,31 @@ describe("handwritten stream capnweb", () => {
     2_000,
   );
 
+  it("pure subscribers do not originate per-event websocket traffic", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const events: StreamEventInput[] = Array.from({ length: 10 }, (_, i) => ({
+      type: "test.pure-subscriber",
+      payload: { n: i + 1 },
+    }));
+
+    await using subscriber = await withStream({ path });
+    const readable = await subscriber.rpc.stream();
+    const outboundAfterSubscribe = subscriber.wsMessages.length;
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const reader = (readable as ReadableStream<StreamEvent>).getReader();
+
+    await using writer = await withStream({ path });
+    await writer.rpc.appendBatch({ events, durability: "best-effort" });
+
+    const delivered = await readEvents(reader, events.length, 1_000);
+    expect(delivered.map((event) => event.payload)).toEqual(events.map((event) => event.payload));
+
+    expect(outboundPullPushFrames(subscriber.wsMessages, outboundAfterSubscribe)).toEqual([]);
+    expect(subscriber.wireAnalysis().resultWaits).toHaveLength(1);
+
+    reader.releaseLock();
+  });
+
   it(
     "delivers global offset order to multiple subscribers with no per-event RPC from readers or writers",
     async () => {
@@ -264,6 +289,45 @@ describe("handwritten stream capnweb", () => {
     },
     5_000,
   );
+
+  it("delivers to an active subscriber while another subscriber does not read", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const burstSize = 50;
+    const events: StreamEventInput[] = Array.from({ length: burstSize }, (_, i) => ({
+      type: "test.slow-consumer",
+      payload: { n: i + 1 },
+    }));
+
+    await using slow = await withStream({ path });
+    await using fast = await withStream({ path });
+
+    await slow.rpc.stream();
+    const fastReadable = await fast.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const fastReader = (fastReadable as ReadableStream<StreamEvent>).getReader();
+    const outboundAfterSubscribe = fast.wsMessages.length;
+
+    const reads = Array.from({ length: burstSize }, () =>
+      fastReader.read() as Promise<ReadableStreamReadResult<StreamEvent>>,
+    );
+
+    await using writer = await withStream({ path });
+    await writer.rpc.appendBatch({ events, durability: "best-effort" });
+
+    const delivered = await Promise.all(reads.map((read) => withTimeout(read, 1_000)));
+    expect(delivered.map((result) => result.value?.payload)).toEqual(
+      events.map((event) => event.payload),
+    );
+    expect(outboundPullPushFrames(fast.wsMessages, outboundAfterSubscribe)).toEqual([]);
+
+    const debug = await writer.rpc.debug();
+    expect(debug.subscribers).toHaveLength(2);
+    expect(debug.subscribers.every((subscriber) => subscriber.enqueuedEvents >= burstSize)).toBe(
+      true,
+    );
+
+    fastReader.releaseLock();
+  });
 
   it("replays committed history before switching to live appends", async () => {
     const path = `stream-${crypto.randomUUID()}`;
@@ -567,6 +631,55 @@ describe("handwritten stream capnweb", () => {
       checkpointStartedCount: 1,
       checkpointCompletedCount: 1,
     });
+  });
+
+  it("checkpointed passes the live-before-durability probe that confirmed intentionally fails", async () => {
+    const confirmedPath = `stream-${crypto.randomUUID()}`;
+    await using confirmedWriter = await withStream({ path: confirmedPath });
+    await confirmedWriter.rpc.patchSettings({ debugConfirmedSyncDelayMs: 300 });
+    await using confirmedReader = await withStream({ path: confirmedPath });
+    const confirmedReadable = await confirmedReader.rpc.stream();
+    const confirmedStreamReader = (confirmedReadable as unknown as ReadableStream<StreamEvent>)
+      .getReader();
+
+    const confirmedAppend = confirmedWriter.rpc.append({
+      event: { type: "test.durability.confirmed-live-before-sync" },
+      durability: "confirmed",
+    });
+    const confirmedLiveRead = confirmedStreamReader.read();
+    await expectReadTimesOut(confirmedLiveRead, 100);
+    const confirmedAppended = await confirmedAppend;
+    const confirmedDelivered = await withTimeout(confirmedLiveRead, 1_000);
+    expect(confirmedDelivered.done).toBe(false);
+    expect(confirmedDelivered.value).toEqual(confirmedAppended);
+    confirmedStreamReader.releaseLock();
+
+    const checkpointedPath = `stream-${crypto.randomUUID()}`;
+    await using checkpointedWriter = await withStream({ path: checkpointedPath });
+    await checkpointedWriter.rpc.patchSettings({ debugConfirmedSyncDelayMs: 300 });
+    await using checkpointedReader = await withStream({ path: checkpointedPath });
+    const checkpointedReadable = await checkpointedReader.rpc.stream();
+    const checkpointedStreamReader = (checkpointedReadable as unknown as ReadableStream<StreamEvent>)
+      .getReader();
+
+    const checkpointedAppend = checkpointedWriter.rpc.append({
+      event: { type: "test.durability.checkpointed-live-before-sync" },
+      durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 1 },
+    });
+    const checkpointedLiveRead = checkpointedStreamReader.read();
+    const checkpointedDelivered = await withTimeout(checkpointedLiveRead, 100);
+    expect(checkpointedDelivered.done).toBe(false);
+    expect(checkpointedDelivered.value).toMatchObject({
+      type: "test.durability.checkpointed-live-before-sync",
+      offset: 1,
+    });
+    await checkpointedAppend;
+    expect(await checkpointedWriter.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 1,
+    });
+    checkpointedStreamReader.releaseLock();
   });
 
   it("rejects invalid per-call checkpoint thresholds", async () => {

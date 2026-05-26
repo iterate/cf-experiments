@@ -5,6 +5,38 @@
 
 # Notes
 
+## 2026-05-26 22:35 UTC+1
+
+- Documented the stream-vs-callback subscription decision in `design.md` and `stream.ts`: subscribers
+  get a one-directional `ReadableStream<StreamEvent>` rather than passing an `onEvent()` callback
+  capability, because event delivery should not require per-event return traffic or acknowledgements.
+- Added "pure subscribers do not originate per-event websocket traffic", an isolated websocket-frame
+  test proving that after the initial `stream()` setup a subscriber receives a burst without outbound
+  `pull`/`push` frames.
+- Added "delivers to an active subscriber while another subscriber does not read" to make the slow
+  consumer isolation decision explicit at the integration-test level.
+- Added "checkpointed passes the live-before-durability probe that confirmed intentionally fails", a
+  paired sharp-edge test: with `debugConfirmedSyncDelayMs`, confirmed mode does not deliver the new
+  event before the durability window, while checkpointed mode delivers within that same window and
+  checkpoints afterward.
+- Added `scripts/audio-chaos-benchmark.ts`, which uses xAI/Grok Voice's documented default PCM shape
+  (24 kHz Linear16, base64 realtime chunks; 20 ms mono frame = 960 raw bytes / 1280 base64 chars) to
+  measure append-to-subscriber fan-out and same-session publisher self-echo.
+- Deployed correctness result: `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 24 tests.
+- Deployed benchmark command:
+  `node scripts/audio-chaos-benchmark.ts https://01-handwritten-stream.iterate-dev-preview.workers.dev --publishers 10 --subscribers 36 --frames-per-publisher 50 --slow-subscribers 1 --pace-ms 20 --timeout-ms 60000`
+- Deployed benchmark result: 500 audio-shaped events, 36 active subscribers, 1 passive slow
+  subscriber, 10 publishers, 20 ms pacing. Reader websocket framing stayed optimal
+  (`readerOutboundPullPushFrames.max = 0` after subscription), but latency was not acceptable for
+  real-time audio fan-out: `allSubscribersLatencyMs.p95 = 1268.9`, `allSubscribersLatencyMs.p99 =
+  1306.6`, and under-load `publisherSelfEchoLatencyMs.p95 = 911.8`.
+- Decision: the current one-DO `ReadableStream` fan-out shape is good for proving RPC framing and
+  durability semantics, but it is not hunky-dory for the requested 10-publisher / few-dozen-subscriber
+  audio-call workload. Next design candidates should reduce per-event fan-out work in the DO, e.g.
+  partition subscribers, send smaller/binary frames, or separate hot audio media transport from the
+  durable event log.
+
 ## 2026-05-26 22:22 UTC+1
 
 - Added `debugOpenAndCancelLocalStream()` so the Web Streams `cancel` callback inside
