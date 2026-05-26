@@ -7,7 +7,7 @@
 
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type { StreamRpc } from "../../src/stream.js";
-import { analyzeCapnwebWire, formatCapnwebWire, type WireAnalysis } from "./capnweb-wire.js";
+import { analyzeCapnwebWire, type WireAnalysis } from "./capnweb-wire.js";
 
 const defaultWorkerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 
@@ -27,22 +27,18 @@ export type StreamFixture = AsyncDisposable & {
   wsMessages: WsMessage[];
   parsedWsMessages(): ParsedWsMessage[];
   wireAnalysis(): WireAnalysis;
-  formatWire(): string;
-  printWire(): string;
 };
 
 export type WithStreamOptions = {
   path: string;
   workerUrl?: string;
   log?: Pick<Console, "log">;
-  printWireOnDispose?: boolean;
 };
 
 export async function withStream({
   path,
   workerUrl = defaultWorkerUrl,
   log = console,
-  printWireOnDispose = false,
 }: WithStreamOptions): Promise<StreamFixture> {
   const url = toWebSocketUrl(workerUrl, path);
   log.log(`[with-stream] connecting ${url}`);
@@ -64,20 +60,13 @@ export async function withStream({
         data: JSON.parse(frame.data) as unknown,
       })),
     wireAnalysis: () => analyzeCapnwebWire(wsMessages),
-    formatWire: () => formatCapnwebWire(wsMessages),
-    printWire: () => {
-      const report = fixture.formatWire();
-      log.log(report);
-      return report;
-    },
     async [Symbol.asyncDispose]() {
       log.log(`[with-stream] disconnecting path=${path}`);
-      if (printWireOnDispose) fixture.printWire();
       rpc[Symbol.dispose]();
       await closeWebSocket(webSocket);
-      const { resultWaits, waves, spanMs } = fixture.wireAnalysis();
+      const { resultWaits } = fixture.wireAnalysis();
       log.log(
-        `[with-stream] disconnected path=${path} (${wsMessages.length} frames, ${resultWaits.length} pulled results, ${waves.length} latency waves, ${spanMs.toFixed(1)}ms span)`,
+        `[with-stream] disconnected path=${path} (${wsMessages.length} frames, ${resultWaits.length} pulled results)`,
       );
     },
   };

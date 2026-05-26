@@ -21,7 +21,7 @@ export type BenchmarkResult = {
   committed: number;
   elapsedMs: number;
   eventsPerSecond: number;
-  serverCount: number;
+  serverMaxOffset: number;
   runId: string;
   dispatchMs?: number;
 };
@@ -65,7 +65,7 @@ export class BenchmarkRunner extends DurableObject {
     }
 
     const elapsedMs = Date.now() - startedAt;
-    const serverCount = await stub.count();
+    const serverMaxOffset = await stub.maxOffset();
 
     return {
       runner: this.ctx.id.name ?? this.ctx.id.toString(),
@@ -76,7 +76,7 @@ export class BenchmarkRunner extends DurableObject {
       committed,
       elapsedMs,
       eventsPerSecond: committed / (elapsedMs / 1_000),
-      serverCount,
+      serverMaxOffset,
       runId,
       ...(dispatchMs !== undefined ? { dispatchMs } : {}),
     };

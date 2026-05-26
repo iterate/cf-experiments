@@ -45,7 +45,7 @@
  *
  * ## Multi-key atomicity (event + idempotency index + meta)
  *
- * Each append touches up to three keys (`stream:evt:*`, `stream:idem:*`, `stream:meta:nextOffset`).
+ * Each append touches up to three keys (`event:*`, `idempotency:*`, `maxOffset`).
  *
  * - Every storage method is implicitly transactional, including multi-key access — footnote 1 on
  *   [SQLite storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
@@ -114,15 +114,15 @@ export const STREAM_EVENTS_SCHEMA = `
   )
 `;
 
-/** Full `StreamEvent` JSON at `stream:evt:{offset}`. */
-export const streamEventKvKey = (offset: number) => `stream:evt:${offset}`;
+/** Full `StreamEvent` JSON at `event:{offset}`. */
+export const streamEventKvKey = (offset: number) => `event:${offset}`;
 
-/** Idempotency lookup: `stream:idem:{key}` → numeric offset (separate key so reads are O(1)). */
+/** Idempotency lookup: `idempotency:{key}` → numeric offset (separate key so reads are O(1)). */
 export const streamEventIdempotencyKvKey = (idempotencyKey: string) =>
-  `stream:idem:${idempotencyKey}`;
+  `idempotency:${idempotencyKey}`;
 
-/** High-water offset; `countStreamEventsFromKv` reads this instead of scanning `stream:evt:*`. */
-export const STREAM_EVENTS_META_NEXT_OFFSET_KEY = "stream:meta:nextOffset";
+/** High-water offset; `maxOffsetFromKv` reads this instead of scanning `event:*`. */
+export const STREAM_EVENTS_META_MAX_OFFSET_KEY = "maxOffset";
 
 /**
  * Async `put` options for the `allowUnconfirmedWrites: true` path only.
@@ -170,8 +170,8 @@ export function countStreamEvents({ sql }: { sql: StreamEventSql }): number {
   return sql.exec<{ c: number }>("select count(*) as c from events").one().c;
 }
 
-export function countStreamEventsFromKv({ kv }: { kv: StreamEventSyncKv }): number {
-  return kv.get<number>(STREAM_EVENTS_META_NEXT_OFFSET_KEY) ?? 0;
+export function maxOffsetFromKv({ kv }: { kv: StreamEventSyncKv }): number {
+  return kv.get<number>(STREAM_EVENTS_META_MAX_OFFSET_KEY) ?? 0;
 }
 
 export function readEventByOffset({
@@ -279,7 +279,7 @@ type StreamEventKvAppendPlan =
  *
  * ### `allowUnconfirmedWrites: true` (throughput / fan-out friendly)
  *
- * 1. `transactionSync` + sync `kv.get` — idempotency check, read `stream:meta:nextOffset`, allocate
+ * 1. `transactionSync` + sync `kv.get` — idempotency check, read `maxOffset`, allocate
  *    offset ([`transactionSync`](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#transactionsync)).
  * 2. Three `void storage.put(..., { allowUnconfirmed: true, noCache: true })` with **no `await`**
  *    between them — coalesced atomic batch per
@@ -321,7 +321,7 @@ export function writeEventFromKv({
       }
     }
 
-    const latest = storage.kv.get<number>(STREAM_EVENTS_META_NEXT_OFFSET_KEY) ?? 0;
+    const latest = storage.kv.get<number>(STREAM_EVENTS_META_MAX_OFFSET_KEY) ?? 0;
     const nextOffset = latest + 1;
     if (input.offset !== undefined && input.offset !== nextOffset) {
       throw new Error(`Offset precondition failed: expected ${nextOffset}, got ${input.offset}`);
@@ -339,7 +339,7 @@ export function writeEventFromKv({
       if (input.idempotencyKey !== undefined) {
         storage.kv.put(streamEventIdempotencyKvKey(input.idempotencyKey), nextOffset);
       }
-      storage.kv.put(STREAM_EVENTS_META_NEXT_OFFSET_KEY, nextOffset);
+      storage.kv.put(STREAM_EVENTS_META_MAX_OFFSET_KEY, nextOffset);
     }
 
     return { kind: "append", event, idempotencyKey: input.idempotencyKey };
@@ -362,7 +362,7 @@ export function writeEventFromKv({
       );
     }
     void storage.put(
-      STREAM_EVENTS_META_NEXT_OFFSET_KEY,
+      STREAM_EVENTS_META_MAX_OFFSET_KEY,
       plan.event.offset,
       STREAM_EVENT_UNCONFIRMED_KV_PUT,
     );

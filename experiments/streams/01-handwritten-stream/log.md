@@ -5,12 +5,35 @@
 
 # Notes
 
+## 2026-05-26 22:17 UTC+1
+
+- Tightened `append()` / `stream()` implementation comments so each non-obvious branch names the
+  Cap'n Web test that should fail if the behavior changes.
+- Added stream lifecycle coverage:
+  - best-effort appends fan out to subscribers while unconfirmed write debt is still visible;
+  - checkpointed `appendBatchDebug()` proves the triggering append returns after scheduling, not
+    awaiting, the checkpoint;
+  - per-session RPC disposal removes live subscribers after WebSocket teardown.
+- Fixed a subscriber leak found by the new lifecycle test: Cap'n Web session teardown did not
+  promptly call the returned `ReadableStream` cancel hook, so the per-connection `StreamRpcTarget`
+  now owns its subscribers and releases them from `[Symbol.dispose]()`.
+- Local result: `pnpm typecheck` and `pnpm vitest run scripts/stream-capnweb.test.ts` passed
+  with 19 tests.
+- Deployed version `1dde431e-045b-4c2a-aea4-c14424d2fc73`.
+- Ran `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`.
+- Result: 19 tests passed in one test file.
+
 ## 2026-05-26 21:11 UTC+1
 
 - Added detailed implementation comments to `Stream.append()` and checkpoint scheduling, with first-party
   Cloudflare docs links for `allowUnconfirmed`, `storage.sync()`, and `blockConcurrencyWhile()`.
-- Added `stream-design-notes.md` to capture Stream-specific design reasoning: append contract,
-  confirmed/best-effort/checkpointed semantics, broadcast timing, backpressure, and debug hooks.
+- Simplified documentation and settings structure after review:
+  - merged `design-goals.md` and `stream-design-notes.md` into `design.md`;
+  - moved stream settings out of `packages/shared` and into `stream.ts`;
+  - collapsed separate debug RPCs into `debug()` and removed the mid-flight `appendBatchDebug()` probe.
+- Deployed version `5430fce7-bf06-4d9d-a441-81e708e6c72a`.
+- Ran `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`.
+- Result: 17 tests passed in one test file.
 
 ## 2026-05-26 20:36 UTC+1
 

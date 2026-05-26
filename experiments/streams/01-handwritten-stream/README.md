@@ -2,8 +2,7 @@
 
 This experiment explores a Cap'n Web RPC interface directly on a `Stream` Durable Object.
 
-See [design-goals.md](./design-goals.md) for the durability/throughput contract we are trying to make
-precise, and [stream-design-notes.md](./stream-design-notes.md) for implementation notes.
+See [design.md](./design.md) for the durability/throughput contract and implementation notes.
 
 ## What we're trying to find out
 
@@ -18,8 +17,8 @@ The current API separates three modes:
 - `checkpointed`: best-effort writes plus periodic `storage.sync()` barriers to bound the
   unconfirmed window.
 
-The experiment also checks stream fan-out, replay, idempotency, backpressure signals, and Cap'n Web
-wire round trips.
+The experiment also checks stream fan-out, replay, idempotency, durability modes, and Cap'n Web wire
+round trips.
 
 ## How to run
 

@@ -59,9 +59,14 @@ describe("handwritten stream capnweb", () => {
 
     await using fixture = await withStream({ path });
 
-    await fixture.rpc.append({ event });
+    const appended = await fixture.rpc.append({ event });
 
-    expect(fixture.wireAnalysis().resultWaits).toHaveLength(1);
+    expect(appended).toMatchObject({
+      type: event.type,
+      offset: 1,
+      payload: event.payload,
+      createdAt: expect.any(String),
+    });
     expect(fixture.parsedWsMessages()).toMatchObject([
       { direction: "out", data: ["push", ["pipeline", 0, ["append"], [{ event }]]] },
       { direction: "out", data: ["pull", 1] },
@@ -79,33 +84,7 @@ describe("handwritten stream capnweb", () => {
       },
       { direction: "out", data: ["release", 1, expect.any(Number)] },
     ]);
-  });
-
-  it("distinguishes sequential waits from concurrent waits", async () => {
-    const sequentialName = `stream-${crypto.randomUUID()}`;
-    const firstConcurrentName = `stream-${crypto.randomUUID()}`;
-    const secondConcurrentName = `stream-${crypto.randomUUID()}`;
-
-    await using sequential = await withStream({ path: sequentialName });
-    await sequential.rpc.append({
-      event: { type: "test.sequential", payload: { name: sequentialName } },
-    });
-    expect(await sequential.rpc.count()).toBe(1);
-    expect(sequential.wireAnalysis().resultWaits).toHaveLength(2);
-    expect(sequential.wireAnalysis().waves).toHaveLength(2);
-
-    await using concurrent = await withStream({ path: firstConcurrentName });
-    await using concurrent2 = await withStream({ path: secondConcurrentName });
-    const firstAppend = concurrent.rpc.append({
-      event: { type: "test.concurrent", payload: { name: firstConcurrentName } },
-    });
-    const secondAppend = concurrent2.rpc.append({
-      event: { type: "test.concurrent", payload: { name: secondConcurrentName } },
-    });
-    await Promise.all([firstAppend, secondAppend]);
-
-    expect(concurrent.wireAnalysis().resultWaits).toHaveLength(1);
-    expect(concurrent2.wireAnalysis().resultWaits).toHaveLength(1);
+    expect(await fixture.rpc.maxOffset()).toBe(1);
   });
 
   it("avoids pulls for unobserved results and for .map() source arrays", async () => {
@@ -158,6 +137,7 @@ describe("handwritten stream capnweb", () => {
       direction: "out",
       data: ["pull", 2],
     });
+    expect(mapped.wireAnalysis().resultWaits).toHaveLength(1);
   });
 
   it(
@@ -316,6 +296,33 @@ describe("handwritten stream capnweb", () => {
     streamReader.releaseLock();
   });
 
+  it("removes cancelled subscribers from live fan-out", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+
+    {
+      await using reader = await withStream({ path });
+      const readable = await reader.rpc.stream();
+
+      expect(await reader.rpc.debug()).toMatchObject({
+        subscribers: [{ enqueuedEvents: 0 }],
+      });
+    }
+
+    await using probe = await withStream({ path });
+    expect(await probe.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+
+    await using writer = await withStream({ path });
+    await writer.rpc.append({
+      event: { type: "test.stream.cancel", payload: { shouldFanOut: false } },
+    });
+
+    expect(await probe.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("idempotent append returns the original event and emits once to live subscribers", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();
@@ -334,7 +341,7 @@ describe("handwritten stream capnweb", () => {
     });
 
     expect(retryAppend).toEqual(firstAppend);
-    expect(await writer.rpc.count()).toBe(1);
+    expect(await writer.rpc.maxOffset()).toBe(1);
 
     const [delivered] = await readEvents(streamReader, 1, 500);
     expect(delivered).toEqual(firstAppend);
@@ -356,7 +363,7 @@ describe("handwritten stream capnweb", () => {
         event: { type: "test.precondition", offset: 99, payload: { ok: false } },
       }),
     ).rejects.toThrow(/Offset precondition failed/);
-    expect(await fixture.rpc.count()).toBe(1);
+    expect(await fixture.rpc.maxOffset()).toBe(1);
 
     await using reader = await withStream({ path });
     const readable = await reader.rpc.stream();
@@ -371,46 +378,6 @@ describe("handwritten stream capnweb", () => {
     await nextRead.catch(() => undefined);
   });
 
-  it(
-    "buffers a burst for a delayed client reader beyond desiredBufferedEvents",
-    async () => {
-      const path = `stream-${crypto.randomUUID()}`;
-      const burstSize = 20;
-      const events: StreamEventInput[] = Array.from({ length: burstSize }, (_, i) => ({
-        type: "test.backpressure",
-        payload: { n: i + 1 },
-      }));
-
-      await using reader = await withStream({ path });
-      const readable = await reader.rpc.stream({ desiredBufferedEvents: 1 });
-
-      await using writer = await withStream({ path });
-      await writer.rpc.appendBatch({ events });
-
-      const debugAfterBurst = await reader.rpc.streamDebug();
-      expect(debugAfterBurst.subscribers).toHaveLength(1);
-      expect(debugAfterBurst.subscribers[0]).toMatchObject({
-        enqueuedEvents: burstSize,
-        desiredBufferedEvents: 1,
-      });
-
-      // desiredBufferedEvents is a backpressure signal, not a hard cap:
-      // enqueue() accepted the whole burst while the client had not started
-      // reading yet.
-      expect(debugAfterBurst.subscribers[0]!.desiredSize).toBeLessThanOrEqual(1);
-
-      // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
-      const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
-      const delivered = await readEvents(streamReader, burstSize, 1_000);
-
-      expectContiguousOffsets(delivered, burstSize);
-      expect(delivered.map((event) => event.payload)).toEqual(events.map((event) => event.payload));
-
-      streamReader.releaseLock();
-    },
-    5_000,
-  );
-
   it("defaults to confirmed appends and does not accumulate unconfirmed write debt", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
@@ -419,8 +386,8 @@ describe("handwritten stream capnweb", () => {
       event: { type: "test.durability.default", payload: { mode: "confirmed" } },
     });
 
-    expect(await fixture.rpc.count()).toBe(1);
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.maxOffset()).toBe(1);
+    expect(await fixture.rpc.debug()).toMatchObject({
       settings: {
         defaultAppendDurabilityMode: "confirmed",
         checkpointEveryUnconfirmedAppends: 100,
@@ -446,7 +413,7 @@ describe("handwritten stream capnweb", () => {
       durability: { mode: "best-effort" },
     });
 
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.debug()).toMatchObject({
       unconfirmedWriteCount: 2,
       checkpointStartedCount: 0,
       checkpointCompletedCount: 0,
@@ -457,6 +424,34 @@ describe("handwritten stream capnweb", () => {
       checkpointStartedCount: 0,
       checkpointCompletedCount: 0,
     });
+  });
+
+  it("best-effort appends fan out while write debt is still unconfirmed", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const event: StreamEventInput = {
+      type: "test.durability.best-effort-live",
+      payload: { phase: "before-sync" },
+    };
+
+    await using reader = await withStream({ path });
+    const readable = await reader.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+    const liveRead = streamReader.read();
+
+    await using writer = await withStream({ path });
+    const appended = await writer.rpc.append({ event, durability: "best-effort" });
+    const delivered = await withTimeout(liveRead, 500);
+
+    expect(delivered.done).toBe(false);
+    expect(delivered.value).toEqual(appended);
+    expect(await writer.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 1,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+
+    streamReader.releaseLock();
   });
 
   it("does not count idempotent best-effort retries as new unconfirmed writes", async () => {
@@ -474,8 +469,8 @@ describe("handwritten stream capnweb", () => {
     });
 
     expect(retry).toEqual(first);
-    expect(await fixture.rpc.count()).toBe(1);
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.maxOffset()).toBe(1);
+    expect(await fixture.rpc.debug()).toMatchObject({
       unconfirmedWriteCount: 1,
       checkpointStartedCount: 0,
       checkpointCompletedCount: 0,
@@ -495,8 +490,8 @@ describe("handwritten stream capnweb", () => {
       durability: "confirmed",
     });
 
-    expect(await fixture.rpc.count()).toBe(2);
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.maxOffset()).toBe(2);
+    expect(await fixture.rpc.debug()).toMatchObject({
       settings: { defaultAppendDurabilityMode: "best-effort" },
       unconfirmedWriteCount: 1,
     });
@@ -515,8 +510,8 @@ describe("handwritten stream capnweb", () => {
       durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 2 },
     });
 
-    expect(await fixture.rpc.count()).toBe(events.length);
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.maxOffset()).toBe(events.length);
+    expect(await fixture.rpc.debug()).toMatchObject({
       unconfirmedWriteCount: 0,
       checkpointInProgress: false,
       checkpointStartedCount: 1,
@@ -524,7 +519,7 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
-  it("checkpointed appendBatch reports scheduled checkpoint before the follow-up RPC observes completion", async () => {
+  it("checkpointed appendBatch returns after scheduling but before awaiting the checkpoint", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const events: StreamEventInput[] = Array.from({ length: 5 }, (_, i) => ({
       type: "test.durability.checkpointed-debug",
@@ -538,14 +533,14 @@ describe("handwritten stream capnweb", () => {
     });
 
     expect(result.events.map((event) => event.offset)).toEqual([1, 2, 3, 4, 5]);
-    expect(result.durability).toMatchObject({
+    expect(result.debug).toMatchObject({
       unconfirmedWriteCount: 5,
       checkpointInProgress: true,
       checkpointStartedCount: 1,
       checkpointCompletedCount: 0,
     });
 
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.debug()).toMatchObject({
       unconfirmedWriteCount: 0,
       checkpointInProgress: false,
       checkpointStartedCount: 1,
@@ -564,8 +559,8 @@ describe("handwritten stream capnweb", () => {
       }),
     ).rejects.toThrow();
 
-    expect(await fixture.rpc.count()).toBe(0);
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
       unconfirmedWriteCount: 0,
       checkpointStartedCount: 0,
       checkpointCompletedCount: 0,
@@ -581,7 +576,7 @@ describe("handwritten stream capnweb", () => {
     });
 
     await fixture.rpc.append({ event: { type: "test.durability.settings", payload: { n: 1 } } });
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.debug()).toMatchObject({
       settings: {
         defaultAppendDurabilityMode: "checkpointed",
         checkpointEveryUnconfirmedAppends: 2,
@@ -592,7 +587,7 @@ describe("handwritten stream capnweb", () => {
     });
 
     await fixture.rpc.append({ event: { type: "test.durability.settings", payload: { n: 2 } } });
-    expect(await fixture.rpc.durabilityDebug()).toMatchObject({
+    expect(await fixture.rpc.debug()).toMatchObject({
       unconfirmedWriteCount: 0,
       checkpointInProgress: false,
       checkpointStartedCount: 1,

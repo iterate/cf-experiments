@@ -1,20 +1,32 @@
 import { newWebSocketRpcSession } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
-import { writeEventFromKv, type StreamEvent, type StreamEventInput } from "@cf-experiments/shared/event";
-import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import {
-  type AppendDurabilityMode,
-  StreamDoSettings as StreamDoSettingsSchema,
-  type StreamDoSettings,
-  readStreamDoSettingsFromKv,
-  streamDoSettingsDefaults,
-  writeStreamDoSettingsToKv,
-} from "@cf-experiments/shared/stream-config";
+  writeEventFromKv,
+  type StreamEvent,
+  type StreamEventInput,
+} from "@cf-experiments/shared/event";
+import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
+
+const STREAM_SETTINGS_KEY = "settings";
+
+type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
+
+type StreamSettings = {
+  defaultAppendDurabilityMode: AppendDurabilityMode;
+  checkpointEveryUnconfirmedAppends: number;
+  debugConfirmedSyncDelayMs: number;
+};
+
+const defaultSettings = (): StreamSettings => ({
+  defaultAppendDurabilityMode: "confirmed",
+  checkpointEveryUnconfirmedAppends: 100,
+  debugConfirmedSyncDelayMs: 0,
+});
 
 type StreamSubscriber = {
   controller: ReadableStreamDefaultController<StreamEvent>;
-  desiredBufferedEvents: number;
   enqueuedEvents: number;
+  sessionSubscribers?: Set<StreamSubscriber>;
 };
 
 type AppendDurability =
@@ -26,7 +38,7 @@ type AppendDurability =
 
 export class Stream extends DurableObject {
   #incarnationId = crypto.randomUUID();
-  #settings = streamDoSettingsDefaults();
+  #settings = defaultSettings();
   #unconfirmedWriteCount = 0;
   #checkpointInProgress = false;
   #checkpointStartedCount = 0;
@@ -35,31 +47,38 @@ export class Stream extends DurableObject {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.#settings = readStreamDoSettingsFromKv({ kv: this.ctx.storage.kv });
-  }
-
-  get settings(): StreamDoSettings {
-    return this.#settings;
-  }
-
-  /** Reload from sync KV (e.g. another writer updated `stream:settings`). */
-  reloadSettings(): StreamDoSettings {
-    this.#settings = readStreamDoSettingsFromKv({ kv: this.ctx.storage.kv });
-    return this.#settings;
+    this.#settings = this.#readSettings();
   }
 
   /** Merge patch, persist to sync KV, update in-memory copy. */
-  patchSettings(settings: Partial<StreamDoSettings>): StreamDoSettings {
-    this.#settings = writeStreamDoSettingsToKv({ kv: this.ctx.storage.kv, settings });
+  patchSettings(settings: Partial<StreamSettings>): StreamSettings {
+    this.#settings = this.#parseSettings({ ...this.#readSettings(), ...settings });
+    this.ctx.storage.kv.put(STREAM_SETTINGS_KEY, this.#settings);
     return this.#settings;
   }
 
-  async append(args: { event: StreamEventInput; durability?: AppendDurability }): Promise<StreamEvent> {
+  async append(args: {
+    event: StreamEventInput;
+    durability?: AppendDurability;
+  }): Promise<StreamEvent> {
     const kv = this.ctx.storage.kv;
     if (args.event.idempotencyKey !== undefined) {
-      const existingOffset = kv.get<number>(`stream:idem:${args.event.idempotencyKey}`);
+      /**
+       * Idempotency retries must be a read-only fast path at the Stream boundary.
+       *
+       * `writeEventFromKv()` also protects the storage write, but doing this
+       * before resolving durability is observable stream behavior: a retry must
+       * not broadcast a duplicate event, increment unconfirmed write debt, or
+       * schedule a checkpoint. See:
+       *
+       * - "idempotent append returns the original event and emits once to live subscribers"
+       * - "does not count idempotent best-effort retries as new unconfirmed writes"
+       *
+       * in `scripts/stream-capnweb.test.ts`.
+       */
+      const existingOffset = kv.get<number>(`idempotency:${args.event.idempotencyKey}`);
       if (existingOffset !== undefined) {
-        const existing = kv.get<StreamEvent>(`stream:evt:${existingOffset}`);
+        const existing = kv.get<StreamEvent>(`event:${existingOffset}`);
         if (existing !== undefined) return existing;
       }
     }
@@ -102,6 +121,22 @@ export class Stream extends DurableObject {
      * platform flush / explicit `sync()` may lose those offsets. `checkpointed`
      * adds periodic barriers to bound the window, but the append that triggers a
      * checkpoint still returns before that checkpoint resolves.
+     *
+     * Tests covering this contract in `scripts/stream-capnweb.test.ts`:
+     *
+     * - "lets unrelated RPC resolve while confirmed append waits for durability"
+     *   fails if confirmed append work holds the DO's global output gate instead
+     *   of awaiting an explicit append-local barrier.
+     * - "lets subscribers drain old events but not the new confirmed event before
+     *   durability" fails if we broadcast before the confirmed barrier, or if old
+     *   replay bytes are unnecessarily held behind the pending append.
+     * - "allows a best-effort per-call override and clears it with an explicit
+     *   sync barrier" and "uses checkpointed stream settings when append does
+     *   not pass a per-call override" fail if non-confirmed modes do not count
+     *   and expose unconfirmed append debt.
+     * - "best-effort appends fan out while write debt is still unconfirmed"
+     *   fails if the non-confirmed branch stops broadcasting live events before
+     *   an explicit `sync()` clears that debt.
      */
     if (durability.mode === "confirmed") {
       await this.#delayForConfirmedAppendDebug();
@@ -112,6 +147,14 @@ export class Stream extends DurableObject {
 
     this.#broadcast(committed);
 
+    /**
+     * Only non-confirmed appends accrue stream-level unconfirmed debt. Confirmed
+     * appends already paid their explicit `storage.sync()` barrier before
+     * broadcasting. If this increment moves before the confirmed branch, the
+     * default-mode test observes write debt after a confirmed append; if it is
+     * removed or moved after checkpoint scheduling, the best-effort and
+     * checkpointed durability tests stop seeing the intended mode split.
+     */
     this.#unconfirmedWriteCount += 1;
     if (durability.mode === "checkpointed") {
       this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedAppends);
@@ -131,35 +174,39 @@ export class Stream extends DurableObject {
     return events;
   }
 
-  async appendBatchDebug(args: { events: StreamEventInput[]; durability?: AppendDurability }) {
+  async appendBatchDebug(args: {
+    events: StreamEventInput[];
+    durability?: AppendDurability;
+  }): Promise<{ events: StreamEvent[]; debug: ReturnType<Stream["debug"]> }> {
     return {
       events: await this.appendBatch(args),
-      durability: this.durabilityDebug(),
+      debug: this.debug(),
     };
   }
 
-  count() {
-    return this.ctx.storage.kv.get<number>("stream:meta:nextOffset") ?? 0;
+  maxOffset() {
+    return this.ctx.storage.kv.get<number>("maxOffset") ?? 0;
   }
 
-  async sync(): Promise<{
-    unconfirmedWriteCount: number;
-    checkpointStartedCount: number;
-    checkpointCompletedCount: number;
-  }> {
+  async sync() {
     await this.ctx.storage.sync();
     this.#unconfirmedWriteCount = 0;
-    return this.durabilityDebug();
+    return this.debug();
   }
 
-  durabilityDebug() {
+  /** Test/experiment introspection; not a product API. */
+  debug() {
     return {
-      settings: this.settings,
+      settings: this.#settings,
       incarnationId: this.#incarnationId,
       unconfirmedWriteCount: this.#unconfirmedWriteCount,
       checkpointInProgress: this.#checkpointInProgress,
       checkpointStartedCount: this.#checkpointStartedCount,
       checkpointCompletedCount: this.#checkpointCompletedCount,
+      subscribers: Array.from(this.#streamSubscribers, (subscriber) => ({
+        desiredSize: subscriber.controller.desiredSize,
+        enqueuedEvents: subscriber.enqueuedEvents,
+      })),
     };
   }
 
@@ -181,84 +228,77 @@ export class Stream extends DurableObject {
    *
    * Cap'n Web runs on this DO (`fetch()` → `newWebSocketRpcSession(server, getCapability())`),
    * so chunks are RPC pass-by-value `StreamEvent` objects — no NDJSON byte encoding.
-   *
-   * ## Backpressure / buffering model
-   *
-   * There are several queues in play:
-   *
-   * 1. This DO-created `ReadableStream`, observed through `streamDebug().desiredSize`.
-   * 2. Cap'n Web's pipe from this stream into WebSocket frames.
-   * 3. The client-side `ReadableStream` returned by Cap'n Web.
-   * 4. The WebSocket/runtime transport buffers between both isolates/processes.
-   *
-   * `desiredBufferedEvents` only controls queue #1. Internally it becomes the
-   * Web Streams `highWaterMark`, whose unit here is `StreamEvent` objects, not
-   * bytes: one enqueued event counts as 1 because there is no custom `size()`
-   * function.
-   *
-   * "Reports backpressure" means the controller's `desiredSize` becomes zero or
-   * negative. In pull-based streams an underlying source would normally stop
-   * producing until `desiredSize` rises again. Here, `append()` is push-based and
-   * currently ignores that signal: `controller.enqueue()` does not throw merely
-   * because `desiredSize <= 0`, so bursts can exceed `desiredBufferedEvents`.
-   * The backpressure test documents that observed behavior.
-   *
-   * We intentionally accept only an event count, not a full `QueuingStrategy`.
-   * A user-defined `size()` function is not meaningful over Cap'n Web RPC here.
    */
-  stream(
-    options: {
-      /**
-       * Desired number of `StreamEvent` objects buffered inside the DO-created
-       * ReadableStream before it reports backpressure.
-       *
-       * This is not bytes. Because each chunk in this stream is one `StreamEvent`
-       * and we do not pass a custom `size()` function to `ReadableStream`, every
-       * event counts as size 1.
-       */
-      desiredBufferedEvents?: number;
-    } = {},
-  ): ReadableStream<StreamEvent> {
+  stream(): ReadableStream<StreamEvent> {
+    return this.#openStream();
+  }
+
+  streamForSession(sessionSubscribers: Set<StreamSubscriber>): ReadableStream<StreamEvent> {
+    return this.#openStream(sessionSubscribers);
+  }
+
+  releaseSessionSubscribers(sessionSubscribers: Set<StreamSubscriber>): void {
+    for (const subscriber of sessionSubscribers) {
+      this.#streamSubscribers.delete(subscriber);
+    }
+    sessionSubscribers.clear();
+  }
+
+  #openStream(sessionSubscribers?: Set<StreamSubscriber>): ReadableStream<StreamEvent> {
     const kv = this.ctx.storage.kv;
-    const latestOffset = this.count();
-    const desiredBufferedEvents = options.desiredBufferedEvents ?? 1;
+    /**
+     * Capture the history boundary once, before replay. The stream contract is
+     * "replay committed history, then live appends"; if we re-read maxOffset
+     * during replay, or started from the wrong key prefix, replay could skip,
+     * duplicate, or reorder events. See "replays committed history before
+     * switching to live appends" and "rejects offset precondition failures
+     * without advancing the stream" in `scripts/stream-capnweb.test.ts`.
+     */
+    const latestOffset = this.maxOffset();
 
     let subscriber: StreamSubscriber | undefined;
 
-    return new ReadableStream<StreamEvent>(
-      {
-        start: (streamController) => {
-          subscriber = {
-            controller: streamController,
-            desiredBufferedEvents,
-            enqueuedEvents: 0,
-          };
-          this.#streamSubscribers.add(subscriber);
+    return new ReadableStream<StreamEvent>({
+      start: (streamController) => {
+        subscriber = {
+          controller: streamController,
+          enqueuedEvents: 0,
+          sessionSubscribers,
+        };
+        /**
+         * Register before replay and keep the same subscriber for live fan-out.
+         * The multi-subscriber and live-stream tests fail if each reader is not
+         * added to `#streamSubscribers`, if `#broadcast()` does not fan out to
+         * all registered subscribers, or if replay is not delivered through the
+         * same enqueue path as live events.
+         */
+        this.#streamSubscribers.add(subscriber);
+        sessionSubscribers?.add(subscriber);
 
-          for (let offset = 1; offset <= latestOffset; offset++) {
-            const event = kv.get<StreamEvent>(`stream:evt:${offset}`);
-            if (event !== undefined) this.#enqueueToSubscriber(subscriber, event);
-          }
-        },
-        cancel: () => {
-          if (subscriber !== undefined) {
-            this.#streamSubscribers.delete(subscriber);
-          }
-        },
+        for (let offset = 1; offset <= latestOffset; offset++) {
+          const event = kv.get<StreamEvent>(`event:${offset}`);
+          if (event !== undefined) this.#enqueueToSubscriber(subscriber, event);
+        }
       },
-      { highWaterMark: desiredBufferedEvents },
-    );
-  }
-
-  /** Introspection for experiments/tests; not part of the Stream product API. */
-  streamDebug() {
-    return {
-      subscribers: Array.from(this.#streamSubscribers, (subscriber) => ({
-        desiredSize: subscriber.controller.desiredSize,
-        enqueuedEvents: subscriber.enqueuedEvents,
-        desiredBufferedEvents: subscriber.desiredBufferedEvents,
-      })),
-    };
+      cancel: () => {
+        if (subscriber !== undefined) {
+          /**
+           * Cancellation must remove the subscriber immediately. Otherwise later
+           * broadcasts keep trying to enqueue into a dead stream and `debug()`
+           * reports leaked subscribers.
+           *
+           * Cap'n Web session teardown currently reaches this experiment through
+           * `StreamRpcTarget[Symbol.dispose]()` rather than a prompt client-side
+           * `ReadableStream.cancel()`, so this local Web Streams cancel hook and
+           * the session disposer both remove from the same sets. See "removes
+           * cancelled subscribers from live fan-out" in
+           * `scripts/stream-capnweb.test.ts`.
+           */
+          this.#streamSubscribers.delete(subscriber);
+          subscriber.sessionSubscribers?.delete(subscriber);
+        }
+      },
+    });
   }
 
   getCapability(_policy?: unknown) {
@@ -290,6 +330,7 @@ export class Stream extends DurableObject {
     } catch (error) {
       console.error("Error enqueuing event to subscriber", event, error, subscriber);
       this.#streamSubscribers.delete(subscriber);
+      subscriber.sessionSubscribers?.delete(subscriber);
     }
   }
 
@@ -300,16 +341,21 @@ export class Stream extends DurableObject {
     const mode =
       typeof durability === "string"
         ? durability
-        : durability?.mode ?? this.settings.defaultAppendDurabilityMode;
+        : (durability?.mode ?? this.#settings.defaultAppendDurabilityMode);
+    /**
+     * Per-call durability wins over persisted stream settings, but object-form
+     * checkpoint thresholds still need validation before any write is allocated.
+     * The default/override/settings/invalid-threshold tests in
+     * `scripts/stream-capnweb.test.ts` cover each branch here.
+     */
     return {
       mode,
       checkpointEveryUnconfirmedAppends:
-        typeof durability === "object" &&
-        durability.checkpointEveryUnconfirmedAppends !== undefined
-          ? StreamDoSettingsSchema.shape.checkpointEveryUnconfirmedAppends.parse(
+        typeof durability === "object" && durability.checkpointEveryUnconfirmedAppends !== undefined
+          ? this.#validateCheckpointEveryUnconfirmedAppends(
               durability.checkpointEveryUnconfirmedAppends,
             )
-          : this.settings.checkpointEveryUnconfirmedAppends,
+          : this.#settings.checkpointEveryUnconfirmedAppends,
     };
   }
 
@@ -336,6 +382,12 @@ export class Stream extends DurableObject {
        * append acknowledgement. A checkpoint is a stream-level throttle: once the
        * unconfirmed append window is full, pause later delivered events until the
        * explicit durability barrier has caught up.
+       *
+       * The call is intentionally fire-and-forget from `append()`. Awaiting it
+       * would turn the append that fills the window into a confirmed append,
+       * hiding the mode difference this experiment is measuring. See
+       * "checkpointed appendBatch returns after scheduling but before awaiting
+       * the checkpoint" in `scripts/stream-capnweb.test.ts`.
        */
 
       // Let the current handler reach its next turn before deciding which
@@ -359,7 +411,7 @@ export class Stream extends DurableObject {
   }
 
   async #delayForConfirmedAppendDebug(): Promise<void> {
-    const delayMs = this.settings.debugConfirmedSyncDelayMs;
+    const delayMs = this.#settings.debugConfirmedSyncDelayMs;
     if (delayMs === 0) return;
     // Test-only delay: widens the gap between "event locally accepted" and
     // "storage.sync() completed" so causal-egress tests can assert ordering
@@ -367,11 +419,59 @@ export class Stream extends DurableObject {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
+  #readSettings(): StreamSettings {
+    return this.#parseSettings(this.ctx.storage.kv.get(STREAM_SETTINGS_KEY) ?? {});
+  }
+
+  #parseSettings(settings: Partial<StreamSettings>): StreamSettings {
+    const next = { ...defaultSettings(), ...settings };
+    this.#validateDurabilityMode(next.defaultAppendDurabilityMode);
+    this.#validateCheckpointEveryUnconfirmedAppends(next.checkpointEveryUnconfirmedAppends);
+    if (!Number.isInteger(next.debugConfirmedSyncDelayMs) || next.debugConfirmedSyncDelayMs < 0) {
+      throw new Error("debugConfirmedSyncDelayMs must be a non-negative integer");
+    }
+    return next;
+  }
+
+  #validateDurabilityMode(mode: string): asserts mode is AppendDurabilityMode {
+    if (mode !== "confirmed" && mode !== "best-effort" && mode !== "checkpointed") {
+      throw new Error(`Unknown append durability mode: ${mode}`);
+    }
+  }
+
+  #validateCheckpointEveryUnconfirmedAppends(value: number): number {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error("checkpointEveryUnconfirmedAppends must be a positive integer");
+    }
+    return value;
+  }
 }
 
-export type StreamRpc = Omit<Stream, keyof DurableObject | "getCapability" | "fetch">;
+export type StreamRpc = Omit<
+  Stream,
+  keyof DurableObject | "getCapability" | "fetch" | "streamForSession" | "releaseSessionSubscribers"
+>;
 
-export const StreamRpcTarget = makeRpcTargetClass<StreamRpc, Stream>(Stream, {
-  exclude: ["getCapability", "fetch"],
+type BaseStreamRpc = Omit<StreamRpc, "stream">;
+
+const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
+  exclude: ["getCapability", "fetch", "stream", "streamForSession", "releaseSessionSubscribers"],
 });
-export type StreamRpcTarget = InstanceType<typeof StreamRpcTarget>;
+
+export class StreamRpcTarget extends BaseStreamRpcTarget {
+  #stream: Stream;
+  #subscribers = new Set<StreamSubscriber>();
+
+  constructor(stream: Stream) {
+    super(stream);
+    this.#stream = stream;
+  }
+
+  stream(): ReadableStream<StreamEvent> {
+    return this.#stream.streamForSession(this.#subscribers);
+  }
+
+  [Symbol.dispose](): void {
+    this.#stream.releaseSessionSubscribers(this.#subscribers);
+  }
+}
