@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-26 23:23 UTC+1
+
+- Mutation-checked the two checkpoint scheduling early-return guards:
+  - replacing `this.#checkpointInProgress` with `false` made the checkpointed appendBatch tests fail
+    by starting four checkpoints in a five-event batch instead of one;
+  - replacing `this.#unconfirmedWriteCount < checkpointEveryUnconfirmedAppends` with `false` made
+    "uses checkpointed stream settings when append does not pass a per-call override" fail by
+    checkpointing after the first append even though the threshold was two.
+- No code change needed; existing tests already pin both branches.
+- Local verification after restoring mutations: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck`
+  and `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 32 tests.
+
 ## 2026-05-26 23:21 UTC+1
 
 - Added "rejects non-websocket requests at the stream durable object boundary" to cover the
