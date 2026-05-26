@@ -1,8 +1,9 @@
 import { newWebSocketRpcSession } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
-import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import { writeEventFromKv, type StreamEvent, type StreamEventInput } from "@cf-experiments/shared/event";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import {
+  type AppendDurabilityMode,
   type StreamDoSettings,
   readStreamDoSettingsFromKv,
   streamDoSettingsDefaults,
@@ -15,9 +16,19 @@ type StreamSubscriber = {
   enqueuedEvents: number;
 };
 
+type AppendDurability =
+  | AppendDurabilityMode
+  | {
+      mode: AppendDurabilityMode;
+      checkpointEveryUnconfirmedWrites?: number;
+    };
+
 export class Stream extends DurableObject {
   #settings = streamDoSettingsDefaults();
   #unconfirmedWriteCount = 0;
+  #checkpointInProgress = false;
+  #checkpointStartedCount = 0;
+  #checkpointCompletedCount = 0;
   #streamSubscribers = new Set<StreamSubscriber>();
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -41,46 +52,22 @@ export class Stream extends DurableObject {
     return this.#settings;
   }
 
-  append(args: { event: StreamEventInput }): StreamEvent {
-    const event = args.event;
+  append(args: { event: StreamEventInput; durability?: AppendDurability }): StreamEvent {
     const kv = this.ctx.storage.kv;
-
-    if (event.idempotencyKey !== undefined) {
-      const existingOffset = kv.get<number>(`stream:idem:${event.idempotencyKey}`);
+    if (args.event.idempotencyKey !== undefined) {
+      const existingOffset = kv.get<number>(`stream:idem:${args.event.idempotencyKey}`);
       if (existingOffset !== undefined) {
         const existing = kv.get<StreamEvent>(`stream:evt:${existingOffset}`);
         if (existing !== undefined) return existing;
       }
     }
 
-    const latest = this.count();
-    const nextOffset = latest + 1;
-
-    if (event.offset !== undefined && event.offset !== nextOffset) {
-      throw new Error(`Offset precondition failed: expected ${nextOffset}, got ${event.offset}`);
-    }
-
-    const { offset: _precondition, ...input } = event;
-    const committed = {
-      ...input,
-      offset: nextOffset,
-      createdAt: new Date().toISOString(),
-    };
-
-    this.ctx.storage.put(`stream:evt:${nextOffset}`, committed, {
-      allowUnconfirmed: true,
-      noCache: true,
-    });
-
-    if (event.idempotencyKey !== undefined) {
-      this.ctx.storage.put(`stream:idem:${event.idempotencyKey}`, nextOffset, {
-        allowUnconfirmed: true,
-        noCache: true,
-      });
-    }
-    this.ctx.storage.put("stream:meta:nextOffset", nextOffset, {
-      allowUnconfirmed: true,
-      noCache: false,
+    const durability = this.#resolveAppendDurability(args.durability);
+    const allowUnconfirmedWrites = durability.mode !== "confirmed";
+    const committed = writeEventFromKv({
+      storage: this.ctx.storage,
+      input: args.event,
+      allowUnconfirmedWrites,
     });
 
     this.#broadcast(committed);
@@ -88,9 +75,19 @@ export class Stream extends DurableObject {
     /**
      * IMPORTANT: `append()` is intentionally synchronous. Do not make it `async`.
      *
-     * This experiment is measuring the fast path where event appends use async
-     * `ctx.storage.put(..., { allowUnconfirmed: true })` and immediately return
-     * / fan out without waiting for the Durable Object output gate.
+     * The durability modes are intentionally named by what the caller may
+     * believe after observing the returned offset:
+     *
+     * - `confirmed`: sync KV writes (`allowUnconfirmedWrites: false`) use normal
+     *   Durable Object output-gate semantics. DO code gets a `StreamEvent`
+     *   synchronously, but RPC/WebSocket bytes that expose the offset may be held
+     *   until Cloudflare confirms the writes durable.
+     * - `best-effort`: async KV writes use `allowUnconfirmed: true`; outgoing
+     *   bytes are not held by these writes, so the offset is only locally
+     *   accepted until a later platform flush or explicit `sync()`.
+     * - `checkpointed`: same fast egress as `best-effort`, plus periodic
+     *   explicit `storage.sync()` barriers to bound the unconfirmed window. The
+     *   append that fills the window still returns before the barrier resolves.
      *
      * Cloudflare docs:
      * - `allowUnconfirmed`: by default outgoing network messages are paused
@@ -103,36 +100,53 @@ export class Stream extends DurableObject {
      *   events from being delivered to this DO:
      *   https://developers.cloudflare.com/durable-objects/api/state/#blockconcurrencywhile
      *
-     * Checkpoint policy:
-     * 1. If `maxUnconfirmedWrites` is `null`, never explicitly sync.
-     * 2. If the window is not full yet, do nothing.
-     * 3. If the window is full, synchronously enter `blockConcurrencyWhile()`
-     *    and await `storage.sync()` inside its async callback. We intentionally
-     *    do not `await` the returned Promise here, because doing so would force
-     *    `append()` to become async. The runtime still blocks later events until
-     *    the callback completes.
+     * A checkpoint is a later durability barrier, not an acknowledgement for the
+     * current append. We enter `blockConcurrencyWhile()` synchronously, but do
+     * not await it here. That keeps `append()` sync while making later delivered
+     * events wait behind the checkpoint callback.
      */
-    const maxUnconfirmedWrites = this.settings.maxUnconfirmedWrites;
-    this.#unconfirmedWriteCount += 1;
-
-    if (maxUnconfirmedWrites === null || this.#unconfirmedWriteCount < maxUnconfirmedWrites) {
-      return committed;
+    if (durability.mode !== "confirmed") {
+      this.#unconfirmedWriteCount += 1;
+      if (durability.mode === "checkpointed") {
+        this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedWrites);
+      }
     }
-
-    void this.ctx.blockConcurrencyWhile(async () => {
-      await this.ctx.storage.sync();
-      this.#unconfirmedWriteCount = 0;
-    });
 
     return committed;
   }
 
-  appendBatch(args: { events: StreamEventInput[] }): StreamEvent[] {
-    return args.events.map((event) => this.append({ event }));
+  appendBatch(args: { events: StreamEventInput[]; durability?: AppendDurability }): StreamEvent[] {
+    return args.events.map((event) => this.append({ event, durability: args.durability }));
   }
 
   count() {
     return this.ctx.storage.kv.get<number>("stream:meta:nextOffset") ?? 0;
+  }
+
+  async sync(): Promise<{
+    unconfirmedWriteCount: number;
+    checkpointStartedCount: number;
+    checkpointCompletedCount: number;
+  }> {
+    await this.ctx.storage.sync();
+    this.#unconfirmedWriteCount = 0;
+    return this.durabilityDebug();
+  }
+
+  durabilityDebug() {
+    return {
+      settings: this.settings,
+      unconfirmedWriteCount: this.#unconfirmedWriteCount,
+      checkpointInProgress: this.#checkpointInProgress,
+      checkpointStartedCount: this.#checkpointStartedCount,
+      checkpointCompletedCount: this.#checkpointCompletedCount,
+    };
+  }
+
+  kill(args?: { reason?: string }): never {
+    const reason = args?.reason ?? "kill requested";
+    this.ctx.abort(reason);
+    throw new Error(reason);
   }
 
   /**
@@ -250,6 +264,53 @@ export class Stream extends DurableObject {
       console.error("Error enqueuing event to subscriber", event, error, subscriber);
       this.#streamSubscribers.delete(subscriber);
     }
+  }
+
+  #resolveAppendDurability(durability: AppendDurability | undefined): {
+    mode: AppendDurabilityMode;
+    checkpointEveryUnconfirmedWrites: number;
+  } {
+    const mode =
+      typeof durability === "string"
+        ? durability
+        : durability?.mode ?? this.settings.defaultAppendDurabilityMode;
+    return {
+      mode,
+      checkpointEveryUnconfirmedWrites:
+        typeof durability === "object" && durability.checkpointEveryUnconfirmedWrites !== undefined
+          ? durability.checkpointEveryUnconfirmedWrites
+          : this.settings.checkpointEveryUnconfirmedWrites,
+    };
+  }
+
+  #scheduleCheckpointIfNeeded(checkpointEveryUnconfirmedWrites: number): void {
+    if (
+      this.#checkpointInProgress ||
+      this.#unconfirmedWriteCount < checkpointEveryUnconfirmedWrites
+    ) {
+      return;
+    }
+
+    this.#checkpointInProgress = true;
+    this.#checkpointStartedCount += 1;
+
+    void this.ctx.blockConcurrencyWhile(async () => {
+      while (this.#unconfirmedWriteCount > 0) {
+        const writesIncludedInThisSync = this.#unconfirmedWriteCount;
+        await this.ctx.storage.sync();
+        this.#unconfirmedWriteCount = Math.max(
+          0,
+          this.#unconfirmedWriteCount - writesIncludedInThisSync,
+        );
+        this.#checkpointCompletedCount += 1;
+
+        if (this.#unconfirmedWriteCount < checkpointEveryUnconfirmedWrites) {
+          break;
+        }
+      }
+
+      this.#checkpointInProgress = false;
+    });
   }
 
 }

@@ -10,23 +10,36 @@ import type { StreamEventSyncKv } from "./event.js";
 
 export const STREAM_DO_SETTINGS_KV_KEY = "stream:settings";
 
+export const AppendDurabilityMode = z.enum(["confirmed", "best-effort", "checkpointed"]);
+export type AppendDurabilityMode = z.infer<typeof AppendDurabilityMode>;
+
 export const StreamDoSettings = z.object({
   /**
-   * Maximum number of locally issued `allowUnconfirmed` appends to allow between explicit
-   * durability checkpoints.
+   * Default acknowledgement/durability contract for `Stream.append()`.
    *
-   * - `null`: never explicitly call `ctx.storage.sync()` (maximum throughput / "yolo" mode).
-   * - `0`: call `ctx.storage.sync()` after every append (no append RPC returns until previous
-   *   pending writes are confirmed).
-   * - `N`: call `ctx.storage.sync()` after N appends since the last explicit checkpoint.
+   * - `confirmed`: writes use normal Durable Object output-gate semantics. `append()` still returns
+   *   synchronously to DO code, but RPC/WebSocket bytes that expose the offset can be held by the
+   *   platform until the write is confirmed durable.
+   * - `best-effort`: writes use `allowUnconfirmed: true`; `append()` exposes the offset as fast as
+   *   possible, and durability is only eventual/best-effort until a later platform flush or explicit
+   *   barrier.
+   * - `checkpointed`: writes use `allowUnconfirmed: true`, but the DO periodically calls
+   *   `storage.sync()` to bound the unconfirmed window. This does not mean the append that filled the
+   *   window was already durable when its offset was observed.
    *
-   * This is deliberately named as a bound on *our* unconfirmed-write window, not Cloudflare's
-   * internal pending-write buffer. The platform may flush/coalesce writes independently. The
-   * guarantee we get from `sync()` is that pending writes already submitted, including writes made
-   * with `allowUnconfirmed`, have persisted when the promise resolves:
-   * https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#sync
+   * Cloudflare's relevant docs:
+   * - output gates / `allowUnconfirmed`:
+   *   https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#supported-options
+   * - explicit barriers via `sync()`:
+   *   https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#sync
    */
-  maxUnconfirmedWrites: z.number().int().nonnegative().nullable().default(null),
+  defaultAppendDurabilityMode: AppendDurabilityMode.default("confirmed"),
+  /**
+   * `checkpointed` mode threshold. Once at least this many unconfirmed appends have been accepted,
+   * the DO starts a `storage.sync()` checkpoint under `blockConcurrencyWhile()` so later externally
+   * delivered events wait behind the barrier.
+   */
+  checkpointEveryUnconfirmedWrites: z.number().int().positive().default(100),
 });
 
 export type StreamDoSettings = z.infer<typeof StreamDoSettings>;

@@ -63,31 +63,39 @@ The likely escape hatch is to move the durability wait to an earlier boundary:
 This distinction matters for the API contract. "No more than N unconfirmed appends will be admitted"
 is weaker than "this append's returned offset is confirmed before the caller observes it."
 
-## Candidate Configuration Shape
+## Implemented Configuration Shape
 
 The setting should describe the acknowledgement contract rather than a storage implementation detail.
 
 ```ts
-type AppendDurability =
-  | { mode: "confirmed" }
-  | { mode: "windowed"; maxUnconfirmedAppends: number }
-  | { mode: "best-effort" };
+type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
+
+type StreamDoSettings = {
+  defaultAppendDurabilityMode: AppendDurabilityMode;
+  checkpointEveryUnconfirmedWrites: number;
+};
 ```
 
-Per-call overrides can use the same language:
+Per-call overrides use the same language:
 
 ```ts
-append({ event, durability: { mode: "best-effort" } });
+append({ event, durability: "best-effort" });
+append({ event, durability: { mode: "checkpointed", checkpointEveryUnconfirmedWrites: 10 } });
 ```
 
-Questions to resolve before implementing this shape:
+The intentionally sharp edge is `confirmed`: this is the only mode where observing the returned offset
+over RPC can mean "Cloudflare confirmed the writes durable", and it gets that guarantee from normal
+Durable Object output gates. `best-effort` and `checkpointed` use `allowUnconfirmed: true`, so outbound
+bytes are not held by storage writes, but their returned offsets only mean local acceptance until an
+explicit barrier completes.
 
-- Does `confirmed` require changing `append()` to async, or can the stream arrange a pre-append
-  checkpoint that makes the returned offset honestly confirmed?
-- Does `windowed: 0` mean "confirmed append" or "do not admit a second append until the first is
-  confirmed"?
-- Are subscribers allowed to receive an event before the event is confirmed in `confirmed` mode, or is
-  subscriber delivery part of the acknowledgement contract?
+This means there is no mode that simultaneously provides all three properties:
+
+- `append()` is synchronous;
+- outbound bytes are never held by storage writes;
+- the returned offset is already durably confirmed when observed by a remote caller.
+
+The API keeps those trade-offs explicit instead of naming a periodic checkpoint "confirmed".
 
 ## Test Strategy
 
@@ -138,13 +146,13 @@ append offsets, checkpoint timings, kill timing, and recovered offsets after rec
 
 ## Current Hypothesis
 
-The safe implementation path is likely:
+The current implementation path is:
 
-1. Always use async KV writes with `allowUnconfirmed: true` for append storage so outbound bytes are
-   never accidentally held by the platform output gate.
-2. Track a local unconfirmed append count.
-3. Use `storage.sync()` as the only explicit durability barrier.
-4. Treat `blockConcurrencyWhile()` as an input-throttling tool during checkpoints, not as proof that
-   the current append's returned offset was durable.
-5. Be precise in naming: "confirmed", "windowed", and "best-effort" should describe what the caller is
-   allowed to believe after observing an offset.
+1. `confirmed`: shared `writeEventFromKv(..., { allowUnconfirmedWrites: false })`.
+2. `best-effort`: shared `writeEventFromKv(..., { allowUnconfirmedWrites: true })`.
+3. `checkpointed`: same as best-effort, plus `storage.sync()` under `blockConcurrencyWhile()` once the
+   unconfirmed-write count reaches the configured threshold.
+4. `sync()` is an explicit async durability barrier for tests and callers that want to separate fast
+   offset allocation from later durability confirmation.
+5. `kill()` exists as a reset probe for deployed fault tests; local Miniflare can check API sequencing
+   but not SRS quorum durability.
