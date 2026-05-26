@@ -108,11 +108,15 @@ let workerMemoryChunks: MemoryChunk[] = [];
 
 /** Minimal DO for probing kill / crash behaviour (abort, OOM, etc.). */
 export class DebugDurableObject extends DurableObject {
+  private readonly incarnationId = crypto.randomUUID();
+  private readonly createdAt = new Date().toISOString();
   private memoryChunks: MemoryChunk[] = [];
 
   async ping(args?: { timeoutMs?: number }): Promise<{
     message: "pong";
     at: string;
+    incarnationId: string;
+    createdAt: string;
     heldBytes: number;
   }> {
     if (args?.timeoutMs !== undefined && args.timeoutMs > 0) {
@@ -121,18 +125,27 @@ export class DebugDurableObject extends DurableObject {
     return {
       message: "pong",
       at: new Date().toISOString(),
+      incarnationId: this.incarnationId,
+      createdAt: this.createdAt,
       heldBytes: sumChunkBytes(this.memoryChunks),
     };
   }
 
-  consumeMemory(args: { targetBytes: number; chunkBytes?: number; touchMode?: MemoryTouchMode }): MemoryAllocationResult {
-    return accumulateMemory({ ...args, into: this.memoryChunks });
+  consumeMemory(args: { targetBytes: number; chunkBytes?: number; touchMode?: MemoryTouchMode }): MemoryAllocationResult & {
+    incarnationId: string;
+    createdAt: string;
+  } {
+    return {
+      ...accumulateMemory({ ...args, into: this.memoryChunks }),
+      incarnationId: this.incarnationId,
+      createdAt: this.createdAt,
+    };
   }
 
-  releaseMemory(): { freedBytes: number } {
+  releaseMemory(): { freedBytes: number; incarnationId: string; createdAt: string } {
     const freedBytes = sumChunkBytes(this.memoryChunks);
     this.memoryChunks = [];
-    return { freedBytes };
+    return { freedBytes, incarnationId: this.incarnationId, createdAt: this.createdAt };
   }
 
   /**
@@ -151,6 +164,8 @@ export class DebugDurableObject extends DurableObject {
     totalEstimatedCommittedBytes: number;
     finalHeldBytes: number;
     touchMode: MemoryTouchMode;
+    incarnationId: string;
+    createdAt: string;
   } {
     if (!Number.isInteger(args.cycles) || args.cycles <= 0) {
       throw new RangeError("cycles must be a positive integer");
@@ -187,6 +202,8 @@ export class DebugDurableObject extends DurableObject {
       totalEstimatedCommittedBytes,
       finalHeldBytes: sumChunkBytes(this.memoryChunks),
       touchMode: args.touchMode ?? "none",
+      incarnationId: this.incarnationId,
+      createdAt: this.createdAt,
     };
   }
 

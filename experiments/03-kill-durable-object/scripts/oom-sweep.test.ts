@@ -1,7 +1,7 @@
 /**
  * OOM threshold sweep against a running worker.
  *
- *   pnpm dev   # in another terminal
+ *   pnpm dev   # in another terminal; use the "Ready on ..." URL
  *   WORKER_URL=http://localhost:8787 pnpm test:oom
  *
  *   WORKER_URL=https://03-kill-durable-object.iterate-dev-preview.workers.dev pnpm test:oom
@@ -11,8 +11,10 @@ import { describe, expect, it } from "vitest";
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const mib = (n: number) => n * 1024 * 1024;
 
-// Key sizes from production sweeps (2026-05-22). Adjust if re-running elsewhere.
-const sweepSizesMiB = [64, 128, 192, 208, 224, 256, 263, 264, 280];
+// Key sizes from production sweeps. Override with e.g. SWEEP_MIB=64,128,192,208,264,600.
+const sweepSizesMiB = (process.env.SWEEP_MIB ?? "64,128,192,208,224,256,263,264,280")
+  .split(",")
+  .map((raw) => Number(raw.trim()));
 
 describe(`OOM sweep @ ${workerUrl}`, () => {
   it("prints threshold table (alloc + follow-up ping)", async () => {
@@ -29,11 +31,18 @@ describe(`OOM sweep @ ${workerUrl}`, () => {
       );
       const allocBody = await alloc.text();
       let pingHeld = "—";
+      let pingIncarnation = "—";
+      let incarnationChange = "—";
       if (alloc.ok) {
+        const allocJson = JSON.parse(allocBody);
+        const allocIncarnation =
+          typeof allocJson.incarnationId === "string" ? allocJson.incarnationId.slice(0, 8) : "?";
         const ping = await fetch(`${workerUrl}/ping?name=${name}`);
         if (ping.ok) {
-          const json = (await ping.json()) as { heldBytes: number };
+          const json = (await ping.json()) as { heldBytes?: unknown; incarnationId?: unknown };
           pingHeld = String(json.heldBytes);
+          pingIncarnation = typeof json.incarnationId === "string" ? json.incarnationId.slice(0, 8) : "?";
+          incarnationChange = allocIncarnation === pingIncarnation ? "same" : "changed";
         } else {
           pingHeld = `ping ${ping.status}`;
         }
@@ -41,7 +50,7 @@ describe(`OOM sweep @ ${workerUrl}`, () => {
 
       const ray = alloc.headers.get("cf-ray") ?? "—";
       rows.push(
-        `${String(sizeMiB).padStart(4)} MiB | alloc ${alloc.status} | ping heldBytes ${pingHeld} | cf-ray ${ray}`,
+        `${String(sizeMiB).padStart(4)} MiB | alloc ${alloc.status} | ping heldBytes ${pingHeld} | incarnation ${incarnationChange} (${pingIncarnation}) | cf-ray ${ray}`,
       );
       if (!alloc.ok) {
         rows.push(`       body: ${allocBody.slice(0, 120)}`);

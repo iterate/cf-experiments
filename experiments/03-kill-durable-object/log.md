@@ -125,6 +125,20 @@ curl -si -X POST 'http://localhost:<port>/kill?reason=my-reason'
 
 ## Log
 
+### 2026-05-26 — Incarnation IDs added to prove reset/recreation
+
+Added per-instance `incarnationId` and `createdAt` fields to `DebugDurableObject` responses. The OOM sweep now prints whether the allocation response and follow-up ping came from the same DO incarnation.
+
+Production re-run after deploy version `0fcc43c5-7e40-4f71-b19b-da519dffdf1a`:
+
+| Size | Result |
+|------|--------|
+| 192 MiB | alloc 200, `ping.heldBytes=201326592`, `incarnation same` |
+| 208 MiB | alloc 200, `ping.heldBytes=0`, `incarnation changed` |
+| 264 MiB | alloc 500 / `1101`, Ray ID `a01dc0c33f183861-LHR` |
+
+This tightens the earlier “silent reset” interpretation: for the 208 MiB probe, the follow-up ping was served by a different DO incarnation, not the same in-memory object with an empty array.
+
 ### 2026-05-26 — Miniflare OOM sweep (re-run with self-contained worker)
 
 Same `pnpm test:oom` script, `touch=fill`, fresh DO name per size:

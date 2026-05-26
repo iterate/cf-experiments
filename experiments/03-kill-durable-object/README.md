@@ -2,27 +2,81 @@
 
 **Headline results (production, `iterate-dev-preview`, May 2026):**
 
-- A Durable Object can **retain ~192 MiB** of filled `Uint8Array` data and keep serving pings — **not** the documented 128 MB/isolate limit.
-- Above ~208 MiB the instance **silently resets** on the next RPC (`heldBytes` drops to 0, alloc may still return 200).
-- Hard OOM at **~263–264 MiB** in a single request → HTTP 500 / `error code: 1101`, tail `exceededMemory`.
-- **Alloc + release cycles are fine** at 250 MiB × 10 — OOM only when memory stays retained across calls.
-- **Miniflare ≠ production (memory):** local retains 600+ MiB with no reset; production silently resets from ~208 MiB and hard-fails at ~264 MiB. Run `pnpm test:oom` against both URLs.
-- **Miniflare ≠ production (kill):** local `POST /kill` returns a stack trace with your abort reason; deployed returns generic `error code: 1101` (reason only in `wrangler tail`).
+- For this `Uint8Array` / ArrayBuffer allocation shape, a Durable Object can **retain ~192 MiB** and keep serving pings. That is above the documented 128 MB/isolate limit, but this experiment measures retained JS-visible byte length, not Cloudflare's internal heap accounting.
+- In the recorded production runs, follow-up pings from ~208 MiB upward returned `heldBytes:0`, consistent with the instance being reset/recreated before the next RPC. The current worker also returns an `incarnationId` so this can be checked directly.
+- Single-request allocation failed around **263–264 MiB** with HTTP 500 / `error code: 1101` and `exceededMemory` telemetry in those runs.
+- For this `Uint8Array` cycle probe, **alloc + release cycles are fine** at 250 MiB × 10 — the failure mode appears when memory stays retained across calls.
+- **Miniflare ≠ production (memory):** in this local `wrangler dev` run, Miniflare retained 600+ MiB with no reset; production lost retained state from ~208 MiB and hard-failed at ~264 MiB. Run `pnpm test:oom` against both URLs.
+- **Miniflare ≠ production (kill):** local `POST /kill` can return a stack trace with your abort reason; deployed returns a generic Cloudflare 1101 error page (reason only in `wrangler tail`).
 
-Everything lives in **`src/worker.ts`** (single file, no shared deps). Reproduce:
+Everything lives in **`src/worker.ts`** (single file, no shared deps).
+
+## Requirements
+
+```bash
+node --version # >=24
+pnpm --version # >=10
+corepack enable # if pnpm is not already available
+```
+
+## Quick Reproduction
+
+```bash
+git clone https://github.com/iterate/cf-experiments.git
+cd cf-experiments
+pnpm install
+cd experiments/03-kill-durable-object
+pnpm dev
+```
+
+Wrangler prints a local URL, usually `http://localhost:8787`, but it may choose another port if 8787 is already busy:
+
+```text
+Ready on http://localhost:8794
+```
+
+In another terminal, use that exact URL:
 
 ```bash
 cd experiments/03-kill-durable-object
-pnpm install
-pnpm dev   # terminal 1
 
-# terminal 2 — OOM threshold table
-WORKER_URL=http://localhost:8787 pnpm test:oom
+# OOM threshold table against Miniflare
+WORKER_URL=http://localhost:8794 pnpm test:oom
 
-# Miniflare vs prod kill body (run against both URLs)
-WORKER_URL=http://localhost:8787 pnpm test:kill-response
+# Kill response body against Miniflare
+WORKER_URL=http://localhost:8794 pnpm test:kill-response
+```
+
+If you want a fixed local URL, start Wrangler with an explicit port:
+
+```bash
+pnpm dev -- --port 8787
+```
+
+Expected Miniflare shape: `test:oom` should print successful allocations well past production's OOM point. On my 2026-05-26 run, Miniflare retained 600 MiB and kept responding.
+
+To include bigger local-only probes:
+
+```bash
+SWEEP_MIB=64,128,192,208,264,280,400,512,600 WORKER_URL=http://localhost:8794 pnpm test:oom
+```
+
+Run the same scripts against the already-deployed copy:
+
+```bash
+WORKER_URL=https://03-kill-durable-object.iterate-dev-preview.workers.dev pnpm test:oom
 WORKER_URL=https://03-kill-durable-object.iterate-dev-preview.workers.dev pnpm test:kill-response
 ```
+
+Expected production shape:
+
+```text
+192 MiB | alloc 200 | ping heldBytes 201326592 | incarnation same (...)
+208 MiB | alloc 200 | ping heldBytes 0         | incarnation changed (...)
+264 MiB | alloc 500 | ping heldBytes —         | incarnation — (...)
+```
+
+To deploy to your own Cloudflare account, see [Deploy Your Own Copy](#deploy-your-own-copy).
 
 Full notes: [log.md](./log.md).
 
@@ -49,7 +103,7 @@ References: [Workers limits (128 MB/isolate)](https://developers.cloudflare.com/
 
 | Route | Meaning |
 |-------|---------|
-| `GET /ping` | Pong (+ optional delay). Response includes `heldBytes` from prior `/memory` calls |
+| `GET /ping` | Pong (+ optional delay). Response includes `heldBytes` from prior `/memory` calls plus `incarnationId` for the current DO instance |
 | `GET /worker-ping` | Top-level Worker pong. Response includes module-level retained Worker `heldBytes` |
 | `POST /worker-memory?bytes=N&touch=fill&reset=1` | Allocate and retain memory in the top-level Worker isolate, not in a DO. `reset=1` clears the module-level store first |
 | `DELETE /worker-memory` | Release top-level Worker retained allocations |
@@ -69,7 +123,7 @@ The memory probe reports two related but different quantities:
 | Field | Meaning |
 |-------|---------|
 | `logicalAllocatedBytes` / `allocatedBytes` | Sum of `Uint8Array.byteLength` allocated by this call. This is capacity retained by JS references, not a platform heap measurement. |
-| `totalLogicalHeldBytes` / `totalHeldBytes` | Sum of `byteLength` for all retained chunks in the current DO instance. If this drops to `0` after a successful allocation, the object was likely reset between calls. |
+| `totalLogicalHeldBytes` / `totalHeldBytes` | Sum of `byteLength` for all retained chunks in the current DO instance. If this drops to `0` after a successful allocation and `incarnationId` changes, the object was reset/recreated between calls. |
 | `touchedBytes` | How many individual bytes this call wrote. |
 | `estimatedCommittedBytes` | Best-effort estimate of bytes whose backing pages were forced to exist by our writes. Cloudflare/V8 does not expose actual isolate memory usage. |
 
@@ -82,15 +136,35 @@ The memory probe reports two related but different quantities:
 | `fill` | Write every byte with a non-zero value. | Slowest, but the clearest OOM probe. Prefer this for production threshold sweeps. |
 | `random` | Write every byte with high-entropy data from `crypto.getRandomValues()` (64 KiB calls). | Strictest realism check: defeats repeated-byte/dedup/compression theories, but spends extra CPU. |
 
-Important: these are experiment-side counters. They are not Cloudflare runtime memory metrics. Use `touch=fill` when comparing against the Workers 128 MB/isolate limit, and always follow an allocation with `/ping` to check whether the same instance survived.
+Important: these are experiment-side counters. They are not Cloudflare runtime memory metrics. Use `touch=fill` when comparing against the Workers 128 MB/isolate limit, and always follow an allocation with `/ping` to check whether the same `incarnationId` survived.
 
-## Prove Miniflare vs production (two commands)
+### Limitations
 
-Same worker, different error surfaces:
+- This probes one allocation shape: retained `Uint8Array` / ArrayBuffer chunks.
+- It does not measure RSS, V8 heap, ArrayBuffer external memory, or Cloudflare's internal isolate memory accounting.
+- Thresholds may vary by deployment, compatibility date, region, account plan, runtime version, request concurrency, and chunk size.
+- The default sweep prints observations; it intentionally does not assert fixed thresholds.
+
+## Prove Miniflare vs Production
+
+Same worker, different memory behavior:
 
 ```bash
-# Local — abort reason in HTTP body
-curl -si -X POST 'http://localhost:8787/kill?reason=tweet-demo' | head -20
+# Local Miniflare: use the URL printed by `pnpm dev`
+WORKER_URL=http://localhost:8794 pnpm test:oom
+
+# Optional: prove the larger local gap
+SWEEP_MIB=64,128,192,208,264,280,400,512,600 WORKER_URL=http://localhost:8794 pnpm test:oom
+
+# Production
+WORKER_URL=https://03-kill-durable-object.iterate-dev-preview.workers.dev pnpm test:oom
+```
+
+Same worker, different `ctx.abort()` error surfaces:
+
+```bash
+# Local — abort reason in HTTP body. Use the URL printed by `pnpm dev`.
+curl -si -X POST 'http://localhost:8794/kill?reason=tweet-demo' | head -20
 
 # Deployed — generic 1101, reason only in wrangler tail
 curl -si -X POST 'https://03-kill-durable-object.iterate-dev-preview.workers.dev/kill?reason=tweet-demo' | head -20
@@ -98,13 +172,71 @@ curl -si -X POST 'https://03-kill-durable-object.iterate-dev-preview.workers.dev
 
 Or run `pnpm test:kill-response` with each `WORKER_URL`.
 
+Note: the scripted test sends `Accept: text/plain`. Without that header, Node `fetch()` may receive Miniflare's HTML error page; `curl` receives the plain stack trace.
+
+## Deploy Your Own Copy
+
+Prereqs:
+
+- Node 24+
+- pnpm 10+
+- A Cloudflare account with Workers + Durable Objects enabled
+- Wrangler auth: `pnpm exec wrangler login`
+
+Then edit `wrangler.jsonc`:
+
+```jsonc
+{
+  "account_id": "your-cloudflare-account-id",
+  "name": "your-unique-worker-name",
+  // ...
+}
+```
+
+Deploy:
+
+```bash
+pnpm run deploy
+```
+
+Wrangler will create the Durable Object class using the existing migration:
+
+```jsonc
+"migrations": [{ "tag": "v1", "new_sqlite_classes": ["DebugDurableObject"] }]
+```
+
+After deploy, run:
+
+```bash
+WORKER_URL=https://your-unique-worker-name.<your-subdomain>.workers.dev pnpm test:oom
+WORKER_URL=https://your-unique-worker-name.<your-subdomain>.workers.dev pnpm test:kill-response
+```
+
+For production failures, capture Ray IDs from the `test:oom` output and tail logs:
+
+```bash
+pnpm exec wrangler tail your-unique-worker-name --format json --status error
+```
+
+If you rename `DebugDurableObject`, keep `durable_objects.bindings[].class_name` and `migrations[].new_sqlite_classes` aligned with the exported class name.
+
+## Scripts
+
+| Script | Meaning |
+|--------|---------|
+| `pnpm dev` | Run locally with Miniflare / `wrangler dev` |
+| `pnpm run deploy` | Deploy using `wrangler.jsonc` |
+| `pnpm test:oom` | Print allocation + follow-up ping table for `WORKER_URL` |
+| `pnpm test:kill-response` | Compare `ctx.abort()` client response for `WORKER_URL` |
+| `pnpm typecheck` | Typecheck worker and scripts |
+
 ## How to run
 
 From this directory:
 
 ```bash
 pnpm dev
-pnpm deploy   # → https://03-kill-durable-object.iterate-dev-preview.workers.dev
+pnpm run deploy   # → https://03-kill-durable-object.iterate-dev-preview.workers.dev
 ```
 
 Parameters (query string on every route):
@@ -126,11 +258,11 @@ Parameters (query string on every route):
 
 ```bash
 # allocate +32 MiB at a time until failure; always use touch=fill
-curl -s -X POST 'http://localhost:8787/memory?name=oom&bytes=33554432&touch=fill'
-curl -s 'http://localhost:8787/ping?name=oom'   # heldBytes tells you if instance survived
+curl -s -X POST 'http://localhost:8794/memory?name=oom&bytes=33554432&touch=fill'
+curl -s 'http://localhost:8794/ping?name=oom'   # heldBytes tells you if instance survived
 
 # or automated sweep
-WORKER_URL=http://localhost:8787 pnpm test:oom
+WORKER_URL=http://localhost:8794 pnpm test:oom
 ```
 
 ### Production tail
@@ -145,9 +277,9 @@ wrangler tail --format json --status error
 
 Record each run in `log.md`. For each environment (Miniflare vs deployed):
 
-1. **OOM ramp** — `pnpm test:oom` or manual curls with increasing `bytes` until failure.
+1. **OOM ramp** — `pnpm test:oom` or manual curls with increasing `bytes` until failure. Check both `heldBytes` and whether `incarnationId` stayed the same.
 2. **Kill response body** — `pnpm test:kill-response` locally vs deployed.
-3. **Alloc/release cycles** — `POST /memory/cycle?bytes=250MiB&cycles=10&touch=fill` should succeed even above single-shot retention limit.
+3. **Alloc/release cycles** — `POST /memory/cycle?bytes=250MiB&cycles=10&touch=fill` should succeed even above this probe's single-shot retention limit.
 4. **Long-held DO memory** — allocate 160–190 MiB, ping every second for 30s; object keeps responding.
 
-Open questions: whether Miniflare OOM thresholds match production, and what operators actually see in logs.
+Open questions: how stable the thresholds are across chunk sizes, regions, account plans, compatibility dates, runtime releases, and longer retention windows.
