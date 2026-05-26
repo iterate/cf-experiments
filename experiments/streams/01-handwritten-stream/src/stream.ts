@@ -464,15 +464,11 @@ export class Stream extends DurableObject {
       // checkpoint snapshots the unconfirmed append count.
       await Promise.resolve();
 
-      while (this.#unconfirmedWriteCount > 0) {
+      if (this.#unconfirmedWriteCount > 0) {
         await this.#delayForCheckpointDebug();
         await this.ctx.storage.sync();
         this.#unconfirmedWriteCount = 0;
         this.#checkpointCompletedCount += 1;
-
-        if (this.#unconfirmedWriteCount < checkpointEveryUnconfirmedAppends) {
-          break;
-        }
       }
 
       this.#checkpointInProgress = false;

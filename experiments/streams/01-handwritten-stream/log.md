@@ -5,6 +5,21 @@
 
 # Notes
 
+## 2026-05-26 23:16 UTC+1
+
+- Simplified checkpoint scheduling by replacing the `while` loop with a single guarded sync. Under
+  `blockConcurrencyWhile()`, later delivered events cannot enter while the checkpoint is awaiting, so
+  no new unconfirmed append window can appear inside that callback. The existing checkpoint tests are
+  the relevant guard:
+  - "checkpointed appendBatch drains the whole same-event unconfirmed window"
+  - "checkpointed appendBatch returns after scheduling but before awaiting the checkpoint"
+  - "checkpointed append schedules a delayed checkpoint that gates later RPC"
+- Local verification: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck` and
+  `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 30 tests.
+- Deployed version `cf4a2cf9-0e0b-4e70-9aac-3b01033df75f`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/01-handwritten-stream test`
+  passed with 30 tests.
+
 ## 2026-05-26 23:13 UTC+1
 
 - Added "removes subscribers whose stream controller rejects enqueue" to cover the defensive
