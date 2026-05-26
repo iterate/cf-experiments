@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-26 23:21 UTC+1
+
+- Added "rejects non-websocket requests at the stream durable object boundary" to cover the
+  `Stream.fetch()` guard that keeps the stream DO's public transport surface to Cap'n Web over
+  WebSocket only.
+- Updated the `Stream.fetch()` comment to state that plain HTTP must fail closed rather than expose
+  an accidental second stream protocol.
+- Local verification: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck` and
+  `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 32 tests.
+- Deployed version `272f56fa-40cf-4889-a791-ab5fa7e12e50`; deployed verification
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/01-handwritten-stream test`
+  passed with 32 tests.
+
 ## 2026-05-26 23:19 UTC+1
 
 - Added "rejects invalid checkpoint thresholds even on non-checkpointed object durability" to cover

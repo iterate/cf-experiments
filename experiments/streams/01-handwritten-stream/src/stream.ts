@@ -357,6 +357,13 @@ export class Stream extends DurableObject {
 
   async fetch(request: Request) {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+      /**
+       * The stream DO fetch surface is only the Cap'n Web WebSocket transport.
+       * Plain HTTP requests must fail closed instead of accidentally exposing a
+       * second protocol with different stream framing/backpressure semantics.
+       * See "rejects non-websocket requests at the stream durable object
+       * boundary" in `scripts/stream-capnweb.test.ts`.
+       */
       return new Response("This endpoint only accepts WebSocket requests.", { status: 400 });
     }
 

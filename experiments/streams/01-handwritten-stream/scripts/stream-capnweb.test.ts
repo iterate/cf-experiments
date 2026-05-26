@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { withStream } from "./lib/with-stream.js";
 
+const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([
     promise,
@@ -59,6 +61,14 @@ async function expectReadTimesOut(read: Promise<ReadableStreamReadResult<StreamE
 }
 
 describe("handwritten stream capnweb", () => {
+  it("rejects non-websocket requests at the stream durable object boundary", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const response = await fetch(new URL(`/${path}`, workerUrl));
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toBe("This endpoint only accepts WebSocket requests.");
+  });
+
   it("append uses the allowUnconfirmed write fast path", async () => {
     const source = await readFile(
       decodeURIComponent(new URL("../src/stream.ts", import.meta.url).pathname),
