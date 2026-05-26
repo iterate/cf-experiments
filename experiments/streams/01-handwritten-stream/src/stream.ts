@@ -15,12 +15,14 @@ type StreamSettings = {
   defaultAppendDurabilityMode: AppendDurabilityMode;
   checkpointEveryUnconfirmedAppends: number;
   debugConfirmedSyncDelayMs: number;
+  debugCheckpointSyncDelayMs: number;
 };
 
 const defaultSettings = (): StreamSettings => ({
   defaultAppendDurabilityMode: "confirmed",
   checkpointEveryUnconfirmedAppends: 100,
   debugConfirmedSyncDelayMs: 0,
+  debugCheckpointSyncDelayMs: 0,
 });
 
 type StreamSubscriber = {
@@ -137,6 +139,10 @@ export class Stream extends DurableObject {
      * - "best-effort appends fan out while write debt is still unconfirmed"
      *   fails if the non-confirmed branch stops broadcasting live events before
      *   an explicit `sync()` clears that debt.
+     * - "append uses the allowUnconfirmed write fast path" is a source-level
+     *   sentinel for this exact option. The local runtime does not make the
+     *   platform output-gate difference crisp enough for a reliable behavioral
+     *   assertion when this one value is flipped.
      */
     if (durability.mode === "confirmed") {
       await this.#delayForConfirmedAppendDebug();
@@ -414,8 +420,9 @@ export class Stream extends DurableObject {
        * would turn the append that fills the window into a confirmed append,
        * hiding the mode difference this experiment is measuring. See
        * "checkpointed appendBatch returns after scheduling but before awaiting
-       * the checkpoint" and "checkpointed passes the live-before-durability
-       * probe that confirmed intentionally fails" in
+       * the checkpoint", "checkpointed append schedules a delayed checkpoint
+       * that gates later RPC", and "checkpointed passes
+       * the live-before-durability probe that confirmed intentionally fails" in
        * `scripts/stream-capnweb.test.ts`.
        */
 
@@ -426,6 +433,7 @@ export class Stream extends DurableObject {
       await Promise.resolve();
 
       while (this.#unconfirmedWriteCount > 0) {
+        await this.#delayForCheckpointDebug();
         await this.ctx.storage.sync();
         this.#unconfirmedWriteCount = 0;
         this.#checkpointCompletedCount += 1;
@@ -448,6 +456,14 @@ export class Stream extends DurableObject {
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
+  async #delayForCheckpointDebug(): Promise<void> {
+    const delayMs = this.#settings.debugCheckpointSyncDelayMs;
+    if (delayMs === 0) return;
+    // Test-only delay: makes the checkpoint gate observable without relying on
+    // natural storage-sync latency.
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
   #readSettings(): StreamSettings {
     return this.#parseSettings(this.ctx.storage.kv.get(STREAM_SETTINGS_KEY) ?? {});
   }
@@ -458,6 +474,9 @@ export class Stream extends DurableObject {
     this.#validateCheckpointEveryUnconfirmedAppends(next.checkpointEveryUnconfirmedAppends);
     if (!Number.isInteger(next.debugConfirmedSyncDelayMs) || next.debugConfirmedSyncDelayMs < 0) {
       throw new Error("debugConfirmedSyncDelayMs must be a non-negative integer");
+    }
+    if (!Number.isInteger(next.debugCheckpointSyncDelayMs) || next.debugCheckpointSyncDelayMs < 0) {
+      throw new Error("debugCheckpointSyncDelayMs must be a non-negative integer");
     }
     return next;
   }

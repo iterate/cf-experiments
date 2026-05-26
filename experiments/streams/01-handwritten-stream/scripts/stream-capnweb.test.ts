@@ -1,4 +1,5 @@
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { withStream } from "./lib/with-stream.js";
 
@@ -45,14 +46,26 @@ function expectContiguousOffsets(events: StreamEvent[], count: number) {
   );
 }
 
-async function expectReadTimesOut(
-  read: Promise<ReadableStreamReadResult<StreamEvent>>,
-  ms: number,
-) {
-  await expect(withTimeout(read, ms)).rejects.toThrow(/timed out/);
+async function expectTimesOut(promise: Promise<unknown>, ms: number) {
+  await expect(withTimeout(promise, ms)).rejects.toThrow(/timed out/);
+}
+
+async function expectReadTimesOut(read: Promise<ReadableStreamReadResult<StreamEvent>>, ms: number) {
+  await expectTimesOut(read, ms);
 }
 
 describe("handwritten stream capnweb", () => {
+  it("append uses the allowUnconfirmed write fast path", async () => {
+    const source = await readFile(
+      decodeURIComponent(new URL("../src/stream.ts", import.meta.url).pathname),
+      "utf8",
+    );
+
+    expect(source).toMatch(
+      /writeEventFromKv\(\{\s*storage: this\.ctx\.storage,\s*input: args\.event,\s*allowUnconfirmedWrites: true,\s*\}\)/,
+    );
+  });
+
   it("append returns committed event over capnweb", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const event: StreamEventInput = { type: "test.append", payload: { path } };
@@ -477,6 +490,7 @@ describe("handwritten stream capnweb", () => {
         defaultAppendDurabilityMode: "confirmed",
         checkpointEveryUnconfirmedAppends: 100,
         debugConfirmedSyncDelayMs: 0,
+        debugCheckpointSyncDelayMs: 0,
       },
       unconfirmedWriteCount: 0,
       checkpointInProgress: false,
@@ -562,6 +576,33 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("idempotent retries return before conflicting validation can reject them", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const idempotencyKey = crypto.randomUUID();
+    await using fixture = await withStream({ path });
+
+    const first = await fixture.rpc.append({
+      event: { type: "test.durability.idempotent-validation", idempotencyKey },
+      durability: "best-effort",
+    });
+    const retry = await fixture.rpc.append({
+      event: {
+        type: "test.durability.idempotent-validation",
+        idempotencyKey,
+        offset: 99,
+      },
+      durability: JSON.parse('"not-a-mode"'),
+    });
+
+    expect(retry).toEqual(first);
+    expect(await fixture.rpc.maxOffset()).toBe(1);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 1,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("allows a confirmed per-call override on a best-effort stream", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
@@ -625,6 +666,39 @@ describe("handwritten stream capnweb", () => {
       checkpointCompletedCount: 0,
     });
 
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointInProgress: false,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 1,
+    });
+  });
+
+  it("checkpointed append schedules a delayed checkpoint that gates later RPC", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+    await using probe = await withStream({ path });
+    await fixture.rpc.patchSettings({ debugCheckpointSyncDelayMs: 1_000 });
+
+    const checkpointingAppend = fixture.rpc.appendBatchDebug({
+      events: [{ type: "test.durability.checkpoint-gate" }],
+      durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 1 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const gatedPing = probe.rpc.ping();
+    await expectTimesOut(gatedPing, 250);
+
+    const result = await checkpointingAppend;
+
+    expect(result.debug).toMatchObject({
+      unconfirmedWriteCount: 1,
+      checkpointInProgress: true,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 0,
+    });
+
+    await gatedPing;
     expect(await fixture.rpc.debug()).toMatchObject({
       unconfirmedWriteCount: 0,
       checkpointInProgress: false,

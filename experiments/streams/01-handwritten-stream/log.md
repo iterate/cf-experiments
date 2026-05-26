@@ -5,6 +5,34 @@
 
 # Notes
 
+## 2026-05-26 23:02 UTC+1
+
+- Mutation-checked `append()` around the two most suspicious design choices:
+  - flipping `allowUnconfirmedWrites: true` to `false` did **not** fail the behavioral tests in the
+    local runtime, so added the source-level sentinel "append uses the allowUnconfirmed write fast
+    path" and left the limitation explicit in the `stream.ts` comment. This still needs a stronger
+    deployed behavioral probe before we can claim it is fully covered by runtime behavior.
+  - replacing checkpoint `blockConcurrencyWhile()` with an ungated async task failed "checkpointed
+    append schedules a delayed checkpoint that gates later RPC".
+  - awaiting checkpoint scheduling from `append()` failed the checkpointed append tests, including
+    "checkpointed appendBatch returns after scheduling but before awaiting the checkpoint".
+- Added `debugCheckpointSyncDelayMs`, a test-only lever that widens the checkpoint window without
+  depending on natural storage-sync latency.
+- Added "idempotent retries return before conflicting validation can reject them", proving the
+  idempotency fast path runs before durability-mode validation and offset precondition checks for
+  retries.
+- Local verification: `pnpm --filter @cf-experiments/01-handwritten-stream typecheck` and
+  `pnpm --filter @cf-experiments/01-handwritten-stream test` passed with 27 tests.
+- Deployed version `29ef0dab-cb05-41f4-9f0b-9c0914d788c9`.
+- Deployed verification:
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/01-handwritten-stream test`
+  passed with 27 tests.
+- DO-side benchmark smoke after deploy:
+  `publishers=2`, `subscribers=2`, `frames-per-publisher=5`, `pace-ms=20`, best-effort with ack
+  timing. Result: `allSubscribersCreatedAtLatencyMs.p95 = 40`,
+  `publisherSelfEchoCreatedAtLatencyMs.p95 = 19`, `publisherAppendAckLatencyMs.p95 = 16`,
+  `publisherAckToSelfEchoLatencyMs.p95 = 0`.
+
 ## 2026-05-26 22:56 UTC+1
 
 - Added `/benchmark/audio-chaos`, a worker route that runs the audio-shaped benchmark from Durable
