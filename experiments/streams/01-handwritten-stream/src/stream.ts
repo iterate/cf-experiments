@@ -344,10 +344,11 @@ export class Stream extends DurableObject {
         : (durability?.mode ?? this.#settings.defaultAppendDurabilityMode);
     /**
      * Per-call durability wins over persisted stream settings, but object-form
-     * checkpoint thresholds still need validation before any write is allocated.
-     * The default/override/settings/invalid-threshold tests in
+     * modes and checkpoint thresholds still need validation before any write is
+     * allocated. The default/override/settings/invalid-mode/invalid-threshold tests in
      * `scripts/stream-capnweb.test.ts` cover each branch here.
      */
+    this.#validateDurabilityMode(mode);
     return {
       mode,
       checkpointEveryUnconfirmedAppends:

@@ -567,6 +567,25 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects invalid per-call durability modes before allocating an offset", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.invalid-mode" },
+        durability: JSON.parse('"maybe-later"'),
+      }),
+    ).rejects.toThrow(/Unknown append durability mode/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("uses checkpointed stream settings when append does not pass a per-call override", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });

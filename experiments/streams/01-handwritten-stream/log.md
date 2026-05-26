@@ -13,15 +13,16 @@
   - best-effort appends fan out to subscribers while unconfirmed write debt is still visible;
   - checkpointed `appendBatchDebug()` proves the triggering append returns after scheduling, not
     awaiting, the checkpoint;
+  - invalid per-call durability modes are rejected before allocating offsets;
   - per-session RPC disposal removes live subscribers after WebSocket teardown.
 - Fixed a subscriber leak found by the new lifecycle test: Cap'n Web session teardown did not
   promptly call the returned `ReadableStream` cancel hook, so the per-connection `StreamRpcTarget`
   now owns its subscribers and releases them from `[Symbol.dispose]()`.
 - Local result: `pnpm typecheck` and `pnpm vitest run scripts/stream-capnweb.test.ts` passed
-  with 19 tests.
-- Deployed version `1dde431e-045b-4c2a-aea4-c14424d2fc73`.
+  with 20 tests.
+- Deployed version `00c87e34-0ee6-4ead-bd9f-c22da4753b61`.
 - Ran `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`.
-- Result: 19 tests passed in one test file.
+- Result: 20 tests passed in one test file.
 
 ## 2026-05-26 21:11 UTC+1
 
