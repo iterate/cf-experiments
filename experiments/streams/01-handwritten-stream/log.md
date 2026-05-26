@@ -5,6 +5,28 @@
 
 # Notes
 
+## 2026-05-26 23:37 UTC+1
+
+- Re-ran the `allowUnconfirmedWrites: true` mutation check locally by temporarily changing it to
+  `false`.
+- Result: the source sentinel "append uses the allowUnconfirmed write fast path" failed, but the
+  strongest local behavioral probe, "lets unrelated RPC resolve while confirmed append waits for
+  durability", still passed. This confirms the current reason for keeping a source-level sentinel:
+  local runtime behavior still does not make the platform output-gate difference crisp enough to
+  rely on as the only regression test.
+- Also deployed the same temporary mutation as version `091869c8-3eb8-4c3c-9823-11a23563a43a` and
+  ran the three strongest behavioral probes:
+  - "lets unrelated RPC resolve while confirmed append waits for durability"
+  - "lets subscribers drain old events but not the new confirmed event before durability"
+  - "best-effort appends fan out while write debt is still unconfirmed"
+  They all passed, so the source sentinel remains necessary for this exact implementation choice.
+  Restored and redeployed the intended implementation as
+  `50bb84f2-a679-41b4-a152-81423f58138e`.
+- Verification after restore: root `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  all passed with 35 tests.
+
 ## 2026-05-26 23:35 UTC+1
 
 - Added "removes replay subscribers when committed history is corrupt". This covers the failure path
