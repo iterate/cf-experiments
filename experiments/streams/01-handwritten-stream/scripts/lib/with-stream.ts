@@ -1,7 +1,7 @@
 /**
  * Cap'n Web test fixture: WebSocket RPC to a named Stream DO + recorded frames.
  *
- *   await using fixture = await withStream({ name: "my-stream" });
+ *   await using fixture = await withStream({ path: "my-stream" });
  *   await fixture.rpc.append({ event: { type: "test" } });
  */
 
@@ -32,26 +32,26 @@ export type StreamFixture = AsyncDisposable & {
 };
 
 export type WithStreamOptions = {
-  name: string;
+  path: string;
   workerUrl?: string;
   log?: Pick<Console, "log">;
   printWireOnDispose?: boolean;
 };
 
 export async function withStream({
-  name,
+  path,
   workerUrl = defaultWorkerUrl,
   log = console,
   printWireOnDispose = false,
 }: WithStreamOptions): Promise<StreamFixture> {
-  const url = toWebSocketUrl(workerUrl, name);
+  const url = toWebSocketUrl(workerUrl, path);
   log.log(`[with-stream] connecting ${url}`);
 
   const startedAt = performance.now();
   const wsMessages: WsMessage[] = [];
   const webSocket = newRecordingWebSocket(url, wsMessages, startedAt);
   await waitForWebSocketOpen(webSocket);
-  log.log(`[with-stream] connected name=${name}`);
+  log.log(`[with-stream] connected path=${path}`);
 
   const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
 
@@ -71,13 +71,13 @@ export async function withStream({
       return report;
     },
     async [Symbol.asyncDispose]() {
-      log.log(`[with-stream] disconnecting name=${name}`);
+      log.log(`[with-stream] disconnecting path=${path}`);
       if (printWireOnDispose) fixture.printWire();
       rpc[Symbol.dispose]();
       await closeWebSocket(webSocket);
       const { resultWaits, waves, spanMs } = fixture.wireAnalysis();
       log.log(
-        `[with-stream] disconnected name=${name} (${wsMessages.length} frames, ${resultWaits.length} pulled results, ${waves.length} latency waves, ${spanMs.toFixed(1)}ms span)`,
+        `[with-stream] disconnected path=${path} (${wsMessages.length} frames, ${resultWaits.length} pulled results, ${waves.length} latency waves, ${spanMs.toFixed(1)}ms span)`,
       );
     },
   };
@@ -116,9 +116,9 @@ function describeWebSocketFrameData(data: unknown) {
   throw new TypeError(`unexpected WebSocket frame data: ${String(data)}`);
 }
 
-function toWebSocketUrl(raw: string, name: string) {
+function toWebSocketUrl(raw: string, path: string) {
   const url = new URL(raw);
-  url.pathname = `/${name}`;
+  url.pathname = `/${path}`;
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   return url.toString();

@@ -13,10 +13,10 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 
 describe("handwritten stream capnweb", () => {
   it("append returns committed event over capnweb", async () => {
-    const name = `stream-${crypto.randomUUID()}`;
-    const event: StreamEventInput = { type: "test.append", payload: { name } };
+    const path = `stream-${crypto.randomUUID()}`;
+    const event: StreamEventInput = { type: "test.append", payload: { path } };
 
-    await using fixture = await withStream({ name });
+    await using fixture = await withStream({ path });
 
     await fixture.rpc.append({ event });
 
@@ -45,7 +45,7 @@ describe("handwritten stream capnweb", () => {
     const firstConcurrentName = `stream-${crypto.randomUUID()}`;
     const secondConcurrentName = `stream-${crypto.randomUUID()}`;
 
-    await using sequential = await withStream({ name: sequentialName });
+    await using sequential = await withStream({ path: sequentialName });
     await sequential.rpc.append({
       event: { type: "test.sequential", payload: { name: sequentialName } },
     });
@@ -53,8 +53,8 @@ describe("handwritten stream capnweb", () => {
     expect(sequential.wireAnalysis().resultWaits).toHaveLength(2);
     expect(sequential.wireAnalysis().waves).toHaveLength(2);
 
-    await using concurrent = await withStream({ name: firstConcurrentName });
-    await using concurrent2 = await withStream({ name: secondConcurrentName });
+    await using concurrent = await withStream({ path: firstConcurrentName });
+    await using concurrent2 = await withStream({ path: secondConcurrentName });
     const firstAppend = concurrent.rpc.append({
       event: { type: "test.concurrent", payload: { name: firstConcurrentName } },
     });
@@ -75,7 +75,7 @@ describe("handwritten stream capnweb", () => {
       { type: "test.map", payload: { n: 2 } },
     ];
 
-    await using fireAndForget = await withStream({ name: fireAndForgetName });
+    await using fireAndForget = await withStream({ path: fireAndForgetName });
     {
       using _append = fireAndForget.rpc.append({
         event: { type: "test.fire-and-forget", payload: { name: fireAndForgetName } },
@@ -100,7 +100,7 @@ describe("handwritten stream capnweb", () => {
     ]);
     expect(fireAndForget.wireAnalysis().resultWaits).toHaveLength(0);
 
-    await using mapped = await withStream({ name: mapName });
+    await using mapped = await withStream({ path: mapName });
     const appended = mapped.rpc.appendBatch({ events });
     const offsets = await appended.map((event) => event.offset);
 
@@ -122,13 +122,13 @@ describe("handwritten stream capnweb", () => {
   it(
     "receives live appends on a separate connection with no read-side outbound traffic",
     async () => {
-      const name = `stream-${crypto.randomUUID()}`;
+      const path = `stream-${crypto.randomUUID()}`;
       const events: StreamEventInput[] = [
         { type: "test.stream", payload: { n: 1 } },
         { type: "test.stream", payload: { n: 2 } },
       ];
 
-      await using reader = await withStream({ name });
+      await using reader = await withStream({ path });
 
       const readable = await reader.rpc.stream();
       // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
@@ -138,7 +138,7 @@ describe("handwritten stream capnweb", () => {
       const firstRead = streamReader.read() as Promise<ReadableStreamReadResult<StreamEvent>>;
       const secondRead = streamReader.read() as Promise<ReadableStreamReadResult<StreamEvent>>;
 
-      await using writer = await withStream({ name });
+      await using writer = await withStream({ path });
       await writer.rpc.appendBatch({ events });
 
       const first = await withTimeout(firstRead, 500);
