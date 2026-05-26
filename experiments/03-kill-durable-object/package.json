@@ -1,0 +1,17 @@
+{
+  "name": "@cf-experiments/03-kill-durable-object",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test:oom": "vitest run scripts/oom-sweep.test.ts",
+    "test:kill-response": "vitest run scripts/kill-response.test.ts",
+    "typecheck": "tsgo --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "vitest": "^4.1.7",
+    "wrangler": "catalog:cloudflare"
+  }
+}
