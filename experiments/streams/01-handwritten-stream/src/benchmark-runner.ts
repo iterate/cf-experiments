@@ -65,7 +65,7 @@ export class BenchmarkRunner extends DurableObject {
     }
 
     const elapsedMs = Date.now() - startedAt;
-    const serverCount = (await stub.count()).kv;
+    const serverCount = await stub.count();
 
     return {
       runner: this.ctx.id.name ?? this.ctx.id.toString(),

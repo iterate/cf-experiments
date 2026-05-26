@@ -11,6 +11,40 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
+function outboundPullPushFrames(
+  wsMessages: { direction: string; data: string }[],
+  afterFrameIndex: number,
+) {
+  return wsMessages
+    .slice(afterFrameIndex)
+    .filter((frame) => frame.direction === "out")
+    .map((frame) => JSON.parse(frame.data))
+    .filter((data) => data[0] === "pull" || data[0] === "push");
+}
+
+async function readEvents(
+  streamReader: ReadableStreamDefaultReader<StreamEvent>,
+  count: number,
+  timeoutMs: number,
+) {
+  const results = await Promise.all(
+    Array.from({ length: count }, () => withTimeout(streamReader.read(), timeoutMs)),
+  );
+
+  const events: StreamEvent[] = [];
+  for (const result of results) {
+    if (result.done) throw new Error("stream ended before expected event count");
+    events.push(result.value);
+  }
+  return events;
+}
+
+function expectContiguousOffsets(events: StreamEvent[], count: number) {
+  expect(events.map((event) => event.offset)).toEqual(
+    Array.from({ length: count }, (_, i) => i + 1),
+  );
+}
+
 describe("handwritten stream capnweb", () => {
   it("append returns committed event over capnweb", async () => {
     const path = `stream-${crypto.randomUUID()}`;
@@ -49,7 +83,7 @@ describe("handwritten stream capnweb", () => {
     await sequential.rpc.append({
       event: { type: "test.sequential", payload: { name: sequentialName } },
     });
-    expect(await sequential.rpc.count()).toEqual({ kv: 1 });
+    expect(await sequential.rpc.count()).toBe(1);
     expect(sequential.wireAnalysis().resultWaits).toHaveLength(2);
     expect(sequential.wireAnalysis().waves).toHaveLength(2);
 
@@ -159,15 +193,214 @@ describe("handwritten stream capnweb", () => {
         createdAt: expect.any(String),
       });
 
-      const outboundWhileReading = reader.wsMessages
-        .slice(outboundAfterSubscribe)
-        .filter((frame) => frame.direction === "out")
-        .map((frame) => JSON.parse(frame.data))
-        .filter((data) => data[0] === "pull" || data[0] === "push");
+      const outboundWhileReading = outboundPullPushFrames(
+        reader.wsMessages,
+        outboundAfterSubscribe,
+      );
       expect(outboundWhileReading).toEqual([]);
 
       streamReader.releaseLock();
     },
     2_000,
+  );
+
+  it(
+    "delivers global offset order to multiple subscribers with no per-event RPC from readers or writers",
+    async () => {
+      const path = `stream-${crypto.randomUUID()}`;
+      const eventsPerWriter = 3;
+      const writerCount = 2;
+      const totalEvents = eventsPerWriter * writerCount;
+      const writer1Events: StreamEventInput[] = Array.from({ length: eventsPerWriter }, (_, i) => ({
+        type: "test.multi",
+        payload: { writer: 1, n: i + 1 },
+      }));
+      const writer2Events: StreamEventInput[] = Array.from({ length: eventsPerWriter }, (_, i) => ({
+        type: "test.multi",
+        payload: { writer: 2, n: i + 1 },
+      }));
+
+      await using reader1 = await withStream({ path });
+      await using reader2 = await withStream({ path });
+
+      const readable1 = await reader1.rpc.stream();
+      const readable2 = await reader2.rpc.stream();
+      // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+      const streamReader1 = (readable1 as ReadableStream<StreamEvent>).getReader();
+      // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+      const streamReader2 = (readable2 as ReadableStream<StreamEvent>).getReader();
+
+      const outboundAfterSubscribe1 = reader1.wsMessages.length;
+      const outboundAfterSubscribe2 = reader2.wsMessages.length;
+
+      const reads1 = Array.from({ length: totalEvents }, () =>
+        streamReader1.read() as Promise<ReadableStreamReadResult<StreamEvent>>,
+      );
+      const reads2 = Array.from({ length: totalEvents }, () =>
+        streamReader2.read() as Promise<ReadableStreamReadResult<StreamEvent>>,
+      );
+
+      await using writer1 = await withStream({ path });
+      await using writer2 = await withStream({ path });
+
+      {
+        using _batch1 = writer1.rpc.appendBatch({ events: writer1Events });
+        using _batch2 = writer2.rpc.appendBatch({ events: writer2Events });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      const collectOffsets = async (
+        reads: Promise<ReadableStreamReadResult<StreamEvent>>[],
+      ) => {
+        const results = await Promise.all(reads.map((read) => withTimeout(read, 1_000)));
+        return results.map((result) => {
+          expect(result.done).toBe(false);
+          return result.value!.offset;
+        });
+      };
+
+      const offsets1 = await collectOffsets(reads1);
+      const offsets2 = await collectOffsets(reads2);
+
+      expect(offsets1).toEqual(Array.from({ length: totalEvents }, (_, i) => i + 1));
+      expect(offsets2).toEqual(Array.from({ length: totalEvents }, (_, i) => i + 1));
+
+      expect(outboundPullPushFrames(reader1.wsMessages, outboundAfterSubscribe1)).toEqual([]);
+      expect(outboundPullPushFrames(reader2.wsMessages, outboundAfterSubscribe2)).toEqual([]);
+
+      // Writers fire-and-forget appendBatch: push + release only, no pulled results.
+      expect(writer1.wireAnalysis().resultWaits).toHaveLength(0);
+      expect(writer2.wireAnalysis().resultWaits).toHaveLength(0);
+
+      streamReader1.releaseLock();
+      streamReader2.releaseLock();
+    },
+    5_000,
+  );
+
+  it("replays committed history before switching to live appends", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const history: StreamEventInput[] = [
+      { type: "test.replay", payload: { phase: "history", n: 1 } },
+      { type: "test.replay", payload: { phase: "history", n: 2 } },
+      { type: "test.replay", payload: { phase: "history", n: 3 } },
+    ];
+    const live: StreamEventInput = { type: "test.replay", payload: { phase: "live", n: 4 } };
+
+    await using writer = await withStream({ path });
+    await writer.rpc.appendBatch({ events: history });
+
+    await using reader = await withStream({ path });
+    const readable = await reader.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+
+    const replayed = await readEvents(streamReader, history.length, 500);
+    expectContiguousOffsets(replayed, history.length);
+    expect(replayed.map((event) => event.payload)).toEqual(history.map((event) => event.payload));
+
+    await writer.rpc.append({ event: live });
+    const [liveEvent] = await readEvents(streamReader, 1, 500);
+    expect(liveEvent).toMatchObject({
+      offset: 4,
+      payload: live.payload,
+    });
+
+    streamReader.releaseLock();
+  });
+
+  it("idempotent append returns the original event and emits once to live subscribers", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const idempotencyKey = crypto.randomUUID();
+
+    await using reader = await withStream({ path });
+    const readable = await reader.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+
+    await using writer = await withStream({ path });
+    const firstAppend = await writer.rpc.append({
+      event: { type: "test.idempotency", idempotencyKey, payload: { attempt: 1 } },
+    });
+    const retryAppend = await writer.rpc.append({
+      event: { type: "test.idempotency", idempotencyKey, payload: { attempt: 2 } },
+    });
+
+    expect(retryAppend).toEqual(firstAppend);
+    expect(await writer.rpc.count()).toBe(1);
+
+    const [delivered] = await readEvents(streamReader, 1, 500);
+    expect(delivered).toEqual(firstAppend);
+
+    const duplicateRead = streamReader.read();
+    await expect(withTimeout(duplicateRead, 100)).rejects.toThrow(/timed out/);
+    await streamReader.cancel("done checking for duplicate idempotent delivery");
+    await duplicateRead.catch(() => undefined);
+  });
+
+  it("rejects offset precondition failures without advancing the stream", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+
+    await using fixture = await withStream({ path });
+    await fixture.rpc.append({ event: { type: "test.precondition", payload: { ok: true } } });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.precondition", offset: 99, payload: { ok: false } },
+      }),
+    ).rejects.toThrow(/Offset precondition failed/);
+    expect(await fixture.rpc.count()).toBe(1);
+
+    await using reader = await withStream({ path });
+    const readable = await reader.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+    const [event] = await readEvents(streamReader, 1, 500);
+    expect(event).toMatchObject({ offset: 1, payload: { ok: true } });
+
+    const nextRead = streamReader.read();
+    await expect(withTimeout(nextRead, 100)).rejects.toThrow(/timed out/);
+    await streamReader.cancel("done checking precondition failure");
+    await nextRead.catch(() => undefined);
+  });
+
+  it(
+    "buffers a burst for a delayed client reader beyond desiredBufferedEvents",
+    async () => {
+      const path = `stream-${crypto.randomUUID()}`;
+      const burstSize = 20;
+      const events: StreamEventInput[] = Array.from({ length: burstSize }, (_, i) => ({
+        type: "test.backpressure",
+        payload: { n: i + 1 },
+      }));
+
+      await using reader = await withStream({ path });
+      const readable = await reader.rpc.stream({ desiredBufferedEvents: 1 });
+
+      await using writer = await withStream({ path });
+      await writer.rpc.appendBatch({ events });
+
+      const debugAfterBurst = await reader.rpc.streamDebug();
+      expect(debugAfterBurst.subscribers).toHaveLength(1);
+      expect(debugAfterBurst.subscribers[0]).toMatchObject({
+        enqueuedEvents: burstSize,
+        desiredBufferedEvents: 1,
+      });
+
+      // desiredBufferedEvents is a backpressure signal, not a hard cap:
+      // enqueue() accepted the whole burst while the client had not started
+      // reading yet.
+      expect(debugAfterBurst.subscribers[0]!.desiredSize).toBeLessThanOrEqual(1);
+
+      // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+      const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+      const delivered = await readEvents(streamReader, burstSize, 1_000);
+
+      expectContiguousOffsets(delivered, burstSize);
+      expect(delivered.map((event) => event.payload)).toEqual(events.map((event) => event.payload));
+
+      streamReader.releaseLock();
+    },
+    5_000,
   );
 });

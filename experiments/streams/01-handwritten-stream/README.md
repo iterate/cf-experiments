@@ -2,6 +2,9 @@
 
 This folder contains my best guess at where we'll land in the near future.
 
+See [design-goals.md](./design-goals.md) for the current durability/throughput contract we are trying
+to make precise.
+
 It has 
 
 A `Stream` durable object
