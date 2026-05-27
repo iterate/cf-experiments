@@ -589,17 +589,13 @@ export class Stream extends DurableObject {
        * `scripts/stream-capnweb.test.ts`.
        */
 
-      // Let the current handler reach its next turn before deciding which
-      // unconfirmed append window this checkpoint should cover. In practice this
-      // lets a single appendBatch() finish allocating its offsets before the
-      // checkpoint snapshots the unconfirmed append count.
-      await Promise.resolve();
-
       // No zero-count guard is needed here. `#scheduleCheckpointIfNeeded()`
       // only starts this callback after the threshold is reached, and
       // `blockConcurrencyWhile()` prevents a later delivered `sync()` RPC from
       // clearing the count before this checkpoint runs. Appends still executing
-      // in the same handler can only increase the count. See the checkpointed
+      // in the same handler can only increase the count. The first await below
+      // still gives an appendBatch() handler room to finish its same-turn
+      // appends before sync snapshots the window. See the checkpointed
       // appendBatch tests in `scripts/stream-capnweb.test.ts`.
       await this.#delayForCheckpointDebug();
       await this.ctx.storage.sync();

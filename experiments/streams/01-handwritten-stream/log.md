@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 04:56 UTC+1
+
+- Probed the explicit `await Promise.resolve()` at the start of the checkpoint callback. Commenting
+  it out and running the checkpointed appendBatch/gate tests still passed.
+- Simplified the callback by removing that explicit microtask yield. The first real await
+  (`#delayForCheckpointDebug()`) still yields before `storage.sync()`, so same-turn `appendBatch()`
+  appends can finish before the checkpoint sync snapshots the unconfirmed window.
+- Verification: targeted checkpointed local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 53 tests. Deployed version `b4248f8c-267e-4ee7-a0ec-b34ca00b1feb`.
+
 ## 2026-05-27 04:53 UTC+1
 
 - Added "rejects non-string object durability modes before falling back to stream settings". Runtime
