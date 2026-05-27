@@ -5,6 +5,22 @@
 
 # Notes
 
+## 2026-05-27 05:06 UTC+1
+
+- Added "rejects unknown source envelope fields instead of dropping them". Top-level event parsing
+  was strict, but nested `source.processor` was still a default Zod object and silently stripped
+  unknown fields.
+- Red result before the fix: `source.processor.extra` did not produce a stream-level validation
+  error and the call reached later behavior, surfacing through Cap'n Web as `'' is not a function.`
+- Fixed the shared `StreamEventInput` schema so `source` and `source.processor` are strict envelope
+  objects while payload and metadata remain arbitrary pass-through values.
+- Mutation check: temporarily relaxing `source.processor` back to a non-strict object made the new
+  test fail again.
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`,
+  local `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 55 tests. Deployed version `471d25ad-5388-4cf5-83a0-ee8ba10d123d`.
+
 ## 2026-05-27 05:03 UTC+1
 
 - Ran deployed low-load DO-side `/benchmark/audio-chaos` on version

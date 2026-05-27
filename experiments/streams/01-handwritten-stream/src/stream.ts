@@ -87,6 +87,7 @@ export class Stream extends DurableObject {
      * "rejects unknown top-level append event fields instead of dropping them",
      * "preserves audio-shaped payload and metadata while rejecting only top-level
      * event fields",
+     * "rejects unknown source envelope fields instead of dropping them",
      * "rejects unknown append argument fields before allocating an offset",
      * plus "rejects malformed idempotent retries before reading the idempotency
      * index", in `scripts/stream-capnweb.test.ts`.

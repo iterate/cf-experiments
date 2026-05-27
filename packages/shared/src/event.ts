@@ -74,8 +74,10 @@ export const StreamEventInput = z.object({
           slug: z.string(),
           version: z.string(),
         })
+        .strict()
         .optional(),
     })
+    .strict()
     .optional(),
   idempotencyKey: z.string().optional(),
   /** Precondition: must equal the next offset when set. */

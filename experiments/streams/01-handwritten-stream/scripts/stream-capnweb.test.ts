@@ -186,6 +186,26 @@ describe("handwritten stream capnweb", () => {
     expect(await fixture.rpc.maxOffset()).toBe(1);
   });
 
+  it("rejects unknown source envelope fields instead of dropping them", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: JSON.parse(
+          '{"type":"test.append.source-extra","source":{"processor":{"slug":"p","version":"1","extra":true}}}',
+        ),
+      }),
+    ).rejects.toThrow(/append event must be a valid StreamEventInput/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects malformed idempotent retries before reading the idempotency index", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();
