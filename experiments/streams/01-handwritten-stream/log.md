@@ -5,6 +5,17 @@
 
 # Notes
 
+## 2026-05-27 02:31 UTC+1
+
+- Added "rejects null per-call durability before allocating an offset" for malformed runtime RPC
+  input that TypeScript callers cannot express but a Cap'n Web client can send.
+- Red result before the fix: append rejected with `Cannot read properties of null (reading
+  'checkpointEveryUnconfirmedAppends')`, proving the resolver had an incidental TypeError path.
+- Fixed `#resolveAppendDurability()` to reject `null` explicitly before mode/threshold handling.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 37 tests. Deployed version `c2eefee1-70ff-40b4-8e55-0db228783d12`.
+
 ## 2026-05-27 00:50 UTC+1
 
 - Added "removes every stream opened by a disposed capnweb session". A single Cap'n Web WebSocket can

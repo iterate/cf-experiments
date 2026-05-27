@@ -444,6 +444,9 @@ export class Stream extends DurableObject {
     mode: AppendDurabilityMode;
     checkpointEveryUnconfirmedAppends: number;
   } {
+    if (durability === null) {
+      throw new Error("append durability must be a mode string or options object");
+    }
     const mode =
       typeof durability === "string"
         ? durability
@@ -453,10 +456,12 @@ export class Stream extends DurableObject {
      * modes and checkpoint thresholds still need validation before any write is
      * allocated. We validate a present threshold even when the mode is not
      * checkpointed so malformed option objects do not get silently accepted.
+     * Runtime RPC callers can also send `null`; that must fail explicitly
+     * instead of falling through to an incidental property-access TypeError.
      * The default/override/settings/invalid-mode/invalid-threshold tests,
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
-     * object durability", in `scripts/stream-capnweb.test.ts` cover each branch
-     * here.
+     * object durability" and "rejects null per-call durability before allocating
+     * an offset", in `scripts/stream-capnweb.test.ts` cover each branch here.
      */
     this.#validateDurabilityMode(mode);
     return {
