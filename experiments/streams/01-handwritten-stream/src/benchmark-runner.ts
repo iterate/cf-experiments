@@ -556,11 +556,13 @@ export class BenchmarkRunner extends DurableObject {
     const reader = await objectStreamReader(args.rpc, args.streamKind);
     args.markReady();
     try {
-      for (let delivered = 0; delivered < args.publishers * args.framesPerPublisher; delivered += 1) {
+      let ownFramesDelivered = 0;
+      while (ownFramesDelivered < args.framesPerPublisher) {
         const result = await withTimeout(reader.read(), args.timeoutMs);
         if (result.done) throw new Error("publisher self-echo stream ended early");
         const frameId = readFrameId(result.value);
         if (frameId.startsWith(`p${args.publisher}-`)) {
+          ownFramesDelivered += 1;
           const selfEchoAt = Date.now();
           const appendStartedAt = args.appendStartedAtByFrame.get(frameId);
           args.selfEchoAtByFrame.set(frameId, selfEchoAt);

@@ -22,6 +22,10 @@
   before its `streamVolatile()` reader is attached. Durable mode masked that benchmark race via
   replay. Updated the benchmark to wait for the self-echo reader and for volatile subscriber counts
   before publishing.
+- The second volatile 10-publisher run still timed out because publisher 0's self-echo collector was
+  waiting for all publishers' 500 events. That is a durable/replay-shaped assumption, not the
+  read-your-own metric. Updated the self-echo collector to stop after publisher 0 receives its own
+  `framesPerPublisher` frames.
 
 ## 2026-05-27 06:58 UTC+1
 
