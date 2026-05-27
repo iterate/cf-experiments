@@ -313,6 +313,14 @@ describe("handwritten stream capnweb", () => {
         durability: JSON.parse('"not-a-mode"'),
       }),
     ).rejects.toThrow(/append event must be a valid StreamEventInput/);
+    await expect(
+      fixture.rpc.append({
+        event: JSON.parse(
+          '{"type":"test.append.source-processor-type","source":{"processor":{"slug":"p","version":1}}}',
+        ),
+        durability: JSON.parse('"not-a-mode"'),
+      }),
+    ).rejects.toThrow(/append event must be a valid StreamEventInput/);
 
     expect(await fixture.rpc.maxOffset()).toBe(0);
     expect(await fixture.rpc.debug()).toMatchObject({

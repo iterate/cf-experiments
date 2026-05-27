@@ -5,6 +5,15 @@
 
 # Notes
 
+## 2026-05-27 06:46 UTC+1
+
+- Extended "rejects malformed source processor fields at the append envelope boundary" to check
+  both halves of processor identity: non-string `slug` and non-string `version`.
+- Verification: focused local test passed. Mutation check: temporarily widening
+  `StreamEventInput.source.processor.version` from `z.string()` to `z.unknown()` made the test fail
+  because the malformed event reached durability resolution and threw `Unknown append durability
+  mode: not-a-mode` instead of the envelope validation error. Restored the schema.
+
 ## 2026-05-27 06:43 UTC+1
 
 - Added "rejects malformed source processor fields at the append envelope boundary". The `source`
