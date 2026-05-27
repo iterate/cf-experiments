@@ -5,6 +5,25 @@
 
 # Notes
 
+## 2026-05-27 02:43 UTC+1
+
+- The DO-side audio benchmark route rejected `subscribers=0` with Worker 1101 because the HTTP
+  parser required positive subscriber counts. Changed that parameter to allow zero active subscribers
+  and made the delivery-coverage fields report zero active delivery cleanly for that case.
+- Ran a best-effort active-subscriber scaling sweep with 10 publishers, 50 frames/publisher, 20 ms
+  pacing, 24 kHz mono PCM16, 960 raw bytes / 1280 base64 chars per frame:
+  - 0 active subscribers: self-echo p95 92 ms, append-ack p95 9 ms.
+  - 1 active subscriber: all-subs p95 176 ms, self-echo p95 167 ms, append-ack p95 23 ms.
+  - 10 active subscribers: all-subs p95 230 ms, self-echo p95 194 ms, append-ack p95 31 ms.
+  - 36 active subscribers: all-subs p95 685 ms, self-echo p95 523 ms, append-ack p95 266 ms.
+- All nonzero-subscriber runs fully delivered 500/500 frames to all active subscribers. This points
+  at active fan-out pressure as the main contributor: ten publishers by themselves do not create the
+  second-scale read-your-own latency.
+- Verification after the benchmark-route change: root `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 39 tests. Deployed version `5c186d7b-7fdd-45d9-a77a-a0a2104bf8ff`.
+
 ## 2026-05-27 02:39 UTC+1
 
 - Repeated the DO-side full audio workload three times in best-effort mode after deploying

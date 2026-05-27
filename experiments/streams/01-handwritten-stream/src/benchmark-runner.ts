@@ -290,7 +290,7 @@ export class BenchmarkRunner extends DurableObject {
         const latencies = frameLatencies.get(`p${publisher}-f${frame}`) ?? [];
         frameDeliveryCounts.push(latencies.length);
         if (latencies.length > 0) firstSubscriberLatencies.push(Math.min(...latencies));
-        if (latencies.length === config.subscribers) {
+        if (config.subscribers > 0 && latencies.length === config.subscribers) {
           allSubscriberLatencies.push(Math.max(...latencies));
         }
       }
@@ -324,10 +324,14 @@ export class BenchmarkRunner extends DurableObject {
       },
       elapsedMs,
       eventsPerSecond: totalEvents / (elapsedMs / 1_000),
-      framesFullyDelivered: frameDeliveryCounts.filter((count) => count === config.subscribers)
-        .length,
-      framesMissingFullDelivery: frameDeliveryCounts.filter((count) => count !== config.subscribers)
-        .length,
+      framesFullyDelivered:
+        config.subscribers === 0
+          ? 0
+          : frameDeliveryCounts.filter((count) => count === config.subscribers).length,
+      framesMissingFullDelivery:
+        config.subscribers === 0
+          ? 0
+          : frameDeliveryCounts.filter((count) => count !== config.subscribers).length,
       minFrameDeliveries: Math.min(...frameDeliveryCounts),
       maxFrameDeliveries: Math.max(...frameDeliveryCounts),
       subscriberCreatedAtLatencyMs: summarize(subscriberLatencies),

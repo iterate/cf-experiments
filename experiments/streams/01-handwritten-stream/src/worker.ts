@@ -12,7 +12,7 @@ export default {
         stream: url.searchParams.get("stream") ?? undefined,
         runId,
         publishers: positiveIntParam(url, "publishers"),
-        subscribers: positiveIntParam(url, "subscribers"),
+        subscribers: nonNegativeIntParam(url, "subscribers"),
         slowSubscribers: nonNegativeIntParam(url, "slow-subscribers"),
         framesPerPublisher: positiveIntParam(url, "frames-per-publisher"),
         frameMs: positiveIntParam(url, "frame-ms"),
