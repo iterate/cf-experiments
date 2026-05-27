@@ -11,6 +11,9 @@
   append, volatile broadcast, and volatile append durations. These are measured inside the Stream DO
   and should tell us whether hundreds of milliseconds are being spent in the synchronous fan-out
   loop itself or outside it in RPC/WebSocket scheduling and delivery.
+- Note: sub-millisecond isolate timings can round to zero because Workers timers are coarse; treat
+  `0 ms` as "below timer resolution", not literally free. Added fan-out attempt counters so the
+  benchmark records how many subscriber enqueue attempts the Stream DO performed.
 - Verification: package-local `pnpm typecheck` passed. Focused local Cap'n Web append test passed.
 
 ## 2026-05-27 07:06 UTC+1

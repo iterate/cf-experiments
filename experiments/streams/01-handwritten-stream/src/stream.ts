@@ -56,6 +56,8 @@ export class Stream extends DurableObject {
   #durableAppendMs: number[] = [];
   #volatileBroadcastMs: number[] = [];
   #volatileAppendMs: number[] = [];
+  #durableFanoutAttempts = 0;
+  #volatileFanoutAttempts = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -336,6 +338,10 @@ export class Stream extends DurableObject {
         volatileBroadcastMs: this.#timingSummary(this.#volatileBroadcastMs),
         volatileAppendMs: this.#timingSummary(this.#volatileAppendMs),
       },
+      fanoutAttempts: {
+        durable: this.#durableFanoutAttempts,
+        volatile: this.#volatileFanoutAttempts,
+      },
     };
   }
 
@@ -552,6 +558,7 @@ export class Stream extends DurableObject {
   }
 
   #broadcast(event: StreamEvent): void {
+    this.#durableFanoutAttempts += this.#streamSubscribers.size;
     for (const subscriber of this.#streamSubscribers) {
       /**
        * Fan-out is deliberately synchronous and per-subscriber independent: one
@@ -567,6 +574,7 @@ export class Stream extends DurableObject {
   }
 
   #broadcastVolatile(event: StreamEvent): void {
+    this.#volatileFanoutAttempts += this.#volatileSubscribers.size;
     for (const subscriber of this.#volatileSubscribers) {
       this.#enqueueToSubscriber(subscriber, event);
     }
