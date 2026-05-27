@@ -284,6 +284,17 @@ describe("handwritten stream capnweb", () => {
     2_000,
   );
 
+  it("does not expose session-owned stream internals over capnweb", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect((fixture.rpc as any).streamForSession()).rejects.toThrow();
+
+    expect(await fixture.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("pure subscribers do not originate per-event websocket traffic", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const events: StreamEventInput[] = Array.from({ length: 10 }, (_, i) => ({

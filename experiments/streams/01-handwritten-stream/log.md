@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 02:56 UTC+1
+
+- Added "does not expose session-owned stream internals over capnweb". `streamForSession()` and
+  `releaseSessionSubscribers()` are implementation details used by `StreamRpcTarget` to own all
+  streams opened by one WebSocket session.
+- Mutation check: temporarily removing `streamForSession` from the RPC target exclusion list made
+  the new test fail with a leaked subscriber. The direct client call created a stream without the
+  session-owned subscriber set that `[Symbol.dispose]()` later releases.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 43 tests. Deployed version `11c9aded-5ab3-48ad-9c90-71c2cf06bc79`.
+
 ## 2026-05-27 02:53 UTC+1
 
 - Added "rejects malformed idempotent retries before reading the idempotency index". This pins the

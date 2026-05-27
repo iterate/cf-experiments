@@ -620,6 +620,13 @@ export type StreamRpc = Omit<
 type BaseStreamRpc = Omit<StreamRpc, "stream">;
 
 const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
+  /**
+   * `streamForSession()` and `releaseSessionSubscribers()` are session-internal.
+   * If a client can call `streamForSession()` directly, it can create a stream
+   * without the `StreamRpcTarget` subscriber set that is released on WebSocket
+   * disposal. See "does not expose session-owned stream internals over capnweb"
+   * in `scripts/stream-capnweb.test.ts`.
+   */
   exclude: ["getCapability", "fetch", "stream", "streamForSession", "releaseSessionSubscribers"],
 });
 
