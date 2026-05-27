@@ -76,6 +76,13 @@ returned streams with a small JSON-over-WebSocket protocol:
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=raw-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
 
+Set `stream-kind=json-volatile` to keep Cap'n Web returned streams but make each stream chunk a
+pre-serialized JSON string instead of a pass-by-value event object:
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=json-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
+```
+
 Deploy current code:
 
 ```sh

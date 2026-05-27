@@ -5,7 +5,7 @@ import type { StreamRpc } from "./stream.js";
 
 export type BenchmarkMode = "rpc-serial" | "rpc-batch" | "rpc-pipelined";
 type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
-type StreamKind = "durable" | "volatile" | "raw-volatile";
+type StreamKind = "durable" | "volatile" | "json-volatile" | "raw-volatile";
 type AppendDurability =
   | AppendDurabilityMode
   | {
@@ -268,7 +268,11 @@ export class BenchmarkRunner extends DurableObject {
       ),
     );
 
-    if (config.streamKind === "volatile" || config.streamKind === "raw-volatile") {
+    if (
+      config.streamKind === "volatile" ||
+      config.streamKind === "json-volatile" ||
+      config.streamKind === "raw-volatile"
+    ) {
       const expectedSubscribers = config.subscribers + config.slowSubscribers;
       const attachDeadline = Date.now() + 5_000;
       while (Date.now() < attachDeadline) {
@@ -276,6 +280,8 @@ export class BenchmarkRunner extends DurableObject {
         const attached =
           config.streamKind === "raw-volatile"
             ? debug.rawVolatileSubscribers
+            : config.streamKind === "json-volatile"
+              ? debug.jsonVolatileSubscribers.length
             : debug.volatileSubscribers.length;
         if (attached >= expectedSubscribers) break;
         await sleep(25);
@@ -284,6 +290,8 @@ export class BenchmarkRunner extends DurableObject {
       const attached =
         config.streamKind === "raw-volatile"
           ? debug.rawVolatileSubscribers
+          : config.streamKind === "json-volatile"
+            ? debug.jsonVolatileSubscribers.length
           : debug.volatileSubscribers.length;
       if (attached < expectedSubscribers) {
         throw new Error(
@@ -467,6 +475,8 @@ export class BenchmarkRunner extends DurableObject {
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     if (fixture.streamKind === "volatile") {
       await fixture.rpc.streamVolatile();
+    } else if (fixture.streamKind === "json-volatile") {
+      await fixture.rpc.streamJsonVolatile();
     } else {
       await fixture.rpc.stream();
     }
@@ -536,10 +546,12 @@ export class BenchmarkRunner extends DurableObject {
         const append =
           fixture.streamKind === "volatile"
             ? fixture.rpc.appendVolatile({ event })
-            : fixture.rpc.append({
-                event,
-                durability: appendDurability(args),
-              });
+            : fixture.streamKind === "json-volatile"
+              ? fixture.rpc.appendJsonVolatile({ event })
+              : fixture.rpc.append({
+                  event,
+                  durability: appendDurability(args),
+                });
         appendPromises.push(
           append.then((event) => {
             if (args.measureAppendAck && args.publisher === 0) {
@@ -912,10 +924,29 @@ async function connectRawStream(env: Env, stream: string): Promise<RawStreamFixt
 }
 
 async function objectStreamReader(rpc: RpcStub<StreamRpc>, streamKind: StreamKind) {
-  const readable = streamKind === "volatile" ? await rpc.streamVolatile() : await rpc.stream();
+  const readable =
+    streamKind === "volatile"
+      ? await rpc.streamVolatile()
+      : streamKind === "json-volatile"
+        ? await rpc.streamJsonVolatile()
+        : await rpc.stream();
   // capnweb@0.8.0's TS surface only models ReadableStream<Uint8Array>, but this
   // experiment intentionally sends pass-by-value StreamEvent objects over Cap'n Web.
-  return (readable as unknown as ReadableStream<StreamEvent>).getReader();
+  const reader = (readable as unknown as ReadableStream<StreamEvent | string>).getReader();
+  if (streamKind !== "json-volatile") return reader as ReadableStreamDefaultReader<StreamEvent>;
+  return {
+    async read() {
+      const result = await reader.read();
+      if (result.done) return result as ReadableStreamReadResult<StreamEvent>;
+      return {
+        done: false,
+        value: JSON.parse(result.value as string) as StreamEvent,
+      };
+    },
+    releaseLock() {
+      reader.releaseLock();
+    },
+  } as ReadableStreamDefaultReader<StreamEvent>;
 }
 
 async function waitForRawOp(fixture: RawStreamFixture, op: string, timeoutMs: number) {

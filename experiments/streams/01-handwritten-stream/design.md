@@ -146,6 +146,11 @@ JSON-over-WebSocket protocol (`subscribe`, `append`, `event`, `ack`). If raw vol
 faster than Cap'n Web volatile under the same 10x36 fan-out shape, the bottleneck is likely in
 Cap'n Web / returned-stream framing rather than storage or raw WebSocket egress from one DO.
 
+`stream-kind=json-volatile` keeps Cap'n Web and returned streams but makes each stream chunk a
+pre-serialized JSON string. If this is close to raw WebSocket, pass-by-value object serialization is
+the expensive part. If this is still close to object `volatile`, the expensive part is the returned
+stream / Cap'n Web stream-result machinery around many chunks.
+
 ## Debug hooks
 
 The experiment keeps a small debug surface:

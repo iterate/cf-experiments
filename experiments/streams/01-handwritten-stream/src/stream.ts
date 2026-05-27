@@ -34,6 +34,12 @@ type StreamSubscriber = {
   sessionSubscribers?: Set<StreamSubscriber>;
 };
 
+type StringStreamSubscriber = {
+  controller: ReadableStreamDefaultController<string>;
+  enqueuedEvents: number;
+  sessionSubscribers?: Set<StringStreamSubscriber>;
+};
+
 type RawAppendMessage = {
   op: "append";
   requestId: string;
@@ -57,6 +63,7 @@ export class Stream extends DurableObject {
   #streamSubscribers = new Set<StreamSubscriber>();
   #volatileOffset = 0;
   #volatileSubscribers = new Set<StreamSubscriber>();
+  #jsonVolatileSubscribers = new Set<StringStreamSubscriber>();
   #durableWritePlanMs: number[] = [];
   #durableBroadcastMs: number[] = [];
   #durableAppendMs: number[] = [];
@@ -64,6 +71,7 @@ export class Stream extends DurableObject {
   #volatileAppendMs: number[] = [];
   #durableFanoutAttempts = 0;
   #volatileFanoutAttempts = 0;
+  #jsonVolatileFanoutAttempts = 0;
   #rawVolatileOffset = 0;
   #rawVolatileSubscribers = new Set<WebSocket>();
   #rawVolatileFanoutAttempts = 0;
@@ -291,6 +299,24 @@ export class Stream extends DurableObject {
     return committed;
   }
 
+  appendJsonVolatile(args: { event: StreamEventInput }): StreamEvent {
+    if (args === null || typeof args !== "object" || !("event" in args)) {
+      throw new Error("append args must be an object with event");
+    }
+    const parsedEvent = APPEND_EVENT_INPUT_SCHEMA.safeParse(args.event);
+    if (!parsedEvent.success) {
+      throw new Error("append event must be a valid StreamEventInput");
+    }
+    this.#volatileOffset += 1;
+    const committed: StreamEvent = {
+      ...parsedEvent.data,
+      offset: this.#volatileOffset,
+      createdAt: new Date().toISOString(),
+    };
+    this.#broadcastJsonVolatile(committed);
+    return committed;
+  }
+
   async appendBatch(args: {
     events: StreamEventInput[];
     durability?: AppendDurability;
@@ -340,6 +366,10 @@ export class Stream extends DurableObject {
         desiredSize: subscriber.controller.desiredSize,
         enqueuedEvents: subscriber.enqueuedEvents,
       })),
+      jsonVolatileSubscribers: Array.from(this.#jsonVolatileSubscribers, (subscriber) => ({
+        desiredSize: subscriber.controller.desiredSize,
+        enqueuedEvents: subscriber.enqueuedEvents,
+      })),
       rawVolatileSubscribers: this.#rawVolatileSubscribers.size,
       timings: {
         durableWritePlanMs: this.#timingSummary(this.#durableWritePlanMs),
@@ -351,6 +381,7 @@ export class Stream extends DurableObject {
       fanoutAttempts: {
         durable: this.#durableFanoutAttempts,
         volatile: this.#volatileFanoutAttempts,
+        jsonVolatile: this.#jsonVolatileFanoutAttempts,
         rawVolatile: this.#rawVolatileFanoutAttempts,
       },
     };
@@ -433,9 +464,22 @@ export class Stream extends DurableObject {
     return this.#openVolatileStream(sessionSubscribers);
   }
 
+  streamJsonVolatileForSession(
+    sessionSubscribers: Set<StringStreamSubscriber>,
+  ): ReadableStream<string> {
+    return this.#openJsonVolatileStream(sessionSubscribers);
+  }
+
   releaseSessionSubscribers(sessionSubscribers: Set<StreamSubscriber>): void {
     for (const subscriber of sessionSubscribers) {
       this.#removeSubscriber(subscriber);
+    }
+    sessionSubscribers.clear();
+  }
+
+  releaseSessionStringSubscribers(sessionSubscribers: Set<StringStreamSubscriber>): void {
+    for (const subscriber of sessionSubscribers) {
+      this.#removeStringSubscriber(subscriber);
     }
     sessionSubscribers.clear();
   }
@@ -545,6 +589,29 @@ export class Stream extends DurableObject {
     });
   }
 
+  #openJsonVolatileStream(
+    sessionSubscribers?: Set<StringStreamSubscriber>,
+  ): ReadableStream<string> {
+    let subscriber: StringStreamSubscriber | undefined;
+
+    return new ReadableStream<string>({
+      start: (streamController) => {
+        subscriber = {
+          controller: streamController,
+          enqueuedEvents: 0,
+          sessionSubscribers,
+        };
+        this.#jsonVolatileSubscribers.add(subscriber);
+        sessionSubscribers?.add(subscriber);
+      },
+      cancel: () => {
+        if (subscriber !== undefined) {
+          this.#removeStringSubscriber(subscriber);
+        }
+      },
+    });
+  }
+
   getCapability(_policy?: unknown) {
     return new StreamRpcTarget(this);
   }
@@ -635,6 +702,20 @@ export class Stream extends DurableObject {
     }
   }
 
+  #broadcastJsonVolatile(event: StreamEvent): void {
+    const message = JSON.stringify(event);
+    this.#jsonVolatileFanoutAttempts += this.#jsonVolatileSubscribers.size;
+    for (const subscriber of this.#jsonVolatileSubscribers) {
+      try {
+        subscriber.controller.enqueue(message);
+        subscriber.enqueuedEvents += 1;
+      } catch (error) {
+        console.error("Error enqueuing JSON volatile event", event, error, subscriber);
+        this.#removeStringSubscriber(subscriber);
+      }
+    }
+  }
+
   #broadcastRawVolatile(event: StreamEvent): void {
     const message = JSON.stringify({ op: "event", event });
     this.#rawVolatileFanoutAttempts += this.#rawVolatileSubscribers.size;
@@ -670,6 +751,11 @@ export class Stream extends DurableObject {
   #removeSubscriber(subscriber: StreamSubscriber): void {
     this.#streamSubscribers.delete(subscriber);
     this.#volatileSubscribers.delete(subscriber);
+    subscriber.sessionSubscribers?.delete(subscriber);
+  }
+
+  #removeStringSubscriber(subscriber: StringStreamSubscriber): void {
+    this.#jsonVolatileSubscribers.delete(subscriber);
     subscriber.sessionSubscribers?.delete(subscriber);
   }
 
@@ -892,13 +978,16 @@ export type StreamRpc = Omit<
   | "stream"
   | "streamForSession"
   | "streamVolatileForSession"
+  | "streamJsonVolatileForSession"
   | "releaseSessionSubscribers"
+  | "releaseSessionStringSubscribers"
 > & {
   stream(args?: unknown): ReadableStream<StreamEvent>;
   streamVolatile(args?: unknown): ReadableStream<StreamEvent>;
+  streamJsonVolatile(args?: unknown): ReadableStream<string>;
 };
 
-type BaseStreamRpc = Omit<StreamRpc, "stream" | "streamVolatile">;
+type BaseStreamRpc = Omit<StreamRpc, "stream" | "streamVolatile" | "streamJsonVolatile">;
 
 const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
   /**
@@ -914,13 +1003,16 @@ const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
     "stream",
     "streamForSession",
     "streamVolatileForSession",
+    "streamJsonVolatileForSession",
     "releaseSessionSubscribers",
+    "releaseSessionStringSubscribers",
   ],
 });
 
 export class StreamRpcTarget extends BaseStreamRpcTarget {
   #stream: Stream;
   #subscribers = new Set<StreamSubscriber>();
+  #stringSubscribers = new Set<StringStreamSubscriber>();
 
   constructor(stream: Stream) {
     super(stream);
@@ -937,7 +1029,13 @@ export class StreamRpcTarget extends BaseStreamRpcTarget {
     return this.#stream.streamVolatileForSession(this.#subscribers);
   }
 
+  streamJsonVolatile(args?: unknown): ReadableStream<string> {
+    if (args !== undefined) throw new Error("stream does not accept arguments");
+    return this.#stream.streamJsonVolatileForSession(this.#stringSubscribers);
+  }
+
   [Symbol.dispose](): void {
     this.#stream.releaseSessionSubscribers(this.#subscribers);
+    this.#stream.releaseSessionStringSubscribers(this.#stringSubscribers);
   }
 }

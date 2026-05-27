@@ -5,6 +5,17 @@
 
 # Notes
 
+## 2026-05-27 07:23 UTC+1
+
+- Added `stream-kind=json-volatile`: same Cap'n Web RPC and returned `ReadableStream` transport as
+  `volatile`, but the stream chunk is a pre-serialized JSON string rather than a pass-by-value
+  `StreamEvent` object. BenchmarkRunner parses the string back to `StreamEvent` on receive so the
+  reported metrics stay comparable.
+- Purpose: separate pass-by-value object serialization from Cap'n Web returned-stream framing.
+- Verification: package-local `pnpm typecheck` passed. Focused local Cap'n Web transport tests
+  (`append returns committed event over capnweb`, `pure subscribers`, and session-internal exposure)
+  passed.
+
 ## 2026-05-27 07:18 UTC+1
 
 - Added `stream-kind=raw-volatile` as another isolation probe. It keeps the same `Stream` DO and
