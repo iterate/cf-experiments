@@ -10,8 +10,30 @@
   `batched-json-volatile` mode reduced 18,000 event fan-outs to 6,842 stream chunks and cut
   all-subscriber p95 from `2439 ms` (`json-volatile`) to `461 ms` in the same deployed matrix. This
   points at per-chunk Cap'n Web pipe/write/resolve overhead, not JSON serialization or storage.
+- For this audio-frame fan-out shape, raw WebSocket is the baseline to beat. `rawws` has a simple
+  one-way subscriber data path after setup: client sends `subscribe` once, the stream DO sends
+  `event` frames, and publishers receive `ack` frames. Cap'n Web gives a nicer typed RPC/control
+  surface, but capnweb@0.8.0 returned `ReadableStream` values are not wire-one-way: each event chunk
+  is serialized as a pipe write to a remote writable stream and the subscriber side sends a
+  per-chunk `resolve undefined`. Unless chunks are batched/coalesced, that per-chunk stream machinery
+  dominates high-frequency fan-out latency.
 
 # Notes
+
+## 2026-05-27 09:33 UTC+1
+
+- Clarified the interpretation of the deployed results:
+  - Raw WebSocket egress from one DO is fast enough for this load: `raw-volatile` and `minimal-ws`
+    repeatedly land around `140-150 ms` all-subscriber p95 with append acks around `7 ms`.
+  - Cap'n Web returned streams are much slower when each event is one stream chunk: `volatile`
+    object chunks were `1069 ms` all-subscriber p95 and `json-volatile` chunks were `2439 ms` in the
+    same deployed matrix where rawws was around `140 ms`.
+  - The batching diagnostic is the decisive evidence: keeping Cap'n Web returned streams but reducing
+    chunk count from `18000` to `6842` moved p95 to `461 ms` and append ack to `6 ms`.
+- Conclusion: Cap'n Web is reasonable as a typed RPC/control-plane transport. For high-frequency
+  audio-frame fan-out, rawws is currently the data-plane baseline. If Cap'n Web returned streams are
+  used for this shape, batching/coalescing is probably mandatory because the expensive unit appears
+  to be one returned-stream chunk/write/resolve, not one event payload or one DO WebSocket send.
 
 ## 2026-05-27 08:44 UTC+1
 
