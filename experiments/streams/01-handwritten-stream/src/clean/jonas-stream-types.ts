@@ -79,6 +79,10 @@ export const JonasStreamAckFrame = {
 
 function parseRequestAck(value: unknown): JonasStreamAppendRequestAck | undefined {
   if (value === undefined) return undefined;
+  return parseRequiredRequestAck(value);
+}
+
+function parseRequiredRequestAck(value: unknown): JonasStreamAppendRequestAck {
   if (!isRecord(value)) throw new Error("requestAck must be an object");
   if (typeof value.key !== "string") throw new Error("requestAck key must be a string");
   return { key: value.key };

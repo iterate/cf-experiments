@@ -1,6 +1,7 @@
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
-import { withStream } from "./jonas-stream-client.js";
+import { withStream, withStreamCapnweb, withStreamRaw } from "./jonas-stream-client.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 
@@ -13,6 +14,17 @@ describe("jonas stream websocket primitives", () => {
     expect(await response.text()).toBe("WebSocket only");
   });
 
+  it("append uses the allowUnconfirmed write fast path", async () => {
+    const source = await readFile(
+      decodeURIComponent(new URL("./jonas-stream.ts", import.meta.url).pathname),
+      "utf8",
+    );
+
+    expect(source).toMatch(
+      /this\.ctx\.storage\.put\(writes,\s*\{\s*allowUnconfirmed: true,\s*noCache: true\s*\}\)/,
+    );
+  });
+
   it("streams events appended on the same websocket", async () => {
     const path = `jonas-${crypto.randomUUID()}`;
     const event: StreamEventInput = {
@@ -20,7 +32,7 @@ describe("jonas stream websocket primitives", () => {
       payload: { path },
     };
 
-    await using stream = await withStream({ path });
+    await using stream = await withStreamRaw({ path });
     const events = stream.stream();
     stream.append(event);
 
@@ -46,8 +58,8 @@ describe("jonas stream websocket primitives", () => {
       payload: { path },
     };
 
-    await using subscriber = await withStream({ path });
-    await using publisher = await withStream({ path });
+    await using subscriber = await withStreamRaw({ path });
+    await using publisher = await withStreamRaw({ path });
     const events = subscriber.stream();
     const framesAfterStart = subscriber.wsMessages.length;
 
@@ -66,14 +78,14 @@ describe("jonas stream websocket primitives", () => {
     expect(outboundFramesAfter(subscriber.wsMessages, framesAfterStart)).toEqual([]);
   });
 
-  it("appendAndWaitForResponse returns the appended event with an append key ack", async () => {
+  it("raw appendAndWaitForResponse returns the appended event with an append key ack", async () => {
     const path = `jonas-${crypto.randomUUID()}`;
     const event: StreamEventInput = {
       type: "test.jonas.append-and-wait",
       payload: { path },
     };
 
-    await using stream = await withStream({ path });
+    await using stream = await withStreamRaw({ path });
     const appended = await stream.appendAndWaitForResponse(event, { key: "append-1" });
 
     expect(appended).toMatchObject({
@@ -91,14 +103,14 @@ describe("jonas stream websocket primitives", () => {
     ]);
   });
 
-  it("appendAndWaitForResponse can wait while the stream iterator still receives the event", async () => {
+  it("raw appendAndWaitForResponse broadcasts before acknowledging the append", async () => {
     const path = `jonas-${crypto.randomUUID()}`;
     const event: StreamEventInput = {
       type: "test.jonas.append-and-wait-subscribed",
       payload: { path },
     };
 
-    await using stream = await withStream({ path });
+    await using stream = await withStreamRaw({ path });
     const events = stream.stream();
     const append = stream.appendAndWaitForResponse(event, { key: "append-1" });
 
@@ -116,6 +128,66 @@ describe("jonas stream websocket primitives", () => {
     ]);
   });
 
+  it("simulated storage sync delay holds fan-out and append acknowledgement", async () => {
+    const path = `jonas-${crypto.randomUUID()}`;
+    const event: StreamEventInput = {
+      type: "test.jonas.simulated-sync-delay",
+      payload: { path },
+    };
+
+    await using fixture = await withStream({ path });
+    const events = fixture.stream();
+
+    await fixture.capnweb.simulateStorageSyncDelay(500);
+    const append = fixture.append({ event });
+    const delivery = nextEvent(events);
+
+    await expect(withTimeout(append, 100)).rejects.toThrow(/timed out/);
+    await expect(withTimeout(delivery, 100)).rejects.toThrow(/timed out/);
+
+    const [appended, delivered] = await Promise.all([append, delivery]);
+    expect(appended).toMatchObject({
+      type: event.type,
+      payload: event.payload,
+      offset: 1,
+      createdAt: expect.any(String),
+    });
+    expect(delivered).toEqual(appended);
+  });
+
+  it("clears simulated storage sync delay with null", async () => {
+    const path = `jonas-${crypto.randomUUID()}`;
+    const event: StreamEventInput = {
+      type: "test.jonas.clear-simulated-sync-delay",
+      payload: { path },
+    };
+
+    await using stream = await withStreamCapnweb({ path });
+    await stream.capnweb.simulateStorageSyncDelay(500);
+    expect(await stream.capnweb.simulateStorageSyncDelay(null)).toBeNull();
+
+    const appended = await withTimeout(stream.capnweb.append({ event }), 200);
+    expect(appended).toMatchObject({ type: event.type, offset: 1 });
+  });
+
+  it("exposes public methods over capnweb transport", async () => {
+    const path = `jonas-${crypto.randomUUID()}`;
+    const event: StreamEventInput = {
+      type: "test.jonas.capnweb-append",
+      payload: { path },
+    };
+
+    await using stream = await withStreamCapnweb({ path });
+
+    expect(await stream.capnweb.simulateStorageSyncDelay(null)).toBeNull();
+    expect(await stream.capnweb.append({ event })).toMatchObject({
+      type: event.type,
+      payload: event.payload,
+      offset: 1,
+      createdAt: expect.any(String),
+    });
+  });
+
   it("idempotent appendAndWaitForResponse retries return the original event without rebroadcasting", async () => {
     const path = `jonas-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();
@@ -130,7 +202,7 @@ describe("jonas stream websocket primitives", () => {
       payload: { attempt: 2 },
     };
 
-    await using stream = await withStream({ path });
+    await using stream = await withStreamRaw({ path });
     const events = stream.stream();
 
     const appended = await stream.appendAndWaitForResponse(first, { key: "append-1" });
@@ -156,7 +228,7 @@ describe("jonas stream websocket primitives", () => {
       payload: { attempt: 2 },
     };
 
-    await using stream = await withStream({ path });
+    await using stream = await withStreamRaw({ path });
     const events = stream.stream();
 
     stream.append(first);

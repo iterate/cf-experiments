@@ -1,4 +1,6 @@
+import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import type { JonasStreamRpc } from "./jonas-stream.js";
 import { JonasStreamAckFrame, JonasStreamEventFrame } from "./jonas-stream-types.js";
 
 const defaultWorkerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
@@ -11,13 +13,24 @@ export type JonasStreamMessage = {
   data: string;
 };
 
-export type JonasStreamClient = AsyncDisposable & {
+export type JonasStreamRawClient = AsyncDisposable & {
   wsMessages: JonasStreamMessage[];
   append(event: StreamEventInput): void;
   appendAndWaitForResponse(
     event: StreamEventInput,
     options?: { key?: string },
   ): Promise<StreamEvent>;
+  stream(): AsyncIterableIterator<StreamEvent>;
+};
+
+export type JonasStreamCapnwebClient = AsyncDisposable & {
+  capnweb: RpcStub<JonasStreamRpc>;
+};
+
+export type JonasStreamFixture = AsyncDisposable & {
+  raw: JonasStreamRawClient;
+  capnweb: RpcStub<JonasStreamRpc>;
+  append(args: { event: StreamEventInput }): Promise<StreamEvent>;
   stream(): AsyncIterableIterator<StreamEvent>;
 };
 
@@ -28,11 +41,11 @@ export type JonasStreamEndpoint = {
   fetch?: FetchEndpoint;
 };
 
-export async function withStream(endpoint: JonasStreamEndpoint): Promise<JonasStreamClient> {
+export async function withStreamRaw(endpoint: JonasStreamEndpoint): Promise<JonasStreamRawClient> {
   const wsMessages: JonasStreamMessage[] = [];
   const events = messageInbox<StreamEvent>();
   const pendingAppends = new Map<string, PendingAppend>();
-  const webSocket = await openWebSocket(endpoint);
+  const webSocket = await openWebSocket(endpoint, "raw-ws");
   const fail = (error: Error) => {
     events.error(error);
     for (const pending of pendingAppends.values()) pending.reject(error);
@@ -77,6 +90,41 @@ export async function withStream(endpoint: JonasStreamEndpoint): Promise<JonasSt
     },
     async [Symbol.asyncDispose]() {
       await closeWebSocket(webSocket);
+    },
+  };
+}
+
+export async function withStreamCapnweb(
+  endpoint: JonasStreamEndpoint,
+): Promise<JonasStreamCapnwebClient> {
+  const webSocket = await openWebSocket(endpoint, "capnweb");
+  const capnweb = newWebSocketRpcSession<JonasStreamRpc>(webSocket);
+
+  return {
+    capnweb,
+    async [Symbol.asyncDispose]() {
+      capnweb[Symbol.dispose]();
+      await closeWebSocket(webSocket);
+    },
+  };
+}
+
+export async function withStream(endpoint: JonasStreamEndpoint): Promise<JonasStreamFixture> {
+  const raw = await withStreamRaw(endpoint);
+  const capnwebClient = await withStreamCapnweb(endpoint);
+
+  return {
+    raw,
+    capnweb: capnwebClient.capnweb,
+    append(args) {
+      return capnwebClient.capnweb.append(args);
+    },
+    stream() {
+      return raw.stream();
+    },
+    async [Symbol.asyncDispose]() {
+      await raw[Symbol.asyncDispose]();
+      await capnwebClient[Symbol.asyncDispose]();
     },
   };
 }
@@ -129,8 +177,8 @@ function send(webSocket: WebSocket, wsMessages: JonasStreamMessage[], frame: unk
   webSocket.send(data);
 }
 
-async function openWebSocket(endpoint: JonasStreamEndpoint) {
-  const url = streamUrl(endpoint);
+async function openWebSocket(endpoint: JonasStreamEndpoint, transport: "raw-ws" | "capnweb") {
+  const url = streamUrl(endpoint, transport);
   if (endpoint.fetch !== undefined) {
     const response = await endpoint.fetch(new Request(url, { headers: { Upgrade: "websocket" } }));
     const webSocket = response.webSocket;
@@ -144,10 +192,13 @@ async function openWebSocket(endpoint: JonasStreamEndpoint) {
   return webSocket;
 }
 
-function streamUrl(endpoint: JonasStreamEndpoint) {
-  if (endpoint.url !== undefined) return new URL(endpoint.url);
-  const url = new URL(endpoint.workerUrl ?? defaultWorkerUrl);
-  url.pathname = `/jonas/${endpoint.path ?? "default"}`;
+function streamUrl(endpoint: JonasStreamEndpoint, transport: "raw-ws" | "capnweb") {
+  const url =
+    endpoint.url === undefined
+      ? new URL(endpoint.workerUrl ?? defaultWorkerUrl)
+      : new URL(endpoint.url);
+  if (endpoint.url === undefined) url.pathname = `/jonas/${endpoint.path ?? "default"}`;
+  url.searchParams.set("transport", transport);
   return url;
 }
 
