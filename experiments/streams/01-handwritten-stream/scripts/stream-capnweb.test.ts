@@ -703,6 +703,39 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("continues fan-out to later subscribers after removing a broken subscriber", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    expect(await fixture.rpc.debugInstallErroredLocalSubscriber()).toMatchObject({
+      subscribers: [{ enqueuedEvents: 0 }],
+    });
+
+    const readable = await fixture.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+    expect(await fixture.rpc.debug()).toMatchObject({
+      subscribers: [{ enqueuedEvents: 0 }, { enqueuedEvents: 0 }],
+    });
+
+    await fixture.rpc.append({
+      event: { type: "test.stream.enqueue-error-isolated", payload: { shouldReachLater: true } },
+      durability: "best-effort",
+    });
+
+    const delivered = await withTimeout(streamReader.read(), 500);
+    expect(delivered.done).toBe(false);
+    expect(delivered.value).toMatchObject({
+      type: "test.stream.enqueue-error-isolated",
+      payload: { shouldReachLater: true },
+    });
+    expect(await fixture.rpc.debug()).toMatchObject({
+      subscribers: [{ enqueuedEvents: 1 }],
+    });
+
+    streamReader.releaseLock();
+  });
+
   it("idempotent append returns the original event and emits once to live subscribers", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();

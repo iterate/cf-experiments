@@ -447,8 +447,10 @@ export class Stream extends DurableObject {
        * slow client can build up its own stream/WebSocket queues, but there is
        * no await or shared backpressure point here that can stall delivery to
        * the next subscriber. See "delivers to an active subscriber while another
-       * subscriber does not read" in `scripts/stream-capnweb.test.ts`.
-       */
+       * subscriber does not read" and "continues fan-out to later subscribers
+       * after removing a broken subscriber" in
+       * `scripts/stream-capnweb.test.ts`.
+      */
       this.#enqueueToSubscriber(subscriber, event);
     }
   }
@@ -461,9 +463,11 @@ export class Stream extends DurableObject {
       /**
        * A broken stream controller must be isolated to its own subscriber. If we
        * keep it registered after `enqueue()` throws, every later append keeps
-       * re-hitting the same dead sink and `debug()` reports a leaked subscriber.
-       * See "removes subscribers whose stream controller rejects enqueue" in
-       * `scripts/stream-capnweb.test.ts`.
+       * re-hitting the same dead sink and `debug()` reports a leaked subscriber;
+       * if we stop iterating after that removal, later healthy subscribers miss
+       * the current event. See "removes subscribers whose stream controller
+       * rejects enqueue" and "continues fan-out to later subscribers after
+       * removing a broken subscriber" in `scripts/stream-capnweb.test.ts`.
        */
       console.error("Error enqueuing event to subscriber", event, error, subscriber);
       this.#removeSubscriber(subscriber);

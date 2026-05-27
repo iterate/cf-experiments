@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 03:38 UTC+1
+
+- Added "continues fan-out to later subscribers after removing a broken subscriber". The existing
+  enqueue-error test proved a broken subscriber is removed, but not that a healthy subscriber later
+  in insertion order receives the same event.
+- Mutation check: temporarily adding `break` after the first `#enqueueToSubscriber()` call made the
+  new test fail with a read timeout. The broken first subscriber was removed, but fan-out stopped
+  before the healthy later subscriber received the event.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 52 tests. Deployed version `77342eeb-58b6-4bbf-ae29-c25c4acf2f80`.
+
 ## 2026-05-27 03:34 UTC+1
 
 - Probed the inner `#unconfirmedWriteCount > 0` guard inside the checkpoint callback. Removing it and
