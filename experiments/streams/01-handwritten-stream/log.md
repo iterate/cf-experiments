@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 06:43 UTC+1
+
+- Added "rejects malformed source processor fields at the append envelope boundary". The `source`
+  envelope is optional, but when present its `processor.slug` and `processor.version` fields must be
+  strings; malformed processor identity must not reach durability handling or storage writes.
+- Mutation check: temporarily relaxing the shared event schema from `slug: z.string()` to
+  `slug: z.unknown()` made the new test fail; the malformed processor identity reached durability
+  resolution and reported `Unknown append durability mode: not-a-mode`.
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed targeted
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts -t "rejects malformed source processor fields at the append envelope boundary"`
+  passed with 65 local tests. Deployed version `372f5653-5934-4ac7-87f8-cf307d3c528d`.
+
 ## 2026-05-27 05:48 UTC+1
 
 - Added "rejects scalar metadata at the append envelope boundary". Metadata values are intentionally

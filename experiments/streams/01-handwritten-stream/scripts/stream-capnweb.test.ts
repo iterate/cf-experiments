@@ -301,6 +301,27 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects malformed source processor fields at the append envelope boundary", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: JSON.parse(
+          '{"type":"test.append.source-processor-type","source":{"processor":{"slug":123,"version":"1"}}}',
+        ),
+        durability: JSON.parse('"not-a-mode"'),
+      }),
+    ).rejects.toThrow(/append event must be a valid StreamEventInput/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects unknown source object fields instead of dropping them", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });

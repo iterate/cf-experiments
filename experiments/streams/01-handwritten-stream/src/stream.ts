@@ -96,6 +96,7 @@ export class Stream extends DurableObject {
      * "preserves audio-shaped payload and metadata while rejecting only top-level
      * event fields",
      * "rejects unknown source envelope fields instead of dropping them",
+     * "rejects malformed source processor fields at the append envelope boundary",
      * "rejects unknown source object fields instead of dropping them",
      * "rejects unknown append argument fields before allocating an offset",
      * plus "rejects malformed idempotent retries before reading the idempotency
