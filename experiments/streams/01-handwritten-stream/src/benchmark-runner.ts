@@ -5,7 +5,7 @@ import type { StreamRpc } from "./stream.js";
 
 export type BenchmarkMode = "rpc-serial" | "rpc-batch" | "rpc-pipelined";
 type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
-type StreamKind = "durable" | "volatile";
+type StreamKind = "durable" | "volatile" | "raw-volatile";
 type AppendDurability =
   | AppendDurabilityMode
   | {
@@ -168,6 +168,13 @@ type StreamRpcFixture = {
   dispose(): void;
 };
 
+type RawStreamFixture = {
+  webSocket: WebSocket;
+  send(message: unknown): void;
+  read(timeoutMs: number): Promise<unknown>;
+  dispose(): void;
+};
+
 export class BenchmarkRunner extends DurableObject {
   async runBenchmark(args: RunBenchmarkArgs): Promise<BenchmarkResult> {
     const stream = args.stream;
@@ -261,18 +268,26 @@ export class BenchmarkRunner extends DurableObject {
       ),
     );
 
-    if (config.streamKind === "volatile") {
+    if (config.streamKind === "volatile" || config.streamKind === "raw-volatile") {
       const expectedSubscribers = config.subscribers + config.slowSubscribers;
       const attachDeadline = Date.now() + 5_000;
       while (Date.now() < attachDeadline) {
         const debug = await stream.debug();
-        if (debug.volatileSubscribers.length >= expectedSubscribers) break;
+        const attached =
+          config.streamKind === "raw-volatile"
+            ? debug.rawVolatileSubscribers
+            : debug.volatileSubscribers.length;
+        if (attached >= expectedSubscribers) break;
         await sleep(25);
       }
       const debug = await stream.debug();
-      if (debug.volatileSubscribers.length < expectedSubscribers) {
+      const attached =
+        config.streamKind === "raw-volatile"
+          ? debug.rawVolatileSubscribers
+          : debug.volatileSubscribers.length;
+      if (attached < expectedSubscribers) {
         throw new Error(
-          `expected ${expectedSubscribers} volatile subscribers, saw ${debug.volatileSubscribers.length}`,
+          `expected ${expectedSubscribers} ${config.streamKind} subscribers, saw ${attached}`,
         );
       }
     } else {
@@ -404,6 +419,9 @@ export class BenchmarkRunner extends DurableObject {
   async runAudioSubscriber(
     args: AudioChaosConfig & { subscriber: string },
   ): Promise<AudioSubscriberResult> {
+    if (args.streamKind === "raw-volatile") {
+      return this.runRawAudioSubscriber(args);
+    }
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     const reader = await objectStreamReader(fixture.rpc, fixture.streamKind);
     const samples: AudioSample[] = [];
@@ -431,6 +449,21 @@ export class BenchmarkRunner extends DurableObject {
   }
 
   async runAudioPassiveSubscriber(args: AudioChaosConfig & { subscriber: string; holdMs: number }) {
+    if (args.streamKind === "raw-volatile") {
+      const fixture = await connectRawStream(this.env, args.stream);
+      fixture.send({ op: "subscribe" });
+      await waitForRawOp(fixture, "subscribed", args.timeoutMs);
+      try {
+        await sleep(args.holdMs);
+        return {
+          runner: this.ctx.id.name ?? this.ctx.id.toString(),
+          subscriber: args.subscriber,
+          heldMs: args.holdMs,
+        };
+      } finally {
+        fixture.dispose();
+      }
+    }
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     if (fixture.streamKind === "volatile") {
       await fixture.rpc.streamVolatile();
@@ -456,6 +489,9 @@ export class BenchmarkRunner extends DurableObject {
       selfEcho: boolean;
     },
   ): Promise<AudioPublisherResult> {
+    if (args.streamKind === "raw-volatile") {
+      return this.runRawAudioPublisher(args);
+    }
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     const appendPromises: Promise<StreamEvent>[] = [];
     const appendStartedAtByFrame = new Map<string, number>();
@@ -522,6 +558,141 @@ export class BenchmarkRunner extends DurableObject {
 
       await Promise.all(appendPromises);
       await selfEcho;
+      const elapsedMs = Date.now() - startedAt;
+      const ackToSelfEchoLatencyMs =
+        args.measureAppendAck && args.publisher === 0
+          ? Array.from(ackAtByFrame, ([frameId, ackAt]) => {
+              const selfEchoAt = selfEchoAtByFrame.get(frameId);
+              return selfEchoAt === undefined ? 0 : selfEchoAt - ackAt;
+            }).filter((latency) => latency >= 0)
+          : [];
+
+      return {
+        runner: this.ctx.id.name ?? this.ctx.id.toString(),
+        publisher: args.publisher,
+        sent: args.framesPerPublisher,
+        elapsedMs,
+        appendAckLatencyMs: summarize(Array.from(ackLatencyByFrame.values())),
+        selfEchoLatencyMs: summarize(Array.from(selfEchoLatencyByFrame.values())),
+        appendStartToSelfEchoLatencyMs: summarize(
+          Array.from(appendStartToSelfEchoLatencyByFrame.values()),
+        ),
+        ackToSelfEchoLatencyMs: summarize(ackToSelfEchoLatencyMs),
+      };
+    } finally {
+      fixture.dispose();
+    }
+  }
+
+  private async runRawAudioSubscriber(
+    args: AudioChaosConfig & { subscriber: string },
+  ): Promise<AudioSubscriberResult> {
+    const fixture = await connectRawStream(this.env, args.stream);
+    const samples: AudioSample[] = [];
+    fixture.send({ op: "subscribe" });
+    await waitForRawOp(fixture, "subscribed", args.timeoutMs);
+    try {
+      for (let received = 0; received < args.publishers * args.framesPerPublisher; received += 1) {
+        const message = await waitForRawOp(fixture, "event", args.timeoutMs);
+        const event = readRawEvent(message);
+        samples.push({
+          frameId: readFrameId(event),
+          latencyMs: Math.max(0, Date.now() - Date.parse(event.createdAt)),
+        });
+      }
+    } finally {
+      fixture.dispose();
+    }
+
+    return {
+      runner: this.ctx.id.name ?? this.ctx.id.toString(),
+      subscriber: args.subscriber,
+      received: samples.length,
+      samples,
+      latencyMs: summarize(samples.map((sample) => sample.latencyMs)),
+    };
+  }
+
+  private async runRawAudioPublisher(
+    args: AudioChaosConfig & {
+      audio: AudioFixture;
+      publisher: number;
+      selfEcho: boolean;
+    },
+  ): Promise<AudioPublisherResult> {
+    const fixture = await connectRawStream(this.env, args.stream);
+    const ackLatencyByFrame = new Map<string, number>();
+    const ackAtByFrame = new Map<string, number>();
+    const appendStartedAtByFrame = new Map<string, number>();
+    const selfEchoLatencyByFrame = new Map<string, number>();
+    const appendStartToSelfEchoLatencyByFrame = new Map<string, number>();
+    const selfEchoAtByFrame = new Map<string, number>();
+    const ackedFrames = new Set<string>();
+    const selfEchoFrames = new Set<string>();
+
+    if (args.selfEcho) {
+      fixture.send({ op: "subscribe" });
+      await waitForRawOp(fixture, "subscribed", args.timeoutMs);
+    }
+
+    const receiver = (async () => {
+      while (
+        ackedFrames.size < args.framesPerPublisher ||
+        (args.selfEcho && selfEchoFrames.size < args.framesPerPublisher)
+      ) {
+        const message = await fixture.read(args.timeoutMs);
+        if (!isRecord(message) || typeof message.op !== "string") continue;
+        if (message.op === "ack") {
+          const frameId = readFrameId(readRawEvent(message));
+          ackedFrames.add(frameId);
+          if (args.measureAppendAck && args.publisher === 0) {
+            const appendStartedAt = appendStartedAtByFrame.get(frameId);
+            const ackAt = Date.now();
+            if (appendStartedAt !== undefined) {
+              ackLatencyByFrame.set(frameId, ackAt - appendStartedAt);
+              ackAtByFrame.set(frameId, ackAt);
+            }
+          }
+        } else if (message.op === "event") {
+          const event = readRawEvent(message);
+          const frameId = readFrameId(event);
+          if (frameId.startsWith(`p${args.publisher}-`)) {
+            selfEchoFrames.add(frameId);
+            const selfEchoAt = Date.now();
+            const appendStartedAt = appendStartedAtByFrame.get(frameId);
+            selfEchoAtByFrame.set(frameId, selfEchoAt);
+            selfEchoLatencyByFrame.set(frameId, Math.max(0, selfEchoAt - Date.parse(event.createdAt)));
+            if (appendStartedAt !== undefined) {
+              appendStartToSelfEchoLatencyByFrame.set(frameId, selfEchoAt - appendStartedAt);
+            }
+          }
+        }
+      }
+    })();
+
+    try {
+      const startedAt = Date.now();
+      for (let frame = 1; frame <= args.framesPerPublisher; frame += 1) {
+        const frameId = `p${args.publisher}-f${frame}`;
+        appendStartedAtByFrame.set(frameId, Date.now());
+        fixture.send({
+          op: "append",
+          requestId: frameId,
+          event: buildAudioEvent({
+            config: args,
+            audio: args.audio,
+            publisher: String(args.publisher),
+            frame,
+            frameId,
+          }),
+        });
+        if (args.paceMs > 0) {
+          const nextFrameAt = startedAt + frame * args.paceMs;
+          await sleep(Math.max(0, nextFrameAt - Date.now()));
+        }
+      }
+
+      await receiver;
       const elapsedMs = Date.now() - startedAt;
       const ackToSelfEchoLatencyMs =
         args.measureAppendAck && args.publisher === 0
@@ -698,11 +869,71 @@ async function connectStreamRpc(
   };
 }
 
+async function connectRawStream(env: Env, stream: string): Promise<RawStreamFixture> {
+  const response = await env.STREAM.getByName(stream).fetch(
+    "https://stream.internal/?transport=raw-volatile",
+    {
+      headers: { Upgrade: "websocket" },
+    },
+  );
+  const webSocket = response.webSocket;
+  if (webSocket === null) throw new Error("stream DO did not return a raw WebSocket");
+  webSocket.accept();
+  const messages: unknown[] = [];
+  const waiters: ((message: unknown) => void)[] = [];
+  webSocket.addEventListener("message", (event) => {
+    const message = JSON.parse(String(event.data));
+    const waiter = waiters.shift();
+    if (waiter === undefined) {
+      messages.push(message);
+    } else {
+      waiter(message);
+    }
+  });
+  return {
+    webSocket,
+    send(message) {
+      webSocket.send(JSON.stringify(message));
+    },
+    read(timeoutMs) {
+      const message = messages.shift();
+      if (message !== undefined) return Promise.resolve(message);
+      return withTimeout(
+        new Promise((resolve) => {
+          waiters.push(resolve);
+        }),
+        timeoutMs,
+      );
+    },
+    dispose() {
+      webSocket.close();
+    },
+  };
+}
+
 async function objectStreamReader(rpc: RpcStub<StreamRpc>, streamKind: StreamKind) {
   const readable = streamKind === "volatile" ? await rpc.streamVolatile() : await rpc.stream();
   // capnweb@0.8.0's TS surface only models ReadableStream<Uint8Array>, but this
   // experiment intentionally sends pass-by-value StreamEvent objects over Cap'n Web.
   return (readable as unknown as ReadableStream<StreamEvent>).getReader();
+}
+
+async function waitForRawOp(fixture: RawStreamFixture, op: string, timeoutMs: number) {
+  while (true) {
+    const message = await fixture.read(timeoutMs);
+    if (isRecord(message) && message.op === op) return message;
+  }
+}
+
+function readRawEvent(message: unknown): StreamEvent {
+  if (!isRecord(message) || !isRecord(message.event)) {
+    throw new Error("raw message did not contain an event");
+  }
+  return message.event as StreamEvent;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
 }
 
 function summarize(values: number[]): Summary {

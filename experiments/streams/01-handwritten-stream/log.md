@@ -5,6 +5,16 @@
 
 # Notes
 
+## 2026-05-27 07:18 UTC+1
+
+- Added `stream-kind=raw-volatile` as another isolation probe. It keeps the same `Stream` DO and
+  same audio event payloads, but bypasses Cap'n Web and returned `ReadableStream` chunks entirely:
+  raw WebSocket clients send `subscribe` / `append`, and the DO sends JSON `event` / `ack` frames.
+- This should separate "one DO pushing many WebSocket messages is slow" from "Cap'n Web returned
+  stream framing is slow".
+- Verification: package-local `pnpm typecheck` passed. Focused local Cap'n Web transport tests
+  (`rejects non-websocket`, `append returns committed event over capnweb`, `pure subscribers`) passed.
+
 ## 2026-05-27 07:10 UTC+1
 
 - Added Stream DO timing summaries in `debug()`: durable write-plan, durable broadcast, durable

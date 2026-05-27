@@ -140,6 +140,12 @@ it is an isolation probe. If volatile fan-out is fast while durable best-effort 
 bookkeeping is implicated. If both are slow under the same subscriber shape, the bottleneck is in
 single-DO fan-out, Cap'n Web serialization, WebSocket transport, or runner scheduling.
 
+`stream-kind=raw-volatile` is a second isolation probe. It keeps the same Stream DO and same audio
+payload shape but replaces Cap'n Web and returned `ReadableStream` chunks with a tiny
+JSON-over-WebSocket protocol (`subscribe`, `append`, `event`, `ack`). If raw volatile is materially
+faster than Cap'n Web volatile under the same 10x36 fan-out shape, the bottleneck is likely in
+Cap'n Web / returned-stream framing rather than storage or raw WebSocket egress from one DO.
+
 ## Debug hooks
 
 The experiment keeps a small debug surface:

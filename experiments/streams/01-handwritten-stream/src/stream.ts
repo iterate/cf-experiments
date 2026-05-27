@@ -34,6 +34,12 @@ type StreamSubscriber = {
   sessionSubscribers?: Set<StreamSubscriber>;
 };
 
+type RawAppendMessage = {
+  op: "append";
+  requestId: string;
+  event: StreamEventInput;
+};
+
 type AppendDurability =
   | AppendDurabilityMode
   | {
@@ -58,6 +64,9 @@ export class Stream extends DurableObject {
   #volatileAppendMs: number[] = [];
   #durableFanoutAttempts = 0;
   #volatileFanoutAttempts = 0;
+  #rawVolatileOffset = 0;
+  #rawVolatileSubscribers = new Set<WebSocket>();
+  #rawVolatileFanoutAttempts = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -331,6 +340,7 @@ export class Stream extends DurableObject {
         desiredSize: subscriber.controller.desiredSize,
         enqueuedEvents: subscriber.enqueuedEvents,
       })),
+      rawVolatileSubscribers: this.#rawVolatileSubscribers.size,
       timings: {
         durableWritePlanMs: this.#timingSummary(this.#durableWritePlanMs),
         durableBroadcastMs: this.#timingSummary(this.#durableBroadcastMs),
@@ -341,6 +351,7 @@ export class Stream extends DurableObject {
       fanoutAttempts: {
         durable: this.#durableFanoutAttempts,
         volatile: this.#volatileFanoutAttempts,
+        rawVolatile: this.#rawVolatileFanoutAttempts,
       },
     };
   }
@@ -550,10 +561,54 @@ export class Stream extends DurableObject {
       return new Response("This endpoint only accepts WebSocket requests.", { status: 400 });
     }
 
+    const url = new URL(request.url);
+    if (url.searchParams.get("transport") === "raw-volatile") {
+      return this.#fetchRawVolatile();
+    }
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
     newWebSocketRpcSession(server, this.getCapability());
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  #fetchRawVolatile() {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    server.accept();
+
+    server.addEventListener("message", (message) => {
+      const data = JSON.parse(String(message.data)) as { op?: unknown };
+      if (data.op === "subscribe") {
+        this.#rawVolatileSubscribers.add(server);
+        server.send(JSON.stringify({ op: "subscribed" }));
+        return;
+      }
+      if (data.op !== "append") {
+        throw new Error("raw volatile message op must be subscribe or append");
+      }
+      const append = data as RawAppendMessage;
+      const parsedEvent = APPEND_EVENT_INPUT_SCHEMA.safeParse(append.event);
+      if (!parsedEvent.success) {
+        throw new Error("raw volatile append event must be a valid StreamEventInput");
+      }
+      this.#rawVolatileOffset += 1;
+      const committed: StreamEvent = {
+        ...parsedEvent.data,
+        offset: this.#rawVolatileOffset,
+        createdAt: new Date().toISOString(),
+      };
+      this.#broadcastRawVolatile(committed);
+      server.send(JSON.stringify({ op: "ack", requestId: append.requestId, event: committed }));
+    });
+    server.addEventListener("close", () => {
+      this.#rawVolatileSubscribers.delete(server);
+    });
+    server.addEventListener("error", () => {
+      this.#rawVolatileSubscribers.delete(server);
+    });
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -577,6 +632,19 @@ export class Stream extends DurableObject {
     this.#volatileFanoutAttempts += this.#volatileSubscribers.size;
     for (const subscriber of this.#volatileSubscribers) {
       this.#enqueueToSubscriber(subscriber, event);
+    }
+  }
+
+  #broadcastRawVolatile(event: StreamEvent): void {
+    const message = JSON.stringify({ op: "event", event });
+    this.#rawVolatileFanoutAttempts += this.#rawVolatileSubscribers.size;
+    for (const subscriber of this.#rawVolatileSubscribers) {
+      try {
+        subscriber.send(message);
+      } catch (error) {
+        console.error("Error sending raw volatile event", event, error);
+        this.#rawVolatileSubscribers.delete(subscriber);
+      }
     }
   }
 

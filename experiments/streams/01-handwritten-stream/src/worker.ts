@@ -56,8 +56,8 @@ function nonNegativeIntParam(url: URL, name: string) {
 function streamKindParam(url: URL) {
   const raw = url.searchParams.get("stream-kind");
   if (raw === null) return undefined;
-  if (raw !== "durable" && raw !== "volatile") {
-    throw new Error("stream-kind must be durable or volatile");
+  if (raw !== "durable" && raw !== "volatile" && raw !== "raw-volatile") {
+    throw new Error("stream-kind must be durable, volatile, or raw-volatile");
   }
   return raw;
 }

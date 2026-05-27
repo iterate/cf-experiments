@@ -69,6 +69,13 @@ WebSocket transport, and `ReadableStream<StreamEvent>` fan-out while bypassing p
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
 
+Set `stream-kind=raw-volatile` to keep the same Stream DO and audio payloads but replace Cap'n Web
+returned streams with a small JSON-over-WebSocket protocol:
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=raw-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
+```
+
 Deploy current code:
 
 ```sh
