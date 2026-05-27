@@ -5,6 +5,22 @@
 
 # Notes
 
+## 2026-05-27 03:13 UTC+1
+
+- Added "rejects unknown durability option fields before allocating an offset". Event envelopes were
+  already strict, but durability option objects still accepted unknown runtime fields.
+- Red result before the fix: sending
+  `{"mode":"checkpointed","checkpointEveryUnconfirmedAppend":1}` did not produce a stream-level
+  validation error and surfaced through Cap'n Web as `'' is not a function.` The intended risk is
+  sharper than the incidental error: a typoed checkpoint threshold must not be silently ignored after
+  offset allocation.
+- Fixed `#resolveAppendDurability()` to reject object durability fields other than `mode` and
+  `checkpointEveryUnconfirmedAppends` before allocating an offset.
+- Verification: targeted local Vitest, root `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 47 tests. Deployed version `2afc8c58-f89b-4c64-b14e-f4dc5a671c61`.
+
 ## 2026-05-27 03:12 UTC+1
 
 - Ran deployed DO-side `/benchmark/audio-chaos` again after version

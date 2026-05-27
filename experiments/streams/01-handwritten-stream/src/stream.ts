@@ -482,6 +482,14 @@ export class Stream extends DurableObject {
     if (typeof durability === "object" && !("mode" in durability)) {
       throw new Error("append durability options must include mode");
     }
+    if (typeof durability === "object") {
+      const unknownFields = Object.keys(durability).filter(
+        (field) => field !== "mode" && field !== "checkpointEveryUnconfirmedAppends",
+      );
+      if (unknownFields.length > 0) {
+        throw new Error(`Unknown append durability option: ${unknownFields.join(", ")}`);
+      }
+    }
     const mode =
       typeof durability === "string"
         ? durability
@@ -495,13 +503,17 @@ export class Stream extends DurableObject {
      * instead of falling through to an incidental property-access TypeError.
      * Runtime object durability values without `mode` must also fail explicitly
      * instead of silently falling back to persisted stream settings.
+     * Unknown object fields must fail explicitly too, otherwise typoed runtime
+     * options like `checkpointEveryUnconfirmedAppend` are ignored and the call
+     * falls back to the stream's default threshold after allocating an offset.
      * The default/override/settings/invalid-mode/invalid-threshold tests,
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
      * object durability" and "rejects null per-call durability before allocating
      * an offset", and "rejects object durability without a mode before
-     * allocating an offset", and "rejects primitive per-call durability before
-     * falling back to stream settings" in `scripts/stream-capnweb.test.ts`
-     * cover each branch here.
+     * allocating an offset", and "rejects unknown durability option fields
+     * before allocating an offset", and "rejects primitive per-call durability
+     * before falling back to stream settings" in
+     * `scripts/stream-capnweb.test.ts` cover each branch here.
      */
     this.#validateDurabilityMode(mode);
     return {

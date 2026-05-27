@@ -1208,6 +1208,25 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects unknown durability option fields before allocating an offset", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.unknown-option" },
+        durability: JSON.parse('{"mode":"checkpointed","checkpointEveryUnconfirmedAppend":1}'),
+      }),
+    ).rejects.toThrow(/Unknown append durability option/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects primitive per-call durability before falling back to stream settings", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
