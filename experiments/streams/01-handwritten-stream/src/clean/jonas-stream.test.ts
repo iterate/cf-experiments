@@ -212,6 +212,26 @@ describe("jonas stream websocket primitives", () => {
     await expect(after.capnweb.ping()).resolves.not.toEqual(beforePing);
   });
 
+  it("disconnects the raw websocket from fan-out when the durable object is killed", async () => {
+    const path = `jonas-kill-${crypto.randomUUID()}`;
+    const event: StreamEventInput = {
+      type: "test.jonas.after-kill-new-connection",
+      payload: { path },
+    };
+
+    await using raw = await withStreamRaw({ path });
+    const events = raw.stream();
+    await using capnweb = await withStreamCapnweb({ path });
+
+    await expect(capnweb.capnweb.kill({ reason: "raw websocket kill proof" })).rejects.toThrow();
+
+    await using restarted = await withStreamRaw({ path });
+    const restartedEvents = restarted.stream();
+    const appended = await restarted.appendAndWaitForResponse(event, { key: "after-kill" });
+    expect(await nextEvent(restartedEvents)).toEqual(appended);
+    await expect(withTimeout(events.next(), 500)).rejects.toThrow(/timed out|WebSocket closed/);
+  });
+
   it("idempotent appendAndWaitForResponse retries return the original event without rebroadcasting", async () => {
     const path = `jonas-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();
