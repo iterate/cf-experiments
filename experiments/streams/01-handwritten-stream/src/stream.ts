@@ -87,6 +87,7 @@ export class Stream extends DurableObject {
      * property-access errors, consult idempotency keys, or allocate offsets. See
      * "rejects malformed append args before reading event or durability" and
      * "rejects malformed append events before idempotency or durability handling",
+     * "rejects non-integer event offsets at the append envelope boundary",
      * "rejects unknown top-level append event fields instead of dropping them",
      * "preserves audio-shaped payload and metadata while rejecting only top-level
      * event fields",

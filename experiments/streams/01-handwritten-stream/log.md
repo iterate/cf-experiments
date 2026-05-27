@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 05:35 UTC+1
+
+- Added "rejects non-integer event offsets at the append envelope boundary". A fractional `offset`
+  is malformed event input, not a storage precondition failure; it should be rejected before
+  durability handling or offset allocation.
+- Mutation check: temporarily relaxing the shared event schema from `z.number().int().positive()` to
+  `z.number().positive()` made the new test fail; the malformed offset reached durability
+  resolution and reported `Unknown append durability mode: not-a-mode`.
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 60 tests. Deployed version `0681534d-b982-438f-beca-12e9cb2b611c`.
+
 ## 2026-05-27 05:31 UTC+1
 
 - Added "rejects stream arguments instead of silently ignoring subscription options". `stream()` has
