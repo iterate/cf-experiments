@@ -21,6 +21,21 @@
   for sniff-test sub-100 ms conclusions.
 - Added `publisherAppendStartToSelfEchoLatencyMs`, measured entirely inside publisher runner 0, so
   the read-your-own metric no longer depends on cross-DO clock agreement.
+- Deployed version `bb8869ed-25be-4d8a-a616-926974bbf559`.
+- Rerun with the same-clock metric:
+  - 10 publishers / 0 extra subscribers: cross-DO
+    `publisherSelfEchoCreatedAtLatencyMs.p95=142 ms`, but same-publisher-DO
+    `publisherAppendStartToSelfEchoLatencyMs.p95=10 ms`; append ack p95 was also `10 ms`.
+  - 1 publisher / 0 extra subscribers: cross-DO
+    `publisherSelfEchoCreatedAtLatencyMs.p95=20 ms`, same-publisher-DO
+    `publisherAppendStartToSelfEchoLatencyMs.p95=14 ms`, append ack p95 `14 ms`.
+  - 10 publishers / 36 active subscribers: all 500 frames fully delivered to all 36 subscribers.
+    Cross-DO `allSubscribersCreatedAtLatencyMs.p95=725 ms`; publisher 0 same-clock
+    read-your-own `publisherAppendStartToSelfEchoLatencyMs.p95=236 ms`; append ack p95 `237 ms`.
+- Interpretation: the scary 0-active-subscriber self-echo row was mostly a bad measurement boundary.
+  Under full active fan-out, the same-clock read-your-own latency is still hundreds of ms and tracks
+  append ack, so the remaining issue is append service/fan-out pressure rather than post-append
+  stream delivery to the publisher.
 
 ## 2026-05-27 06:53 UTC+1
 
