@@ -5,6 +5,17 @@
 
 # Notes
 
+## 2026-05-27 03:04 UTC+1
+
+- Added "preserves audio-shaped payload and metadata while rejecting only top-level event fields".
+  This pairs with the strict top-level event validation: the envelope should reject unknown event
+  fields, but the audio frame payload and arbitrary metadata must remain pass-through.
+- The test uses a 960-byte PCM16 frame encoded to base64, the same `benchmark.audio-frame` shape as
+  the benchmark route, and asserts the committed event preserves payload and metadata exactly.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 45 tests. Deployed version `fe3d7eff-50d5-4add-b86b-7ad28357c1a6`.
+
 ## 2026-05-27 03:00 UTC+1
 
 - Added "rejects unknown top-level append event fields instead of dropping them". Zod object parsing

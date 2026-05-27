@@ -85,6 +85,8 @@ export class Stream extends DurableObject {
      * "rejects malformed append args before reading event or durability" and
      * "rejects malformed append events before idempotency or durability handling",
      * "rejects unknown top-level append event fields instead of dropping them",
+     * "preserves audio-shaped payload and metadata while rejecting only top-level
+     * event fields",
      * plus "rejects malformed idempotent retries before reading the idempotency
      * index", in `scripts/stream-capnweb.test.ts`.
      */

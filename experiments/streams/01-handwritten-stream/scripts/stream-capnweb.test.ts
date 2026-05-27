@@ -151,6 +151,41 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("preserves audio-shaped payload and metadata while rejecting only top-level event fields", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const audio = Buffer.alloc(960, 0x7f).toString("base64");
+    const event: StreamEventInput = {
+      type: "benchmark.audio-frame",
+      payload: {
+        runId: path,
+        frameId: "p0-f1",
+        publisher: "0",
+        frame: 1,
+        codec: "pcm16-base64",
+        sampleRate: 24_000,
+        frameMs: 20,
+        audio,
+        nested: { arbitrary: ["metadata", 1, true] },
+      },
+      metadata: {
+        runId: path,
+        nested: { keep: "this" },
+      },
+    };
+    await using fixture = await withStream({ path });
+
+    const appended = await fixture.rpc.append({ event, durability: "best-effort" });
+
+    expect(appended).toMatchObject({
+      type: event.type,
+      payload: event.payload,
+      metadata: event.metadata,
+      offset: 1,
+      createdAt: expect.any(String),
+    });
+    expect(await fixture.rpc.maxOffset()).toBe(1);
+  });
+
   it("rejects malformed idempotent retries before reading the idempotency index", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const idempotencyKey = crypto.randomUUID();
