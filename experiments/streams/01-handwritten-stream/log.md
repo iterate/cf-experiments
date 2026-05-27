@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 05:00 UTC+1
+
+- Added "rejects non-number checkpoint thresholds before allocating an offset". Runtime clients can
+  send `"2"` for `checkpointEveryUnconfirmedAppends`; JavaScript comparisons would otherwise coerce
+  it later.
+- Mutation check: temporarily changing the validator to only reject `value <= 0` made the new test
+  fail. The string threshold escaped validation and reached later behavior, surfacing through Cap'n
+  Web as `'' is not a function.` instead of the intended stream-level validation error.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 54 tests. Deployed version `456baa80-828e-4d0d-8ccc-35ebb32525fe`.
+
 ## 2026-05-27 04:56 UTC+1
 
 - Probed the explicit `await Promise.resolve()` at the start of the checkpoint callback. Commenting

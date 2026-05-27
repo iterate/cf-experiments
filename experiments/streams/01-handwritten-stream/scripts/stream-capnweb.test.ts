@@ -1235,6 +1235,25 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects non-number checkpoint thresholds before allocating an offset", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.string-threshold" },
+        durability: JSON.parse('{"mode":"checkpointed","checkpointEveryUnconfirmedAppends":"2"}'),
+      }),
+    ).rejects.toThrow(/checkpointEveryUnconfirmedAppends must be a positive integer/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects invalid checkpoint thresholds even on non-checkpointed object durability", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });

@@ -532,6 +532,7 @@ export class Stream extends DurableObject {
      * The default/override/settings/invalid-mode/invalid-threshold tests,
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
      * object durability", "rejects non-integer checkpoint thresholds before
+     * allocating an offset", "rejects non-number checkpoint thresholds before
      * allocating an offset", "rejects null per-call durability before
      * allocating an offset", "rejects object durability without a mode before
      * allocating an offset", "rejects non-string object durability modes before
