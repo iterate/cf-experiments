@@ -5,6 +5,23 @@
 
 # Notes
 
+## 2026-05-27 06:58 UTC+1
+
+- Rechecked the suspicious active-subscriber sweep baseline. The `0 active subscribers` row was
+  from the DO-side `/benchmark/audio-chaos` route, not the local laptop, but "0 active subscribers"
+  means zero extra subscriber runner DOs; publisher 0 still opens a stream for self-echo and reads
+  all 500 events from the 10 publishers to find its own frames.
+- Fresh DO-side reruns on the deployed route:
+  - 10 publishers / 0 extra subscribers / 50 frames each / 20 ms pacing / best-effort:
+    `publisherSelfEchoCreatedAtLatencyMs.p95=80 ms`, `publisherAppendAckLatencyMs.p95=10 ms`.
+  - 1 publisher / 0 extra subscribers / 50 frames / 20 ms pacing / best-effort:
+    `publisherSelfEchoCreatedAtLatencyMs.p95=18 ms`, `publisherAppendAckLatencyMs.p95=11 ms`.
+- The `*CreatedAtLatencyMs` values compare the Stream DO's `createdAt` clock with runner DO
+  receive clocks. That is fine for coarse "WiFi is not the only issue" evidence, but it is too weak
+  for sniff-test sub-100 ms conclusions.
+- Added `publisherAppendStartToSelfEchoLatencyMs`, measured entirely inside publisher runner 0, so
+  the read-your-own metric no longer depends on cross-DO clock agreement.
+
 ## 2026-05-27 06:53 UTC+1
 
 - Mutation-checked the existing fire-and-forget checkpoint proof. Temporarily changed checkpoint

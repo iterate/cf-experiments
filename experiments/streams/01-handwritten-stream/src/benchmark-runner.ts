@@ -91,6 +91,7 @@ type AudioPublisherResult = {
   elapsedMs: number;
   appendAckLatencyMs: Summary;
   selfEchoLatencyMs: Summary;
+  appendStartToSelfEchoLatencyMs: Summary;
   ackToSelfEchoLatencyMs: Summary;
 };
 
@@ -126,6 +127,7 @@ export type AudioChaosResult = {
   firstSubscriberCreatedAtLatencyMs: Summary;
   allSubscribersCreatedAtLatencyMs: Summary;
   publisherSelfEchoCreatedAtLatencyMs: Summary;
+  publisherAppendStartToSelfEchoLatencyMs: Summary;
   publisherAppendAckLatencyMs: Summary;
   publisherAckToSelfEchoLatencyMs: Summary;
   subscriberResults: Pick<AudioSubscriberResult, "subscriber" | "received" | "latencyMs">[];
@@ -136,6 +138,7 @@ export type AudioChaosResult = {
     | "elapsedMs"
     | "appendAckLatencyMs"
     | "selfEchoLatencyMs"
+    | "appendStartToSelfEchoLatencyMs"
     | "ackToSelfEchoLatencyMs"
   >[];
   serverDebug: unknown;
@@ -338,6 +341,8 @@ export class BenchmarkRunner extends DurableObject {
       firstSubscriberCreatedAtLatencyMs: summarize(firstSubscriberLatencies),
       allSubscribersCreatedAtLatencyMs: summarize(allSubscriberLatencies),
       publisherSelfEchoCreatedAtLatencyMs: selfEchoPublisher?.selfEchoLatencyMs ?? summarize([]),
+      publisherAppendStartToSelfEchoLatencyMs:
+        selfEchoPublisher?.appendStartToSelfEchoLatencyMs ?? summarize([]),
       publisherAppendAckLatencyMs: selfEchoPublisher?.appendAckLatencyMs ?? summarize([]),
       publisherAckToSelfEchoLatencyMs: selfEchoPublisher?.ackToSelfEchoLatencyMs ?? summarize([]),
       subscriberResults: subscriberResults.map(({ subscriber, received, latencyMs }) => ({
@@ -352,6 +357,7 @@ export class BenchmarkRunner extends DurableObject {
           elapsedMs: publisherElapsedMs,
           appendAckLatencyMs,
           selfEchoLatencyMs,
+          appendStartToSelfEchoLatencyMs,
           ackToSelfEchoLatencyMs,
         }) => ({
           publisher,
@@ -359,6 +365,7 @@ export class BenchmarkRunner extends DurableObject {
           elapsedMs: publisherElapsedMs,
           appendAckLatencyMs,
           selfEchoLatencyMs,
+          appendStartToSelfEchoLatencyMs,
           ackToSelfEchoLatencyMs,
         }),
       ),
@@ -419,16 +426,20 @@ export class BenchmarkRunner extends DurableObject {
   ): Promise<AudioPublisherResult> {
     const fixture = await connectStreamRpc(this.env, args.stream);
     const appendPromises: Promise<StreamEvent>[] = [];
+    const appendStartedAtByFrame = new Map<string, number>();
     const ackLatencyByFrame = new Map<string, number>();
     const ackAtByFrame = new Map<string, number>();
     const selfEchoLatencyByFrame = new Map<string, number>();
+    const appendStartToSelfEchoLatencyByFrame = new Map<string, number>();
     const selfEchoAtByFrame = new Map<string, number>();
     const selfEcho =
       args.selfEcho
         ? this.collectAudioSelfEcho({
             ...args,
             rpc: fixture.rpc,
+            appendStartedAtByFrame,
             selfEchoLatencyByFrame,
+            appendStartToSelfEchoLatencyByFrame,
             selfEchoAtByFrame,
           })
         : Promise.resolve();
@@ -438,6 +449,7 @@ export class BenchmarkRunner extends DurableObject {
       for (let frame = 1; frame <= args.framesPerPublisher; frame += 1) {
         const frameId = `p${args.publisher}-f${frame}`;
         const appendStartedAt = Date.now();
+        appendStartedAtByFrame.set(frameId, appendStartedAt);
         const append = fixture.rpc.append({
           event: buildAudioEvent({
             config: args,
@@ -482,6 +494,9 @@ export class BenchmarkRunner extends DurableObject {
         elapsedMs,
         appendAckLatencyMs: summarize(Array.from(ackLatencyByFrame.values())),
         selfEchoLatencyMs: summarize(Array.from(selfEchoLatencyByFrame.values())),
+        appendStartToSelfEchoLatencyMs: summarize(
+          Array.from(appendStartToSelfEchoLatencyByFrame.values()),
+        ),
         ackToSelfEchoLatencyMs: summarize(ackToSelfEchoLatencyMs),
       };
     } finally {
@@ -491,7 +506,9 @@ export class BenchmarkRunner extends DurableObject {
 
   private async collectAudioSelfEcho(args: AudioChaosConfig & {
     rpc: RpcStub<StreamRpc>;
+    appendStartedAtByFrame: Map<string, number>;
     selfEchoLatencyByFrame: Map<string, number>;
+    appendStartToSelfEchoLatencyByFrame: Map<string, number>;
     selfEchoAtByFrame: Map<string, number>;
     publisher: number;
   }) {
@@ -503,11 +520,15 @@ export class BenchmarkRunner extends DurableObject {
         const frameId = readFrameId(result.value);
         if (frameId.startsWith(`p${args.publisher}-`)) {
           const selfEchoAt = Date.now();
+          const appendStartedAt = args.appendStartedAtByFrame.get(frameId);
           args.selfEchoAtByFrame.set(frameId, selfEchoAt);
           args.selfEchoLatencyByFrame.set(
             frameId,
             Math.max(0, selfEchoAt - Date.parse(result.value.createdAt)),
           );
+          if (appendStartedAt !== undefined) {
+            args.appendStartToSelfEchoLatencyByFrame.set(frameId, selfEchoAt - appendStartedAt);
+          }
         }
       }
     } finally {

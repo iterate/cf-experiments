@@ -126,8 +126,12 @@ exposes `/benchmark/audio-chaos`. That route starts one orchestrator `BenchmarkR
 separate publisher/subscriber `BenchmarkRunner` DOs, and those runner DOs connect to the `Stream` DO
 through the same Cap'n Web WebSocket endpoint external clients use. The DO-side benchmark reports
 `*CreatedAtLatencyMs`, measured from the stream DO's committed `createdAt` timestamp to delivery in
-the runner DO. This is not a substitute for the websocket-frame tests, but it is the better latency
-probe when the question is whether the user's local network is polluting the result.
+the runner DO. That removes local WiFi, but it still compares wall-clock timestamps from different
+DOs, so sub-100 ms conclusions can be polluted by clock skew or isolate scheduling. For publisher
+self-echo, `publisherAppendStartToSelfEchoLatencyMs` is the sharper metric because append start and
+own-stream delivery are both timestamped in the same publisher runner DO. This is not a substitute
+for the websocket-frame tests, but it is the better latency probe when the question is whether the
+user's local network is polluting the result.
 
 ## Debug hooks
 

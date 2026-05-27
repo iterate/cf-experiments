@@ -81,7 +81,9 @@ pnpm run deploy
   `publisherSelfEchoLatencyMs` measures same-session append-to-own-stream delivery under load.
 - The `/benchmark/audio-chaos` route reports `*CreatedAtLatencyMs` from the stream DO's committed
   event timestamp to delivery inside runner DOs. Use it when local network quality could contaminate
-  the external WebSocket benchmark.
+  the external WebSocket benchmark, but treat sub-100 ms differences carefully because that metric
+  crosses DO clocks. For publisher self-echo, prefer `publisherAppendStartToSelfEchoLatencyMs`,
+  which measures append call start to own-stream delivery inside the same publisher runner DO.
 - For `/benchmark/audio-chaos`, also check `framesFullyDelivered`, `framesMissingFullDelivery`,
   `minFrameDeliveries`, and `maxFrameDeliveries`; these make partial fan-out coverage explicit
   instead of relying on a percentile sample count.
