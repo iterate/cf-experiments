@@ -14,6 +14,25 @@
   stream framing is slow".
 - Verification: package-local `pnpm typecheck` passed. Focused local Cap'n Web transport tests
   (`rejects non-websocket`, `append returns committed event over capnweb`, `pure subscribers`) passed.
+- Deployed version `88f1ab06-a143-4bb3-a5e1-35e022241dfb`.
+- Full 10 publishers / 36 active subscribers / 50 frames / 20 ms pacing:
+  - `raw-volatile` with publisher self-echo: all 500 frames delivered to all 36 subscribers,
+    `allSubscribersCreatedAtLatencyMs.p95=149 ms`,
+    `publisherAppendStartToSelfEchoLatencyMs.p95=11 ms`,
+    `publisherAppendAckLatencyMs.p95=11 ms`, and `rawVolatile` fan-out attempts `18428`.
+    The attempt count is above 18000 because publisher 0's self-echo subscription is an additional
+    raw subscriber for most of the run.
+  - `raw-volatile` with publisher self-echo disabled: all 500 frames delivered,
+    `allSubscribersCreatedAtLatencyMs.p95=125 ms`, `publisherAppendAckLatencyMs.p95=5 ms`, and
+    exactly `18000` raw fan-out attempts.
+  - Same deployed generation, Cap'n Web `volatile` with publisher self-echo: all 500 frames
+    delivered, `allSubscribersCreatedAtLatencyMs.p95=1233 ms`,
+    `publisherAppendStartToSelfEchoLatencyMs.p95=619 ms`,
+    `publisherAppendAckLatencyMs.p95=619 ms`, and `volatile` fan-out attempts `18483`.
+- Interpretation: raw WebSocket egress from one Stream DO is not the bottleneck for this 10x36
+  audio-shaped workload. Storage is not the bottleneck either, because Cap'n Web `volatile` is still
+  slow with no persistence. The sharpest current explanation is Cap'n Web returned-stream framing /
+  stream result delivery under many pass-by-value chunks.
 
 ## 2026-05-27 07:10 UTC+1
 
