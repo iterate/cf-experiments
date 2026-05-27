@@ -5,6 +5,25 @@
 
 # Notes
 
+## 2026-05-27 03:42 UTC+1
+
+- Ran deployed DO-side `/benchmark/audio-chaos` on version
+  `77342eeb-58b6-4bbf-ae29-c25c4acf2f80`, with runner DOs driving 10 publishers, 36 active
+  subscribers, one slow subscriber, 50 frames per publisher, 20 ms pacing, and append-ack
+  measurement.
+- Best-effort result: all 500 frames were delivered to all 36 active subscribers
+  (`framesFullyDelivered=500`, `framesMissingFullDelivery=0`, min/max deliveries `36/36`).
+  `allSubscribersCreatedAtLatencyMs.p95=809 ms`, `publisherSelfEchoCreatedAtLatencyMs.p95=775 ms`,
+  and `publisherAppendAckLatencyMs.p95=407 ms`.
+- Confirmed result with the same shape: all 500 frames were delivered to all 36 active subscribers
+  (`framesFullyDelivered=500`, `framesMissingFullDelivery=0`, min/max deliveries `36/36`).
+  `allSubscribersCreatedAtLatencyMs.p95=768 ms`, `publisherSelfEchoCreatedAtLatencyMs.p95=635 ms`,
+  and `publisherAppendAckLatencyMs.p95=323 ms`.
+- Interpretation: under this DO-side full-load run, confirmed mode was not materially worse than
+  best-effort. That points away from the explicit durability await as the dominant source of
+  read-your-own-append latency at this load; the remaining hundreds of milliseconds are still more
+  consistent with fan-out / scheduling / transport pressure around the single stream DO.
+
 ## 2026-05-27 03:38 UTC+1
 
 - Added "continues fan-out to later subscribers after removing a broken subscriber". The existing
