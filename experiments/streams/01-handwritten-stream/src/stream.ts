@@ -586,12 +586,16 @@ export class Stream extends DurableObject {
       // checkpoint snapshots the unconfirmed append count.
       await Promise.resolve();
 
-      if (this.#unconfirmedWriteCount > 0) {
-        await this.#delayForCheckpointDebug();
-        await this.ctx.storage.sync();
-        this.#unconfirmedWriteCount = 0;
-        this.#checkpointCompletedCount += 1;
-      }
+      // No zero-count guard is needed here. `#scheduleCheckpointIfNeeded()`
+      // only starts this callback after the threshold is reached, and
+      // `blockConcurrencyWhile()` prevents a later delivered `sync()` RPC from
+      // clearing the count before this checkpoint runs. Appends still executing
+      // in the same handler can only increase the count. See the checkpointed
+      // appendBatch tests in `scripts/stream-capnweb.test.ts`.
+      await this.#delayForCheckpointDebug();
+      await this.ctx.storage.sync();
+      this.#unconfirmedWriteCount = 0;
+      this.#checkpointCompletedCount += 1;
 
       // Re-arm future checkpoint windows. See "checkpointed appends can
       // schedule a second checkpoint after the first completes" in

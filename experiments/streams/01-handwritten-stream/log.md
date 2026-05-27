@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 03:34 UTC+1
+
+- Probed the inner `#unconfirmedWriteCount > 0` guard inside the checkpoint callback. Removing it and
+  running the checkpointed test slice still passed.
+- Simplified the checkpoint callback by removing that guard. The schedule path already requires the
+  threshold to be reached, `blockConcurrencyWhile()` prevents later delivered RPCs from clearing the
+  count before the callback runs, and same-handler appends can only increase the count.
+- Verification: targeted checkpointed local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 51 tests. Deployed version `97cbe5a1-869a-4b0a-b5cc-57f700a91832`.
+
 ## 2026-05-27 03:29 UTC+1
 
 - Added "documents that capnweb reader cancel does not release the server subscriber". The initial
