@@ -15,6 +15,34 @@
   `0 ms` as "below timer resolution", not literally free. Added fan-out attempt counters so the
   benchmark records how many subscriber enqueue attempts the Stream DO performed.
 - Verification: package-local `pnpm typecheck` passed. Focused local Cap'n Web append test passed.
+- Deployed instrumentation versions:
+  - `2c6fb231-c164-431b-8cd8-2acddf8f896f`: timing summaries.
+  - `57d4c0d5-7af3-4a6e-a41c-b8974a19945c`: `measure-self-echo=false` switch.
+  - `6946d238-35cf-4688-bcbb-7fee615f721b`: fan-out attempt counters.
+- Full 10 publishers / 36 active subscribers / 50 frames / 20 ms pacing:
+  - volatile with self-echo: all 500 frames delivered to all subscribers,
+    `publisherAppendStartToSelfEchoLatencyMs.p95=587 ms`,
+    `publisherAppendAckLatencyMs.p95=587 ms`, `allSubscribersCreatedAtLatencyMs.p95=1117 ms`;
+    Stream DO volatile append/broadcast timings rounded to `0 ms`.
+  - durable best-effort with self-echo: all 500 frames delivered,
+    `publisherAppendStartToSelfEchoLatencyMs.p95=520 ms`,
+    `publisherAppendAckLatencyMs.p95=521 ms`, `allSubscribersCreatedAtLatencyMs.p95=871 ms`;
+    durable write-plan/append/broadcast timings rounded to `0 ms`.
+  - volatile with self-echo disabled: all 500 frames delivered, exactly `18000` volatile fan-out
+    attempts, `publisherAppendAckLatencyMs.p95=788 ms`,
+    `allSubscribersCreatedAtLatencyMs.p95=1818 ms`; internal timings still below resolution.
+- Subscriber-count sweep on volatile mode:
+  - 10 publishers / 1 subscriber: read-your-own p95 `3 ms`, all-subs p95 `135 ms`.
+  - 10 publishers / 10 subscribers: read-your-own p95 `7 ms`, all-subs p95 `252 ms`.
+  - 10 publishers / 20 subscribers: read-your-own p95 `26 ms`, all-subs p95 `355 ms`.
+  - 10 publishers / 36 subscribers: read-your-own p95 in repeated runs `587-683 ms`, all-subs p95
+    `1089-1117 ms`.
+- Interpretation: persistence is not the root cause of the full fan-out latency. A live-only,
+  message-only stream with no storage, replay, idempotency, or durability still shows hundreds of ms
+  once the single Stream DO is fanning 500 audio frames to 36 WebSocket stream consumers. Disabling
+  publisher self-echo does not make append acks fast, so the issue is not merely that the publisher's
+  own WebSocket is receiving stream chunks. The current best explanation is platform/Cap'n Web /
+  WebSocket egress scheduling pressure from many stream chunks leaving one DO.
 
 ## 2026-05-27 07:06 UTC+1
 
