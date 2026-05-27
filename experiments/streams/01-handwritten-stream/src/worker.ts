@@ -1,9 +1,11 @@
 import { BenchmarkRunner } from "./benchmark-runner.js";
+import { CleanStreamClientRunner } from "./clean/client-runner.js";
+import { CleanStream } from "./clean/stream.js";
 import { MinimalStream } from "./minimal-stream.js";
 import { OrpcDurableStream } from "./orpc-durable-stream.js";
 import { Stream } from "./stream.js";
 
-export { BenchmarkRunner, MinimalStream, OrpcDurableStream, Stream };
+export { BenchmarkRunner, CleanStream, CleanStreamClientRunner, MinimalStream, OrpcDurableStream, Stream };
 
 export default {
   async fetch(request, env) {
@@ -32,6 +34,20 @@ export default {
       return Response.json(result);
     }
 
+    if (url.pathname === "/clean-client-smoke") {
+      const transport = cleanTransportParam(url);
+      const stream = url.searchParams.get("stream") ?? `clean-${crypto.randomUUID()}`;
+      const result = await env.CLEAN_STREAM_CLIENT_RUNNER.getByName(
+        `${stream}:${transport}`,
+      ).runSmoke({ stream, transport });
+      return Response.json(result);
+    }
+
+    if (url.pathname.startsWith("/clean/")) {
+      const name = url.pathname.slice("/clean/".length) || "default";
+      return env.CLEAN_STREAM.getByName(name).fetch(request);
+    }
+
     if (url.pathname.startsWith("/minimal/")) {
       const name = url.pathname.slice("/minimal/".length) || "default";
       return env.MINIMAL_STREAM.getByName(name).fetch(request);
@@ -48,6 +64,12 @@ function positiveIntParam(url: URL, name: string) {
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
   return value;
+}
+
+function cleanTransportParam(url: URL) {
+  const raw = url.searchParams.get("transport");
+  if (raw === "capnweb" || raw === "orpc" || raw === "rawws") return raw;
+  throw new Error("transport must be capnweb, orpc, or rawws");
 }
 
 function nonNegativeIntParam(url: URL, name: string) {

@@ -13,6 +13,48 @@
 
 # Notes
 
+## 2026-05-27 08:44 UTC+1
+
+- Started the clean transport comparison surface requested after the batching result:
+  - `src/clean/stream.ts`: new `CleanStream` Durable Object with one minimal in-memory stream app and
+    transport adapters selected by `transport=capnweb|orpc|rawws` in `fetch()`.
+  - `src/clean/client.ts`: shared client interface for all transports with `append()` and
+    `subscribe().read()`. The endpoint can be a URL, for Vitest/Node clients, or a
+    `fetch(request)` function, for clients running inside Durable Objects.
+  - `src/clean/client-runner.ts`: small Durable Object proving the same client library works with a
+    DO-to-DO fetch endpoint.
+  - Route `/clean/:name?transport=...` for the stream and `/clean-client-smoke` for the DO-side
+    client smoke test.
+- The clean implementation keeps transport and app logic separate: `StreamApp` only allocates the
+  offset/timestamp; adapters only turn Cap'n Web, ORPC, or raw WebSocket messages into the same
+  `append`/`subscribe` operations.
+- Added `scripts/clean-stream.test.ts`, which runs every initial transport (`capnweb`, `orpc`,
+  `rawws`) through:
+  - URL endpoint client from Vitest.
+  - Fetch-function endpoint client from a Durable Object.
+- Local verification so far:
+  - `pnpm wrangler types`
+  - `pnpm typecheck`
+  - `WORKER_URL=http://localhost:8788 pnpm vitest run scripts/clean-stream.test.ts`: `7 passed`
+  - `WORKER_URL=http://localhost:8788 pnpm vitest run scripts/minimal-stream.test.ts scripts/stream-capnweb.test.ts`:
+    `70 passed`, `1 expected fail`
+  - `pnpm wrangler deploy --dry-run`
+- A deployed run initially exposed two cleanup/edge-contract issues:
+  - Missing `transport` threw and production returned Cloudflare 1101 HTML, so `CleanStream.fetch()`
+    now returns an explicit `400`.
+  - ORPC iterator cleanup could dominate the DO-side smoke test, so client disposal now bounds
+    `iterator.return()` and WebSocket close waits.
+- Final verification:
+  - fresh local server on port `8790`
+  - `pnpm typecheck`
+  - `WORKER_URL=http://localhost:8790 pnpm vitest run scripts/clean-stream.test.ts`: `7 passed`
+  - `WORKER_URL=http://localhost:8790 pnpm vitest run scripts/minimal-stream.test.ts scripts/stream-capnweb.test.ts`:
+    `70 passed`, `1 expected fail`
+  - `pnpm wrangler deploy --dry-run`
+  - deployed version `43c4cbd8-faad-48c2-94e8-6bd9ccf11a72`
+  - deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/clean-stream.test.ts`:
+    `7 passed`
+
 ## 2026-05-27 08:32 UTC+1
 
 - Added `stream-kind=batched-json-volatile`: same `Stream` DO and same Cap'n Web returned-stream

@@ -41,6 +41,13 @@ WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev \
   pnpm vitest run scripts/stream-capnweb.test.ts
 ```
 
+Run the clean transport comparison tests:
+
+```sh
+pnpm wrangler dev --port 8788
+WORKER_URL=http://localhost:8788 pnpm vitest run scripts/clean-stream.test.ts
+```
+
 Run the audio-shaped fan-out benchmark:
 
 ```sh
@@ -105,6 +112,11 @@ subscribers connect through ORPC's Durable Iterator WebSocket path:
 ```sh
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=orpc-durable-iterator&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
+
+The clean comparison surface is `/clean/:name?transport=capnweb|orpc|rawws`. It keeps one minimal
+in-memory stream application and swaps only the transport adapter. Use `src/clean/client.ts` from
+Vitest or from another Durable Object; it accepts either a URL endpoint or a `fetch(request)`
+endpoint.
 
 Deploy current code:
 

@@ -23,6 +23,8 @@
   "durable_objects": {
     "bindings": [
       { "name": "STREAM", "class_name": "Stream" },
+      { "name": "CLEAN_STREAM", "class_name": "CleanStream" },
+      { "name": "CLEAN_STREAM_CLIENT_RUNNER", "class_name": "CleanStreamClientRunner" },
       { "name": "MINIMAL_STREAM", "class_name": "MinimalStream" },
       { "name": "ORPC_STREAM", "class_name": "OrpcDurableStream" },
       { "name": "BENCHMARK_RUNNER", "class_name": "BenchmarkRunner" },
@@ -33,5 +35,7 @@
     { "tag": "v2", "new_classes": ["BenchmarkRunner"] },
     { "tag": "v3", "new_sqlite_classes": ["OrpcDurableStream"] },
     { "tag": "v4", "new_classes": ["MinimalStream"] },
+    { "tag": "v5", "new_sqlite_classes": ["CleanStream"] },
+    { "tag": "v6", "new_classes": ["CleanStreamClientRunner"] },
   ],
 }

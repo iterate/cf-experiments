@@ -71,6 +71,22 @@ each subscriber receives JSON arrays of events, flushed on a zero-delay timer. T
 API; it is a diagnostic. If it improves latency while `json-volatile` stays slow, the expensive unit is
 likely per returned-stream chunk/write/resolve rather than JSON serialization or storage.
 
+## Clean transport comparison
+
+`src/clean/stream.ts` is the reset point for transport comparisons. It has one tiny in-memory
+application core (`StreamApp`) that allocates offsets and timestamps events. The Durable Object
+`fetch()` surface selects only the transport adapter:
+
+- `transport=capnweb`: Cap'n Web WebSocket RPC, `append()` RPC, returned
+  `ReadableStream<StreamEvent>` subscription.
+- `transport=orpc`: ORPC Durable Iterator WebSocket subscription, HTTP append on the same DO fetch
+  surface with `op=append`.
+- `transport=rawws`: JSON-over-WebSocket `subscribe`, `append`, `event`, and `ack` frames.
+
+`src/clean/client.ts` is the shared client interface for all three transports. It accepts either a
+URL endpoint for Vitest/Node clients or a `fetch(request)` endpoint for clients running inside another
+Durable Object. `scripts/clean-stream.test.ts` runs every transport through both paths.
+
 ## Design-space guardrails
 
 These are the sharp edges currently protected by tests. The point is not only that the happy path
