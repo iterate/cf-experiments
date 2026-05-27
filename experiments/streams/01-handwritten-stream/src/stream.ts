@@ -87,11 +87,18 @@ export class Stream extends DurableObject {
      * "rejects unknown top-level append event fields instead of dropping them",
      * "preserves audio-shaped payload and metadata while rejecting only top-level
      * event fields",
+     * "rejects unknown append argument fields before allocating an offset",
      * plus "rejects malformed idempotent retries before reading the idempotency
      * index", in `scripts/stream-capnweb.test.ts`.
      */
     if (args === null || typeof args !== "object" || !("event" in args)) {
       throw new Error("append args must be an object with event");
+    }
+    const unknownArgFields = Object.keys(args).filter(
+      (field) => field !== "event" && field !== "durability",
+    );
+    if (unknownArgFields.length > 0) {
+      throw new Error(`Unknown append argument field: ${unknownArgFields.join(", ")}`);
     }
     const parsedEvent = APPEND_EVENT_INPUT_SCHEMA.safeParse(args.event);
     if (!parsedEvent.success) {

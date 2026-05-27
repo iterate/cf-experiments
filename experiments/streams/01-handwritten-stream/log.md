@@ -5,6 +5,23 @@
 
 # Notes
 
+## 2026-05-27 03:16 UTC+1
+
+- Added "rejects unknown append argument fields before allocating an offset". The stream already
+  rejected malformed args, strict event-envelope fields, and unknown durability option fields, but the
+  outer append argument object still accepted typos like `durabilty`.
+- Red result before the fix: sending
+  `{"event":{"type":"test.append.unknown-arg"},"durabilty":"best-effort"}` did not produce a
+  stream-level validation error and surfaced through Cap'n Web as `'' is not a function.` The
+  intended risk is that a misspelled runtime argument must not be ignored and fall back to default
+  durability after allocation.
+- Fixed `append()` to reject top-level argument fields other than `event` and `durability` before
+  event parsing, idempotency lookup, durability resolution, or offset allocation.
+- Verification: targeted local Vitest, root `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 48 tests. Deployed version `cb91e180-6f1d-4515-af70-b4eede16a31f`.
+
 ## 2026-05-27 03:13 UTC+1
 
 - Added "rejects unknown durability option fields before allocating an offset". Event envelopes were
