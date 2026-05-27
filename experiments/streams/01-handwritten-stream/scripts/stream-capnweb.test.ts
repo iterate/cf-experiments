@@ -133,6 +133,25 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects malformed append args before reading event or durability", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(fixture.rpc.append(JSON.parse("null"))).rejects.toThrow(
+      /append args must be an object with event/,
+    );
+    await expect(fixture.rpc.append(JSON.parse("{}"))).rejects.toThrow(
+      /append args must be an object with event/,
+    );
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("avoids pulls for unobserved results and for .map() source arrays", async () => {
     const fireAndForgetName = `stream-${crypto.randomUUID()}`;
     const mapName = `stream-${crypto.randomUUID()}`;

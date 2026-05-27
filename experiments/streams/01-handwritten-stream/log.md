@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 02:49 UTC+1
+
+- Added "rejects malformed append args before reading event or durability". Runtime Cap'n Web
+  callers can invoke `append(null)` or `append({})`, which TypeScript callers would not compile.
+- Red result before the fix: `append(null)` rejected with `Cannot read properties of null (reading
+  'event')`.
+- Fixed `append()` to validate that the runtime args value is an object containing `event` before
+  reading `args.event` or `args.durability`.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 41 tests. Deployed version `1e6e3d0b-29bf-4def-ad62-27615b52f38d`.
+
 ## 2026-05-27 02:46 UTC+1
 
 - Added "rejects malformed append events before idempotency or durability handling". The test sends

@@ -77,12 +77,16 @@ export class Stream extends DurableObject {
   }): Promise<StreamEvent> {
     /**
      * Runtime Cap'n Web callers are not constrained by this TypeScript signature.
-     * Validate the event before idempotency lookup or durability resolution so
-     * malformed inputs do not produce incidental property-access errors, consult
-     * idempotency keys, or allocate offsets. See "rejects malformed append events
-     * before idempotency or durability handling" in
-     * `scripts/stream-capnweb.test.ts`.
+     * Validate the argument object and event before idempotency lookup or
+     * durability resolution so malformed inputs do not produce incidental
+     * property-access errors, consult idempotency keys, or allocate offsets. See
+     * "rejects malformed append args before reading event or durability" and
+     * "rejects malformed append events before idempotency or durability handling"
+     * in `scripts/stream-capnweb.test.ts`.
      */
+    if (args === null || typeof args !== "object" || !("event" in args)) {
+      throw new Error("append args must be an object with event");
+    }
     const parsedEvent = StreamEventInputSchema.safeParse(args.event);
     if (!parsedEvent.success) {
       throw new Error("append event must be a valid StreamEventInput");
