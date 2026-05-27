@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 05:42 UTC+1
+
+- Added "rejects non-string idempotency keys before idempotency lookup". Runtime callers can send
+  non-string values over Cap'n Web; those must fail at the event envelope boundary instead of
+  reaching idempotency key construction, durability handling, or offset allocation.
+- Mutation check: temporarily relaxing the shared event schema from `z.string()` to `z.unknown()`
+  for `idempotencyKey` made the new test fail; the malformed key reached durability resolution and
+  reported `Unknown append durability mode: not-a-mode`.
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 62 tests. Deployed version `6a29e72c-3ae3-4f6d-8af7-ecac9e62e4d8`.
+
 ## 2026-05-27 05:38 UTC+1
 
 - Added "rejects non-positive event offsets at the append envelope boundary". This pins the

@@ -171,6 +171,25 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects non-string idempotency keys before idempotency lookup", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: JSON.parse('{"type":"test.append.numeric-idempotency","idempotencyKey":123}'),
+        durability: JSON.parse('"not-a-mode"'),
+      }),
+    ).rejects.toThrow(/append event must be a valid StreamEventInput/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects unknown top-level append event fields instead of dropping them", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
