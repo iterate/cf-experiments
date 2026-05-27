@@ -1028,6 +1028,35 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("checkpointed appends can schedule a second checkpoint after the first completes", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await fixture.rpc.append({
+      event: { type: "test.durability.checkpoint-rearm", payload: { n: 1 } },
+      durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 1 },
+    });
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointInProgress: false,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 1,
+    });
+
+    await fixture.rpc.append({
+      event: { type: "test.durability.checkpoint-rearm", payload: { n: 2 } },
+      durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 1 },
+    });
+
+    expect(await fixture.rpc.maxOffset()).toBe(2);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointInProgress: false,
+      checkpointStartedCount: 2,
+      checkpointCompletedCount: 2,
+    });
+  });
+
   it("checkpointed passes the live-before-durability probe that confirmed intentionally fails", async () => {
     const confirmedPath = `stream-${crypto.randomUUID()}`;
     await using confirmedWriter = await withStream({ path: confirmedPath });

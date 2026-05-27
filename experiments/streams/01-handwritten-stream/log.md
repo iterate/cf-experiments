@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 03:09 UTC+1
+
+- Added "checkpointed appends can schedule a second checkpoint after the first completes". A
+  checkpoint completion must clear `checkpointInProgress`; otherwise the first checkpoint appears to
+  complete but every later checkpoint window silently stops scheduling durability barriers.
+- Mutation check: temporarily removing `this.#checkpointInProgress = false` made the new test fail
+  after the first append with `checkpointInProgress: true` and only one completed checkpoint.
+- Verification: targeted local Vitest passed before mutation and failed under the mutation as
+  expected; root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 46 tests. Deployed version `804d8ffe-07c4-47f9-bf7f-7b1622a91800`.
+
 ## 2026-05-27 03:04 UTC+1
 
 - Added "preserves audio-shaped payload and metadata while rejecting only top-level event fields".

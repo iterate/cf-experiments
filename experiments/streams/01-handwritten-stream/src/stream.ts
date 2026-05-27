@@ -565,6 +565,9 @@ export class Stream extends DurableObject {
         this.#checkpointCompletedCount += 1;
       }
 
+      // Re-arm future checkpoint windows. See "checkpointed appends can
+      // schedule a second checkpoint after the first completes" in
+      // `scripts/stream-capnweb.test.ts`.
       this.#checkpointInProgress = false;
     });
   }
