@@ -15,6 +15,24 @@
 - Verification: package-local `pnpm typecheck` passed. Focused local Cap'n Web transport tests
   (`append returns committed event over capnweb`, `pure subscribers`, and session-internal exposure)
   passed.
+- Deployed version `62d94d14-4b67-4dd4-a30f-1117121b56b8`.
+- Full 10 publishers / 36 active subscribers / 50 frames / 20 ms pacing:
+  - Cap'n Web object `volatile`: all frames delivered, `allSubscribersCreatedAtLatencyMs.p95=1036
+    ms`, `publisherAppendStartToSelfEchoLatencyMs.p95=617 ms`,
+    `publisherAppendAckLatencyMs.p95=617 ms`.
+  - Cap'n Web JSON-string `json-volatile`: all frames delivered,
+    `allSubscribersCreatedAtLatencyMs.p95=861 ms`,
+    `publisherAppendStartToSelfEchoLatencyMs.p95=446 ms`,
+    `publisherAppendAckLatencyMs.p95=447 ms`.
+  - Raw WebSocket `raw-volatile`: all frames delivered, `allSubscribersCreatedAtLatencyMs.p95=142
+    ms`, `publisherAppendStartToSelfEchoLatencyMs.p95=6 ms`,
+    `publisherAppendAckLatencyMs.p95=6 ms`.
+  - JSON-string `json-volatile` with publisher self-echo disabled: all frames delivered,
+    `allSubscribersCreatedAtLatencyMs.p95=1846 ms`, `publisherAppendAckLatencyMs.p95=803 ms`.
+- Interpretation: pass-by-value object chunks are part of the cost, because JSON-string Cap'n Web is
+  faster than object Cap'n Web. But JSON-string Cap'n Web remains far slower than raw WebSocket, and
+  ack-only JSON-string is still slow, so the dominant issue is Cap'n Web returned-stream/result
+  delivery under high fan-out rather than storage, raw WebSocket egress, or publisher self-echo.
 
 ## 2026-05-27 07:18 UTC+1
 
