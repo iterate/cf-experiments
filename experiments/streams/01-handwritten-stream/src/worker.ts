@@ -1,8 +1,9 @@
 import { BenchmarkRunner } from "./benchmark-runner.js";
+import { MinimalStream } from "./minimal-stream.js";
 import { OrpcDurableStream } from "./orpc-durable-stream.js";
 import { Stream } from "./stream.js";
 
-export { BenchmarkRunner, OrpcDurableStream, Stream };
+export { BenchmarkRunner, MinimalStream, OrpcDurableStream, Stream };
 
 export default {
   async fetch(request, env) {
@@ -29,6 +30,11 @@ export default {
         measureSelfEcho: booleanParam(url, "measure-self-echo"),
       });
       return Response.json(result);
+    }
+
+    if (url.pathname.startsWith("/minimal/")) {
+      const name = url.pathname.slice("/minimal/".length) || "default";
+      return env.MINIMAL_STREAM.getByName(name).fetch(request);
     }
 
     const name = url.pathname.slice(1) || "default";
@@ -62,10 +68,11 @@ function streamKindParam(url: URL) {
     raw !== "volatile" &&
     raw !== "json-volatile" &&
     raw !== "orpc-durable-iterator" &&
-    raw !== "raw-volatile"
+    raw !== "raw-volatile" &&
+    raw !== "minimal-ws"
   ) {
     throw new Error(
-      "stream-kind must be durable, volatile, json-volatile, orpc-durable-iterator, or raw-volatile",
+      "stream-kind must be durable, volatile, json-volatile, orpc-durable-iterator, raw-volatile, or minimal-ws",
     );
   }
   return raw;

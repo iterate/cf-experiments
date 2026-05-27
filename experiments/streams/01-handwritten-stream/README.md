@@ -76,6 +76,14 @@ returned streams with a small JSON-over-WebSocket protocol:
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=raw-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
 
+Set `stream-kind=minimal-ws` to use a separate `MinimalStream` DO that implements only WebSocket
+upgrade, `subscribe`, `append`, broadcast, and append `ack`. This is the clean raw-WebSocket baseline:
+subscribers send one `subscribe` frame and then receive events without per-event return traffic.
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=minimal-ws&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
+```
+
 Set `stream-kind=json-volatile` to keep Cap'n Web returned streams but make each stream chunk a
 pre-serialized JSON string instead of a pass-by-value event object:
 

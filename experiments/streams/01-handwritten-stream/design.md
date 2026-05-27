@@ -59,6 +59,13 @@ shape and the current Cap'n Web transport reality:
   `resolve undefined` protocol frames. So the API avoids an application callback/ack contract, but
   the current returned-stream implementation is not zero-return-traffic on the wire.
 
+`src/minimal-stream.ts` is the raw baseline for that same contract. It deliberately has no storage,
+Cap'n Web session, ORPC iterator, replay, or backpressure abstraction: clients send `subscribe` once,
+publishers send `append`, the DO broadcasts JSON `event` frames, and publishers receive JSON `ack`
+frames. The test-only companion client in `scripts/lib/minimal-stream.ts` records WebSocket frames so
+`scripts/minimal-stream.test.ts` can prove a pure subscriber originates no traffic after the initial
+subscription.
+
 ## Design-space guardrails
 
 These are the sharp edges currently protected by tests. The point is not only that the happy path
@@ -78,6 +85,7 @@ passes, but that a competing implementation choice should fail a named probe.
 | Capture one replay boundary, register each stream once, and use one enqueue path for replay/live fan-out | Replay/live ordering, subscriber accounting, or multi-subscriber fan-out could skip, duplicate, leak, or reorder events | "replays committed history before switching to live appends", "accounts replayed events through the same subscriber enqueue path as live fan-out", "delivers global offset order to multiple subscribers with no per-event RPC from readers or writers", and "removes subscribers whose stream controller rejects enqueue" |
 | Treat `maxOffset` as a contiguous committed-history claim and clean up failed replay subscribers | A missing event key could be silently skipped, or a failed replay could leave a dead subscriber in live fan-out | "fails replay loudly when committed history has a missing event key" and "removes replay subscribers when committed history is corrupt" |
 | Model subscriptions as returned `ReadableStream`, not `onEvent()` callback RPC | A pure subscriber would expose an app callback that the Stream DO must call per event | "pure subscribers do not originate per-event pull or push websocket traffic"; the adjacent `it.fails` sentinel documents that capnweb@0.8.0 returned streams still emit per-chunk `resolve undefined` protocol frames |
+| Keep a separate minimal raw-WebSocket baseline | A regression in the larger `Stream` DO or Cap'n Web/ORPC stack could be mistaken for WebSocket fan-out cost | `scripts/minimal-stream.test.ts` proves append/broadcast/ack behavior and that pure subscribers send no frames after subscribe |
 | Reject stream arguments because the subscription has no cursor/options surface | Runtime callers could pass `fromOffset`-style options and silently receive the default full replay subscription | "rejects stream arguments instead of silently ignoring subscription options" |
 | Keep session-owned stream internals off the Cap'n Web surface | A client could call `streamForSession()` directly and create a subscriber that session disposal does not own | "does not expose session-owned stream internals over capnweb" |
 | Do not await per-subscriber delivery in `#broadcast()` and keep iterating after subscriber-local failures | One unread or broken subscriber could slow active subscribers, or prevent later subscribers from seeing the current event | "delivers to an active subscriber while another subscriber does not read" and "continues fan-out to later subscribers after removing a broken subscriber" |

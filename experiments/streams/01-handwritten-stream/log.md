@@ -1,9 +1,62 @@
 # High level findings
 
-- No high-level Cloudflare platform finding yet. The current work is shaping a reproducible contract
-  for Cap'n Web streams, append durability modes, and deployed-vs-local correctness tests.
+- Raw WebSocket fan-out from one DO is not the current bottleneck at the 10 publisher / 36
+  subscriber / 50 frame audio-shaped load. Both the embedded `raw-volatile` path and separate
+  `minimal-ws` baseline repeatedly deliver all 18,000 fan-out messages with low-hundreds-of-ms
+  p95 append-to-all-subscribers, while Cap'n Web returned-stream modes are much slower in the same
+  DO-side benchmark. This is still an experiment-level finding; repeat before copying to
+  `docs/findings.md`.
 
 # Notes
+
+## 2026-05-27 08:20 UTC+1
+
+- Added `src/minimal-stream.ts`: a separate `MinimalStream` Durable Object that implements only a
+  lightweight JSON-over-WebSocket protocol:
+  - client `subscribe` -> server `subscribed`;
+  - client `append { requestId, event }` -> server broadcasts `event` to subscribers and returns
+    publisher `ack`.
+- Added `scripts/lib/minimal-stream.ts` as the companion test client. It records raw WebSocket frames
+  so tests can assert protocol direction directly.
+- Added `scripts/minimal-stream.test.ts`. The key test, "pure subscribers originate no websocket
+  frames after the initial subscribe", proves the baseline subscriber has no per-event return
+  traffic. This contrasts with the adjacent Cap'n Web `it.fails` sentinel where returned streams send
+  per-chunk `resolve undefined` frames.
+- Wired `stream-kind=minimal-ws` into `/benchmark/audio-chaos` and added public route
+  `/minimal/:name` for tests.
+- Verification:
+  - `pnpm wrangler types`
+  - `pnpm typecheck`
+  - local `WORKER_URL=http://localhost:8788 pnpm vitest run scripts/minimal-stream.test.ts`:
+    `3 passed`
+  - local `WORKER_URL=http://localhost:8788 pnpm vitest run scripts/stream-capnweb.test.ts`:
+    `66 passed`, `1 expected fail`
+  - local smoke benchmark:
+    `/benchmark/audio-chaos?stream-kind=minimal-ws&publishers=1&subscribers=1&frames-per-publisher=3&pace-ms=20&measure-append-ack=true&measure-self-echo=false&timeout-ms=5000`
+    delivered all frames.
+  - `pnpm wrangler deploy --dry-run`
+  - deployed version `a384d2b5-c9b1-4b5b-9112-4a3cda2949ae`
+  - deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/minimal-stream.test.ts`:
+    `3 passed`
+  - deployed focused pure-subscriber Cap'n Web tests:
+    `1 passed`, `1 expected fail`, `65 skipped`
+- Deployed 10 publishers / 36 active subscribers / 50 frames / 20 ms pacing / self-echo disabled /
+  append-ack measured on version `a384d2b5-c9b1-4b5b-9112-4a3cda2949ae`:
+  - Minimal raw WebSocket `minimal-ws`: all 500 frames delivered to all 36 subscribers,
+    all-subs p95 `136 ms`, first-subscriber p95 `120 ms`, append-ack p95 `6 ms`, fan-out attempts
+    `18000`, elapsed `1562 ms`.
+  - Embedded raw WebSocket `raw-volatile`: all frames delivered, all-subs p95 `167 ms`,
+    first-subscriber p95 `147 ms`, append-ack p95 `15 ms`, elapsed `1645 ms`.
+  - ORPC durable iterator: all frames delivered, all-subs p95 `587 ms`, first-subscriber p95
+    `526 ms`, append-ack p95 `312 ms`, fan-out attempts `18000`, elapsed `1604 ms`.
+  - Cap'n Web object `volatile`: all frames delivered, all-subs p95 `2521 ms`,
+    first-subscriber p95 `2445 ms`, append-ack p95 `1100 ms`, elapsed `3440 ms`.
+  - Cap'n Web JSON-string `json-volatile`: all frames delivered, all-subs p95 `1958 ms`,
+    first-subscriber p95 `1854 ms`, append-ack p95 `1388 ms`, elapsed `2924 ms`.
+- Interpretation: the separate minimal baseline agrees with the embedded raw WebSocket path, so the
+  low raw latency is not an artifact of the larger `Stream` class. The slow path is still associated
+  with stream abstraction layers above raw WebSocket, especially Cap'n Web returned streams. ORPC
+  durable iterator sits between the two in this run.
 
 ## 2026-05-27 07:31 UTC+1
 

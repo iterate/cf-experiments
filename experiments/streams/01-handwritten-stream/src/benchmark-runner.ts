@@ -18,7 +18,8 @@ type StreamKind =
   | "volatile"
   | "json-volatile"
   | "orpc-durable-iterator"
-  | "raw-volatile";
+  | "raw-volatile"
+  | "minimal-ws";
 type AppendDurability =
   | AppendDurabilityMode
   | {
@@ -188,6 +189,8 @@ type RawStreamFixture = {
   dispose(): void;
 };
 
+type RawWebSocketStreamKind = "raw-volatile" | "minimal-ws";
+
 type OrpcDurableIteratorFixture = {
   iterator: AsyncIterator<StreamEvent>;
   webSocket: WebSocket;
@@ -295,7 +298,7 @@ export class BenchmarkRunner extends DurableObject {
       config.streamKind === "volatile" ||
       config.streamKind === "json-volatile" ||
       config.streamKind === "orpc-durable-iterator" ||
-      config.streamKind === "raw-volatile"
+      isRawWebSocketStreamKind(config.streamKind)
     ) {
       const expectedSubscribers = config.subscribers + config.slowSubscribers;
       const attachDeadline = Date.now() + 5_000;
@@ -363,6 +366,8 @@ export class BenchmarkRunner extends DurableObject {
     const serverDebug =
       config.streamKind === "orpc-durable-iterator"
         ? await this.env.ORPC_STREAM.getByName(config.stream).debug()
+        : config.streamKind === "minimal-ws"
+          ? await this.env.MINIMAL_STREAM.getByName(config.stream).debug()
         : await stream.debug();
 
     return {
@@ -442,8 +447,8 @@ export class BenchmarkRunner extends DurableObject {
   async runAudioSubscriber(
     args: AudioChaosConfig & { subscriber: string },
   ): Promise<AudioSubscriberResult> {
-    if (args.streamKind === "raw-volatile") {
-      return this.runRawAudioSubscriber(args);
+    if (isRawWebSocketStreamKind(args.streamKind)) {
+      return this.runRawAudioSubscriber({ ...args, streamKind: args.streamKind });
     }
     if (args.streamKind === "orpc-durable-iterator") {
       return this.runOrpcDurableIteratorAudioSubscriber(args);
@@ -475,8 +480,8 @@ export class BenchmarkRunner extends DurableObject {
   }
 
   async runAudioPassiveSubscriber(args: AudioChaosConfig & { subscriber: string; holdMs: number }) {
-    if (args.streamKind === "raw-volatile") {
-      const fixture = await connectRawStream(this.env, args.stream);
+    if (isRawWebSocketStreamKind(args.streamKind)) {
+      const fixture = await connectRawStream(this.env, args.stream, args.streamKind);
       fixture.send({ op: "subscribe" });
       await waitForRawOp(fixture, "subscribed", args.timeoutMs);
       try {
@@ -530,8 +535,8 @@ export class BenchmarkRunner extends DurableObject {
       selfEcho: boolean;
     },
   ): Promise<AudioPublisherResult> {
-    if (args.streamKind === "raw-volatile") {
-      return this.runRawAudioPublisher(args);
+    if (isRawWebSocketStreamKind(args.streamKind)) {
+      return this.runRawAudioPublisher({ ...args, streamKind: args.streamKind });
     }
     if (args.streamKind === "orpc-durable-iterator") {
       return this.runOrpcDurableIteratorAudioPublisher(args);
@@ -631,9 +636,9 @@ export class BenchmarkRunner extends DurableObject {
   }
 
   private async runRawAudioSubscriber(
-    args: AudioChaosConfig & { subscriber: string },
+    args: AudioChaosConfig & { streamKind: RawWebSocketStreamKind; subscriber: string },
   ): Promise<AudioSubscriberResult> {
-    const fixture = await connectRawStream(this.env, args.stream);
+    const fixture = await connectRawStream(this.env, args.stream, args.streamKind);
     const samples: AudioSample[] = [];
     fixture.send({ op: "subscribe" });
     await waitForRawOp(fixture, "subscribed", args.timeoutMs);
@@ -788,12 +793,13 @@ export class BenchmarkRunner extends DurableObject {
 
   private async runRawAudioPublisher(
     args: AudioChaosConfig & {
+      streamKind: RawWebSocketStreamKind;
       audio: AudioFixture;
       publisher: number;
       selfEcho: boolean;
     },
   ): Promise<AudioPublisherResult> {
-    const fixture = await connectRawStream(this.env, args.stream);
+    const fixture = await connectRawStream(this.env, args.stream, args.streamKind);
     const ackLatencyByFrame = new Map<string, number>();
     const ackAtByFrame = new Map<string, number>();
     const appendStartedAtByFrame = new Map<string, number>();
@@ -1007,10 +1013,17 @@ async function debugSubscriberCount(env: Env, config: AudioChaosConfig): Promise
   if (config.streamKind === "orpc-durable-iterator") {
     return (await env.ORPC_STREAM.getByName(config.stream).debug()).subscribers;
   }
+  if (config.streamKind === "minimal-ws") {
+    return (await env.MINIMAL_STREAM.getByName(config.stream).debug()).subscribers;
+  }
   const debug = await env.STREAM.getByName(config.stream).debug();
   if (config.streamKind === "raw-volatile") return debug.rawVolatileSubscribers;
   if (config.streamKind === "json-volatile") return debug.jsonVolatileSubscribers.length;
   return debug.volatileSubscribers.length;
+}
+
+function isRawWebSocketStreamKind(streamKind: StreamKind): streamKind is RawWebSocketStreamKind {
+  return streamKind === "raw-volatile" || streamKind === "minimal-ws";
 }
 
 function appendDurability(config: AudioChaosConfig): AppendDurability {
@@ -1081,15 +1094,24 @@ async function connectStreamRpc(
   };
 }
 
-async function connectRawStream(env: Env, stream: string): Promise<RawStreamFixture> {
-  const response = await env.STREAM.getByName(stream).fetch(
-    "https://stream.internal/?transport=raw-volatile",
-    {
-      headers: { Upgrade: "websocket" },
-    },
-  );
+async function connectRawStream(
+  env: Env,
+  stream: string,
+  streamKind: RawWebSocketStreamKind,
+): Promise<RawStreamFixture> {
+  const response =
+    streamKind === "minimal-ws"
+      ? await env.MINIMAL_STREAM.getByName(stream).fetch("https://minimal-stream.internal/", {
+          headers: { Upgrade: "websocket" },
+        })
+      : await env.STREAM.getByName(stream).fetch(
+          "https://stream.internal/?transport=raw-volatile",
+          {
+            headers: { Upgrade: "websocket" },
+          },
+        );
   const webSocket = response.webSocket;
-  if (webSocket === null) throw new Error("stream DO did not return a raw WebSocket");
+  if (webSocket === null) throw new Error(`${streamKind} DO did not return a WebSocket`);
   webSocket.accept();
   const messages: unknown[] = [];
   const waiters: ((message: unknown) => void)[] = [];
