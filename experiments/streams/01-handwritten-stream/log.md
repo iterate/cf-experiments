@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 02:46 UTC+1
+
+- Added "rejects malformed append events before idempotency or durability handling". The test sends
+  `event: null` plus invalid durability, then asserts no offset or checkpoint state changes.
+- Red result before the fix: append rejected with `Cannot read properties of null (reading
+  'idempotencyKey')`, proving the append boundary dereferenced the event before validation.
+- Fixed `append()` to validate `StreamEventInput` at the top and use the parsed event for
+  idempotency lookup and `writeEventFromKv()`.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 40 tests. Deployed version `6c1db589-85ad-4c48-ab55-48a678cb0fb0`.
+
 ## 2026-05-27 02:43 UTC+1
 
 - The DO-side audio benchmark route rejected `subscribers=0` with Worker 1101 because the HTTP

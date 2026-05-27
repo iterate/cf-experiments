@@ -76,7 +76,7 @@ describe("handwritten stream capnweb", () => {
     );
 
     expect(source).toMatch(
-      /writeEventFromKv\(\{\s*storage: this\.ctx\.storage,\s*input: args\.event,\s*allowUnconfirmedWrites: true,\s*\}\)/,
+      /writeEventFromKv\(\{\s*storage: this\.ctx\.storage,\s*input: event,\s*allowUnconfirmedWrites: true,\s*\}\)/,
     );
   });
 
@@ -112,6 +112,25 @@ describe("handwritten stream capnweb", () => {
       { direction: "out", data: ["release", 1, expect.any(Number)] },
     ]);
     expect(await fixture.rpc.maxOffset()).toBe(1);
+  });
+
+  it("rejects malformed append events before idempotency or durability handling", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect(
+      fixture.rpc.append({
+        event: JSON.parse("null"),
+        durability: JSON.parse("1"),
+      }),
+    ).rejects.toThrow(/append event must be a valid StreamEventInput/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
   });
 
   it("avoids pulls for unobserved results and for .map() source arrays", async () => {

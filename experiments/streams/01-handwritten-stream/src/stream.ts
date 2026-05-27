@@ -1,6 +1,7 @@
 import { newWebSocketRpcSession } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
 import {
+  StreamEventInput as StreamEventInputSchema,
   writeEventFromKv,
   type StreamEvent,
   type StreamEventInput,
@@ -74,8 +75,21 @@ export class Stream extends DurableObject {
     event: StreamEventInput;
     durability?: AppendDurability;
   }): Promise<StreamEvent> {
+    /**
+     * Runtime Cap'n Web callers are not constrained by this TypeScript signature.
+     * Validate the event before idempotency lookup or durability resolution so
+     * malformed inputs do not produce incidental property-access errors, consult
+     * idempotency keys, or allocate offsets. See "rejects malformed append events
+     * before idempotency or durability handling" in
+     * `scripts/stream-capnweb.test.ts`.
+     */
+    const parsedEvent = StreamEventInputSchema.safeParse(args.event);
+    if (!parsedEvent.success) {
+      throw new Error("append event must be a valid StreamEventInput");
+    }
+    const event = parsedEvent.data;
     const kv = this.ctx.storage.kv;
-    if (args.event.idempotencyKey !== undefined) {
+    if (event.idempotencyKey !== undefined) {
       /**
        * Idempotency retries must be a read-only fast path at the Stream boundary.
        *
@@ -84,13 +98,14 @@ export class Stream extends DurableObject {
        * not broadcast a duplicate event, increment unconfirmed write debt, or
        * schedule a checkpoint. See:
        *
+       * - "rejects malformed append events before idempotency or durability handling"
        * - "idempotent append returns the original event and emits once to live subscribers"
        * - "does not count idempotent best-effort retries as new unconfirmed writes"
        * - "fails corrupted idempotent retries before conflicting validation can reject them"
        *
        * in `scripts/stream-capnweb.test.ts`.
        */
-      const existingOffset = kv.get<number>(`idempotency:${args.event.idempotencyKey}`);
+      const existingOffset = kv.get<number>(`idempotency:${event.idempotencyKey}`);
       if (existingOffset !== undefined) {
         const existing = kv.get<StreamEvent>(`event:${existingOffset}`);
         if (existing !== undefined) return existing;
@@ -101,7 +116,7 @@ export class Stream extends DurableObject {
     const durability = this.#resolveAppendDurability(args.durability);
     const committed = writeEventFromKv({
       storage: this.ctx.storage,
-      input: args.event,
+      input: event,
       allowUnconfirmedWrites: true,
     });
 
