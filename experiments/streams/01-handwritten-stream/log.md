@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 03:19 UTC+1
+
+- Added "rejects non-integer checkpoint thresholds before allocating an offset". The existing invalid
+  threshold tests covered `<= 0`; this one pins the separate `Number.isInteger()` branch in
+  `#validateCheckpointEveryUnconfirmedAppends()`.
+- Mutation check: temporarily changing the validator to only reject `value <= 0` made the new test
+  fail. A positive fractional threshold reached later behavior and surfaced through Cap'n Web as
+  `'' is not a function.` instead of the intended stream-level validation error.
+- Verification: targeted local Vitest, root `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 49 tests. Deployed version `9bf85adb-cf75-4d38-bd0d-e5af254fd2f8`.
+
 ## 2026-05-27 03:16 UTC+1
 
 - Added "rejects unknown append argument fields before allocating an offset". The stream already

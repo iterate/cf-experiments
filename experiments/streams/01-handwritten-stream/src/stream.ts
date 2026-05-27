@@ -515,12 +515,13 @@ export class Stream extends DurableObject {
      * falls back to the stream's default threshold after allocating an offset.
      * The default/override/settings/invalid-mode/invalid-threshold tests,
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
-     * object durability" and "rejects null per-call durability before allocating
-     * an offset", and "rejects object durability without a mode before
-     * allocating an offset", and "rejects unknown durability option fields
-     * before allocating an offset", and "rejects primitive per-call durability
-     * before falling back to stream settings" in
-     * `scripts/stream-capnweb.test.ts` cover each branch here.
+     * object durability", "rejects non-integer checkpoint thresholds before
+     * allocating an offset", "rejects null per-call durability before
+     * allocating an offset", "rejects object durability without a mode before
+     * allocating an offset", "rejects unknown durability option fields before
+     * allocating an offset", and "rejects primitive per-call durability before
+     * falling back to stream settings" in `scripts/stream-capnweb.test.ts`
+     * cover each branch here.
      */
     this.#validateDurabilityMode(mode);
     return {
