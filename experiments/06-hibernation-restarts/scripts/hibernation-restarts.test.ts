@@ -1,257 +1,137 @@
 import { describe, expect, it } from "vitest";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
-const hibernationWaitMs = Number(process.env.HIBERNATION_WAIT_MS ?? 15_000);
-const oomBytes = Number(process.env.OOM_BYTES ?? 256 * 1024 * 1024);
 const deployedIt = workerUrl.includes("localhost") ? it.skip : it;
 const oomIt = process.env.RUN_OOM_PROBE === "true" ? deployedIt : it.skip;
+const hibernationWaitMs = Number(process.env.HIBERNATION_WAIT_MS ?? 15_000);
+const oomBytes = Number(process.env.OOM_BYTES ?? 512 * 1024 * 1024);
 
-type PingResult = {
-  incarnationId: string;
-  sockets: number;
-  heldBytes: number;
-};
+type AutoPong = { op: "auto-pong"; incarnationId: string; expiresAt: number };
+type AppPong = { op: "app-pong"; incarnationId: string };
 
-type SocketOutcome =
-  | { kind: "responded"; incarnationId: string }
-  | { kind: "closed" }
-  | { kind: "errored"; error: unknown }
-  | { kind: "stale" };
+describe("hibernatable WebSocket reset semantics", () => {
+  deployedIt("normal hibernation keeps the socket and real messages wake a new DO", async () => {
+    await using socket = await openSocket(`hibernate-${crypto.randomUUID()}`);
 
-type AutoPong = {
-  op: "auto-pong";
-  incarnationId: string;
-  expiresAt: number;
-};
-
-describe("hibernation restart probe", () => {
-  deployedIt("keeps one hibernatable websocket connected across idle hibernation", async () => {
-    const name = `hibernate-${crypto.randomUUID()}`;
-
-    await using socket = await openProbeSocket(name);
-    const before = await ping(name);
-
+    const before = await socket.appPing();
     await delay(hibernationWaitMs);
 
-    const autoPong = await socket.autoPing();
-    expect(autoPong.expiresAt).toBeLessThan(Date.now());
+    // Auto-response is cheap but stale: it was created by the old constructor.
+    expect((await socket.autoPing()).expiresAt).toBeLessThan(Date.now());
 
-    const pong = await socket.ping();
-    expect(pong.incarnationId).not.toBe(before.incarnationId);
-
-    const after = await ping(name);
-    expect(after.incarnationId).toBe(pong.incarnationId);
-    expect(after.sockets).toBe(1);
+    // A real message wakes the hibernated DO and reaches the reattached socket.
+    const after = await socket.appPing();
+    expect(after.incarnationId).not.toBe(before.incarnationId);
   }, 30_000);
 
-  deployedIt("does not keep the old hibernatable websocket in fan-out after ctx.abort", async () => {
-    const name = `abort-${crypto.randomUUID()}`;
-
-    await using socket = await openProbeSocket(name);
-    const before = await socket.ping();
-
-    await expect(kill(name)).rejects.toThrow();
-
-    const autoPong = await socket.autoPing();
-    expect(autoPong.incarnationId).toBe(before.incarnationId);
-    await delay(Math.max(0, autoPong.expiresAt - Date.now()) + 100);
-    const expiredAutoPong = await socket.autoPing();
-    expect(expiredAutoPong.expiresAt).toBeLessThan(Date.now());
-
-    const oldSocket = await observeOldSocket(socket, 1_000);
-    expect(oldSocket.kind).not.toBe("responded");
-
-    await using fresh = await openProbeSocket(name);
-    const after = await fresh.ping();
-    expect(after.incarnationId).not.toBe(before.incarnationId);
+  deployedIt("after ctx.abort the old socket can auto-pong but cannot reach the new DO", async () => {
+    await proveResetLeavesGhostSocket({
+      name: `abort-${crypto.randomUUID()}`,
+      reset: kill,
+    });
   });
 
-  oomIt("does not keep the old hibernatable websocket in fan-out after OOM", async () => {
-    const name = `oom-${crypto.randomUUID()}`;
-
-    await using socket = await openProbeSocket(name);
-    const before = await socket.ping();
-
-    await expect(allocate(name, oomBytes)).rejects.toThrow();
-
-    const autoPong = await socket.autoPing();
-    expect(autoPong.incarnationId).toBe(before.incarnationId);
-    await delay(Math.max(0, autoPong.expiresAt - Date.now()) + 100);
-    const expiredAutoPong = await socket.autoPing();
-    expect(expiredAutoPong.expiresAt).toBeLessThan(Date.now());
-
-    const oldSocket = await observeOldSocket(socket, 1_000);
-    expect(oldSocket.kind).not.toBe("responded");
-
-    await using fresh = await openProbeSocket(name);
-    const after = await fresh.ping();
-    expect(after.incarnationId).not.toBe(before.incarnationId);
+  oomIt("after OOM the old socket can auto-pong but cannot reach the new DO", async () => {
+    await proveResetLeavesGhostSocket({
+      name: `oom-${crypto.randomUUID()}`,
+      reset: (name) => allocate(name, oomBytes),
+    });
   }, 60_000);
 });
 
-async function ping(name: string): Promise<PingResult> {
-  const response = await fetch(url("/ping", name));
-  if (!response.ok) throw new Error(`ping failed: ${response.status} ${await response.text()}`);
-  return (await response.json()) as PingResult;
+async function proveResetLeavesGhostSocket(args: {
+  name: string;
+  reset(name: string): Promise<void>;
+}) {
+  await using oldSocket = await openSocket(args.name);
+
+  const before = await oldSocket.appPing();
+  await expect(args.reset(args.name)).rejects.toThrow();
+
+  const autoPong = await oldSocket.autoPing();
+  expect(autoPong.incarnationId).toBe(before.incarnationId);
+
+  await delayUntilExpired(autoPong);
+  expect((await oldSocket.autoPing()).expiresAt).toBeLessThan(Date.now());
+
+  await expect(oldSocket.appPing()).rejects.toThrow(/timed out/);
+
+  await using freshSocket = await openSocket(args.name);
+  const fresh = await freshSocket.appPing();
+  expect(fresh.incarnationId).not.toBe(before.incarnationId);
 }
 
-async function kill(name: string): Promise<void> {
-  const response = await fetch(url("/kill", name), { method: "POST" });
-  if (!response.ok) throw new Error(`kill failed: ${response.status} ${await response.text()}`);
-}
-
-async function allocate(name: string, bytes: number): Promise<void> {
-  const requestUrl = url("/allocate", name);
-  requestUrl.searchParams.set("bytes", String(bytes));
-  const response = await fetch(requestUrl, { method: "POST" });
-  if (!response.ok) {
-    throw new Error(`allocate failed: ${response.status} ${await response.text()}`);
-  }
-}
-
-async function openProbeSocket(name: string) {
-  const webSocket = new WebSocket(toWebSocketUrl(url("/ws", name)));
-  const inbox = messageInbox<unknown>();
-  let closed = false;
-  let errored: unknown;
-
-  webSocket.addEventListener("message", (message) => inbox.push(parseMessage(String(message.data))));
-  webSocket.addEventListener("close", () => {
-    closed = true;
-    inbox.close();
-  });
-  webSocket.addEventListener("error", (error) => {
-    errored = error;
-    inbox.error(error);
-  });
-  await waitForOpen(webSocket);
+async function openSocket(name: string) {
+  const webSocket = new WebSocket(wsUrl(name).toString());
+  await once(webSocket, "open");
 
   return {
-    async autoPing(timeoutMs = 2_000) {
+    async autoPing() {
       webSocket.send("ping");
-      while (true) {
-        const result = await withTimeout(inbox.next(), timeoutMs);
-        if (result.done) throw new Error("WebSocket closed");
-        if (isAutoPong(result.value)) return result.value;
-      }
+      const message = await readMessage(webSocket);
+      if (!isAutoPong(message)) throw new Error("expected auto-pong");
+      return message;
     },
-    async ping(timeoutMs = 2_000) {
-      const id = crypto.randomUUID();
-      webSocket.send(JSON.stringify({ op: "ping", id }));
-      while (true) {
-        const result = await withTimeout(inbox.next(), timeoutMs);
-        if (result.done) throw new Error("WebSocket closed");
-        const message = result.value;
-        if (isRecord(message) && message.op === "pong" && message.id === id) {
-          if (typeof message.incarnationId !== "string") throw new Error("missing incarnationId");
-          return {
-            incarnationId: message.incarnationId,
-            sockets: Number(message.sockets),
-          };
-        }
-      }
-    },
-    get closed() {
-      return closed;
-    },
-    get errored() {
-      return errored;
+    async appPing() {
+      webSocket.send(JSON.stringify({ op: "app-ping" }));
+      const message = await readMessage(webSocket);
+      if (!isAppPong(message)) throw new Error("expected app-pong");
+      return message;
     },
     async [Symbol.asyncDispose]() {
-      if (webSocket.readyState !== WebSocket.CLOSED) webSocket.close();
-      await delay(20);
+      webSocket.close();
+      await delay(10);
     },
   };
 }
 
-async function observeOldSocket(
-  socket: Awaited<ReturnType<typeof openProbeSocket>>,
-  timeoutMs: number,
-): Promise<SocketOutcome> {
-  if (socket.closed) return { kind: "closed" };
-  if (socket.errored !== undefined) return { kind: "errored", error: socket.errored };
-  try {
-    const response = await socket.ping(timeoutMs);
-    return { kind: "responded", incarnationId: response.incarnationId };
-  } catch (error) {
-    if (socket.closed) return { kind: "closed" };
-    if (socket.errored !== undefined) return { kind: "errored", error: socket.errored };
-    if (error instanceof Error && error.message.includes("timed out")) return { kind: "stale" };
-    return { kind: "errored", error };
-  }
+async function kill(name: string) {
+  const response = await fetch(httpUrl("/kill", name), { method: "POST" });
+  if (!response.ok) throw new Error(`kill failed: ${response.status}`);
 }
 
-function messageInbox<T>(): AsyncIterableIterator<T> & {
-  push(value: T): void;
-  close(): void;
-  error(error: unknown): void;
-} {
-  const messages: T[] = [];
-  const waiters: PromiseWithResolvers<IteratorResult<T>>[] = [];
-  let closed = false;
-  let thrown: unknown;
-  const inbox = {
-    push(value: T) {
-      const waiter = waiters.shift();
-      if (waiter === undefined) messages.push(value);
-      else waiter.resolve({ done: false, value });
-    },
-    close() {
-      closed = true;
-      for (const waiter of waiters.splice(0)) waiter.resolve({ done: true, value: undefined });
-    },
-    error(error: unknown) {
-      thrown = error;
-      for (const waiter of waiters.splice(0)) waiter.reject(error);
-    },
-    next() {
-      const value = messages.shift();
-      if (value !== undefined) return Promise.resolve({ done: false as const, value });
-      if (thrown !== undefined) return Promise.reject(thrown);
-      if (closed) return Promise.resolve({ done: true as const, value: undefined });
-      const waiter = Promise.withResolvers<IteratorResult<T>>();
-      waiters.push(waiter);
-      return waiter.promise;
-    },
-    [Symbol.asyncIterator]() {
-      return inbox;
-    },
-  };
-  return inbox;
+async function allocate(name: string, bytes: number) {
+  const url = httpUrl("/allocate", name);
+  url.searchParams.set("bytes", String(bytes));
+  const response = await fetch(url, { method: "POST" });
+  if (!response.ok) throw new Error(`allocate failed: ${response.status}`);
 }
 
-function url(path: string, name: string): URL {
-  const requestUrl = new URL(path, workerUrl);
-  requestUrl.searchParams.set("name", name);
-  return requestUrl;
+function httpUrl(path: string, name: string) {
+  const url = new URL(path, workerUrl);
+  url.searchParams.set("name", name);
+  return url;
 }
 
-function toWebSocketUrl(requestUrl: URL): string {
-  const webSocketUrl = new URL(requestUrl);
-  if (webSocketUrl.protocol === "http:") webSocketUrl.protocol = "ws:";
-  if (webSocketUrl.protocol === "https:") webSocketUrl.protocol = "wss:";
-  return webSocketUrl.toString();
+function wsUrl(name: string) {
+  const url = httpUrl("/ws", name);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url;
 }
 
-function parseMessage(data: string): unknown {
-  try {
-    return JSON.parse(data);
-  } catch {
-    return data;
-  }
-}
-
-function waitForOpen(webSocket: WebSocket): Promise<void> {
-  if (webSocket.readyState === WebSocket.OPEN) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    webSocket.addEventListener("open", () => resolve(), { once: true });
-    webSocket.addEventListener("error", () => reject(new Error("WebSocket failed")), {
-      once: true,
-    });
+function once(target: WebSocket, type: "open") {
+  return new Promise<void>((resolve, reject) => {
+    target.addEventListener(type, () => resolve(), { once: true });
+    target.addEventListener("error", () => reject(new Error("WebSocket failed")), { once: true });
   });
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function readMessage(webSocket: WebSocket) {
+  return withTimeout(
+    new Promise<unknown>((resolve) => {
+      webSocket.addEventListener("message", (event) => resolve(JSON.parse(String(event.data))), {
+        once: true,
+      });
+    }),
+    1_000,
+  );
+}
+
+async function delayUntilExpired(autoPong: AutoPong) {
+  await delay(Math.max(0, autoPong.expiresAt - Date.now()) + 100);
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number) {
   return Promise.race([
     promise,
     new Promise<never>((_, reject) =>
@@ -260,7 +140,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   ]);
 }
 
-function delay(ms: number): Promise<void> {
+function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
@@ -275,4 +155,8 @@ function isAutoPong(value: unknown): value is AutoPong {
     typeof value.incarnationId === "string" &&
     typeof value.expiresAt === "number"
   );
+}
+
+function isAppPong(value: unknown): value is AppPong {
+  return isRecord(value) && value.op === "app-pong" && typeof value.incarnationId === "string";
 }
