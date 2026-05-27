@@ -258,8 +258,24 @@ export class BenchmarkRunner extends DurableObject {
       ),
     );
 
-    // Give every subscriber DO a chance to attach before publishers start appending.
-    await sleep(250);
+    if (config.streamKind === "volatile") {
+      const expectedSubscribers = config.subscribers + config.slowSubscribers;
+      const attachDeadline = Date.now() + 5_000;
+      while (Date.now() < attachDeadline) {
+        const debug = await stream.debug();
+        if (debug.volatileSubscribers.length >= expectedSubscribers) break;
+        await sleep(25);
+      }
+      const debug = await stream.debug();
+      if (debug.volatileSubscribers.length < expectedSubscribers) {
+        throw new Error(
+          `expected ${expectedSubscribers} volatile subscribers, saw ${debug.volatileSubscribers.length}`,
+        );
+      }
+    } else {
+      // Durable streams can replay missed history, but this still avoids measuring connection setup.
+      await sleep(250);
+    }
 
     const publishStartedAt = Date.now();
     const publishers = Array.from({ length: config.publishers }, (_, publisher) =>
@@ -444,6 +460,12 @@ export class BenchmarkRunner extends DurableObject {
     const selfEchoLatencyByFrame = new Map<string, number>();
     const appendStartToSelfEchoLatencyByFrame = new Map<string, number>();
     const selfEchoAtByFrame = new Map<string, number>();
+    let markSelfEchoReady: () => void = () => {};
+    const selfEchoReady = args.selfEcho
+      ? new Promise<void>((resolve) => {
+          markSelfEchoReady = resolve;
+        })
+      : Promise.resolve();
     const selfEcho =
       args.selfEcho
         ? this.collectAudioSelfEcho({
@@ -453,10 +475,12 @@ export class BenchmarkRunner extends DurableObject {
             selfEchoLatencyByFrame,
             appendStartToSelfEchoLatencyByFrame,
             selfEchoAtByFrame,
+            markReady: markSelfEchoReady,
           })
         : Promise.resolve();
 
     try {
+      await selfEchoReady;
       const startedAt = Date.now();
       for (let frame = 1; frame <= args.framesPerPublisher; frame += 1) {
         const frameId = `p${args.publisher}-f${frame}`;
@@ -526,9 +550,11 @@ export class BenchmarkRunner extends DurableObject {
     selfEchoLatencyByFrame: Map<string, number>;
     appendStartToSelfEchoLatencyByFrame: Map<string, number>;
     selfEchoAtByFrame: Map<string, number>;
+    markReady: () => void;
     publisher: number;
   }) {
     const reader = await objectStreamReader(args.rpc, args.streamKind);
+    args.markReady();
     try {
       for (let delivered = 0; delivered < args.publishers * args.framesPerPublisher; delivered += 1) {
         const result = await withTimeout(reader.read(), args.timeoutMs);

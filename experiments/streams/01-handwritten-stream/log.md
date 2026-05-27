@@ -13,7 +13,15 @@
 - Extended `/benchmark/audio-chaos` with `stream-kind=durable|volatile`. The volatile path keeps the
   same BenchmarkRunner DOs, Stream DO, Cap'n Web WebSocket connection, event shape, and
   `ReadableStream` chunking, so it isolates storage/write bookkeeping from fan-out/transport cost.
-- Verification in progress.
+- Initial deployed sanity on version `3e6af7f0-f562-4720-89d1-b8ae278ca4f2`:
+  - 1 publisher / 0 extra subscribers: durable best-effort same-clock read-your-own p95 `12 ms`;
+    volatile same-clock read-your-own p95 `4 ms`.
+  - 10 publishers / 0 extra subscribers: durable best-effort same-clock read-your-own p95 `94 ms`.
+- The first volatile 10-publisher run failed with Worker 1101 after timing out. Diagnosis: volatile
+  has no replay, so the publisher self-echo stream can miss early events if the append loop starts
+  before its `streamVolatile()` reader is attached. Durable mode masked that benchmark race via
+  replay. Updated the benchmark to wait for the self-echo reader and for volatile subscriber counts
+  before publishing.
 
 ## 2026-05-27 06:58 UTC+1
 
