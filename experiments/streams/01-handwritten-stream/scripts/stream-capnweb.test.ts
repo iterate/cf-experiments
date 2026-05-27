@@ -1044,6 +1044,23 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("best-effort object thresholds are validated but do not schedule checkpoints", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await fixture.rpc.append({
+      event: { type: "test.durability.best-effort-threshold", payload: { n: 1 } },
+      durability: { mode: "best-effort", checkpointEveryUnconfirmedAppends: 1 },
+    });
+
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 1,
+      checkpointInProgress: false,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("best-effort appends fan out while write debt is still unconfirmed", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const event: StreamEventInput = {

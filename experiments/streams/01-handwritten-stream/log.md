@@ -5,6 +5,17 @@
 
 # Notes
 
+## 2026-05-27 06:52 UTC+1
+
+- Added "best-effort object thresholds are validated but do not schedule checkpoints". Runtime
+  callers can send `{ mode: "best-effort", checkpointEveryUnconfirmedAppends: 1 }`; the positive
+  threshold is valid input but must not silently turn best-effort into checkpointed mode.
+- Tied the branch comment in `stream.ts` to the new test.
+- Verification: focused local test passed. Mutation check: temporarily changing the scheduling
+  branch from `durability.mode === "checkpointed"` to `durability.mode !== "confirmed"` made the
+  test fail with `checkpointStartedCount: 1` and `unconfirmedWriteCount: 0`, proving the test catches
+  accidental checkpoint scheduling in best-effort mode. Restored the branch.
+
 ## 2026-05-27 06:46 UTC+1
 
 - Extended "rejects malformed source processor fields at the append envelope boundary" to check

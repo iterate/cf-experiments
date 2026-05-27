@@ -218,6 +218,14 @@ export class Stream extends DurableObject {
      * checkpointed durability tests stop seeing the intended mode split.
      */
     this.#unconfirmedWriteCount += 1;
+    /**
+     * A checkpoint threshold is only meaningful when the selected mode is
+     * checkpointed. We still validate positive thresholds on best-effort object
+     * options so runtime callers cannot hide malformed input, but that option
+     * must not change the mode's semantics. See "best-effort object thresholds
+     * are validated but do not schedule checkpoints" in
+     * `scripts/stream-capnweb.test.ts`.
+     */
     if (durability.mode === "checkpointed") {
       this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedAppends);
     }
