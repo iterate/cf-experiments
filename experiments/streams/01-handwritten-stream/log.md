@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 05:11 UTC+1
+
+- Added "rejects unknown source object fields instead of dropping them" as a separate regression
+  from the nested `source.processor` strictness check. This pins the outer `source` envelope itself:
+  `source.kind` must not be silently stripped into an empty source object.
+- Mutation check: temporarily relaxing the outer `source` object back to a non-strict Zod object made
+  the new test fail; the malformed call again surfaced through Cap'n Web as `'' is not a function.`
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`,
+  local `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 56 tests. Deployed version `e7e82b7e-faa4-41e1-951b-312a6f06dc2c`.
+
 ## 2026-05-27 05:06 UTC+1
 
 - Added "rejects unknown source envelope fields instead of dropping them". Top-level event parsing
