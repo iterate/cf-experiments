@@ -5,6 +5,29 @@
 
 # Notes
 
+## 2026-05-27 03:29 UTC+1
+
+- Added "documents that capnweb reader cancel does not release the server subscriber". The initial
+  stricter test expected `ReadableStreamDefaultReader.cancel()` on the Cap'n Web client to trigger
+  the DO-side `ReadableStream.cancel()` hook while the WebSocket session stayed open.
+- Red result: after `streamReader.cancel()` and a 100 ms wait, `debug()` still showed one subscriber.
+  The same result held after one event had already flowed through the stream, so this is not just an
+  idle-pipe timing issue.
+- Actual observed cleanup boundary with capnweb@0.8.0: the canceled reader remains registered until
+  either session disposal releases the session-owned subscriber set, or a later write tears down the
+  Cap'n Web pipe and the DO stream is removed. The passing test now pins that limitation so the
+  design notes do not overclaim remote reader cancellation semantics.
+- Mutation check: temporarily disabling `#enqueueToSubscriber()`'s catch-path removal still made the
+  direct errored-controller test fail, so broken-controller cleanup remains pinned there; the remote
+  cancel test is specifically about Cap'n Web pipe/session behavior, not that catch branch.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 51 tests. Deployed version `fe7911aa-70eb-4b42-b359-f57e348f15f5`.
+- Root `pnpm typecheck` was not usable as evidence in this run because unrelated package
+  `experiments/04-capnweb` failed to resolve its `capnweb`/`vitest` dependencies; the
+  `01-handwritten-stream` package typecheck passed.
+
 ## 2026-05-27 03:23 UTC+1
 
 - Added "uses stream checkpoint threshold for checkpointed string overrides". Object-form

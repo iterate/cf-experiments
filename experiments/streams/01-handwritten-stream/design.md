@@ -73,7 +73,7 @@ passes, but that a competing implementation choice should fail a named probe.
 | Keep session-owned stream internals off the Cap'n Web surface | A client could call `streamForSession()` directly and create a subscriber that session disposal does not own | "does not expose session-owned stream internals over capnweb" |
 | Do not await per-subscriber delivery in `#broadcast()` | One unread subscriber could slow active subscribers | "delivers to an active subscriber while another subscriber does not read" |
 | Remove a subscriber when its stream controller rejects `enqueue()` | One broken stream sink could remain registered and be retried on every append | "removes subscribers whose stream controller rejects enqueue" |
-| Release subscribers on both stream cancel and Cap'n Web session disposal | Dead sessions, including sessions that opened more than one stream, could stay in fan-out forever | "removes locally cancelled streams from live fan-out", "removes cancelled subscribers from live fan-out", and "removes every stream opened by a disposed capnweb session" |
+| Release subscribers on local stream cancel and Cap'n Web session disposal | Dead sessions, including sessions that opened more than one stream, could stay in fan-out forever. In capnweb@0.8.0, client `ReadableStreamDefaultReader.cancel()` alone is not a prompt server cleanup boundary; the subscriber remains until session disposal or later pipe teardown. | "removes locally cancelled streams from live fan-out", "removes cancelled subscribers from live fan-out", "removes every stream opened by a disposed capnweb session", and "documents that capnweb reader cancel does not release the server subscriber" |
 
 ## Checkpoints
 

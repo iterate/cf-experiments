@@ -606,6 +606,46 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("documents that capnweb reader cancel does not release the server subscriber", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+
+    {
+      await using fixture = await withStream({ path });
+
+      const readable = await fixture.rpc.stream();
+      // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+      const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+      expect(await fixture.rpc.debug()).toMatchObject({
+        subscribers: [{ enqueuedEvents: 0 }],
+      });
+
+      await fixture.rpc.append({
+        event: { type: "test.stream.remote-cancel-before-cancel" },
+        durability: "best-effort",
+      });
+      await withTimeout(streamReader.read(), 500);
+      await streamReader.cancel("client no longer wants this stream");
+      await sleep(100);
+
+      expect(await fixture.rpc.debug()).toMatchObject({
+        subscribers: [{ enqueuedEvents: 1 }],
+      });
+
+      await fixture.rpc.append({
+        event: { type: "test.stream.remote-cancel-after-cancel" },
+        durability: "best-effort",
+      });
+      expect(await fixture.rpc.debug()).toMatchObject({
+        subscribers: [],
+      });
+    }
+
+    await using probe = await withStream({ path });
+    expect(await probe.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("removes every stream opened by a disposed capnweb session", async () => {
     const path = `stream-${crypto.randomUUID()}`;
 

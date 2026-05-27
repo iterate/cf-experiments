@@ -396,12 +396,15 @@ export class Stream extends DurableObject {
            * broadcasts keep trying to enqueue into a dead stream and `debug()`
            * reports leaked subscribers.
            *
-           * Cap'n Web session teardown currently reaches this experiment through
-           * `StreamRpcTarget[Symbol.dispose]()` rather than a prompt client-side
-           * `ReadableStream.cancel()`, so this local Web Streams cancel hook and
-           * the session disposer both remove from the same sets. See "removes
-           * locally cancelled streams from live fan-out" and "removes cancelled
-           * subscribers from live fan-out" in `scripts/stream-capnweb.test.ts`.
+           * Cap'n Web session teardown reaches this experiment through
+           * `StreamRpcTarget[Symbol.dispose]()`. A client-side
+           * `ReadableStreamDefaultReader.cancel()` does not promptly invoke this
+           * hook while the WebSocket session stays open; under capnweb@0.8.0 the
+           * subscriber remains until the session is disposed or the pipe is torn
+           * down after a later write. See "removes locally cancelled streams from
+           * live fan-out", "removes cancelled subscribers from live fan-out",
+           * and "documents that capnweb reader cancel does not release the
+           * server subscriber" in `scripts/stream-capnweb.test.ts`.
            *
            * Replay-start errors must also remove the subscriber. Otherwise a
            * stream that failed before subscription completed would remain in
