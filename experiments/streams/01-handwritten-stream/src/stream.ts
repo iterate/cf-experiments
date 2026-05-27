@@ -513,6 +513,11 @@ export class Stream extends DurableObject {
      * Unknown object fields must fail explicitly too, otherwise typoed runtime
      * options like `checkpointEveryUnconfirmedAppend` are ignored and the call
      * falls back to the stream's default threshold after allocating an offset.
+     * String-form `"checkpointed"` overrides also use the persisted stream
+     * checkpoint threshold; otherwise the convenient mode-only override would
+     * silently checkpoint at a different cadence than the stream was configured
+     * for. See "uses stream checkpoint threshold for checkpointed string
+     * overrides".
      * The default/override/settings/invalid-mode/invalid-threshold tests,
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
      * object durability", "rejects non-integer checkpoint thresholds before

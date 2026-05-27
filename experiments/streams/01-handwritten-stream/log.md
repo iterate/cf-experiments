@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 03:23 UTC+1
+
+- Added "uses stream checkpoint threshold for checkpointed string overrides". Object-form
+  checkpointed appends can pass a per-call threshold, but string-form `"checkpointed"` intentionally
+  means "use checkpointed mode with this stream's configured checkpoint cadence".
+- Mutation check: temporarily making string-form durability use the hardcoded default threshold made
+  the new test fail. After two appends with stream threshold 2, no checkpoint had started and
+  `unconfirmedWriteCount` stayed at 2.
+- Verification: targeted local Vitest, root `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 50 tests. Deployed version `a3e941dd-4064-4976-ad61-9a985b0d2664`.
+
 ## 2026-05-27 03:19 UTC+1
 
 - Added "rejects non-integer checkpoint thresholds before allocating an offset". The existing invalid
