@@ -5,6 +5,22 @@
 
 # Notes
 
+## 2026-05-27 04:53 UTC+1
+
+- Added "rejects non-string object durability modes before falling back to stream settings". Runtime
+  callers can send `{ "mode": null }`, which TypeScript callers would not compile.
+- Red result before the fix: object-form `mode: null` used the nullish fallback to persisted stream
+  settings, so the call allocated/reached later behavior and surfaced through Cap'n Web as
+  `'' is not a function.` instead of a stream-level validation error.
+- Fixed `#resolveAppendDurability()` so object-form durability validates the present `mode` value
+  directly; only omitted durability uses persisted default mode. `#validateDurabilityMode()` now
+  accepts `unknown` at the boundary.
+- Mutation check: temporarily restoring the old nullish fallback made the new test fail again.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 53 tests. Deployed version `b021d8be-8a5a-47fa-987b-bcce913574f7`.
+
 ## 2026-05-27 03:42 UTC+1
 
 - Ran deployed DO-side `/benchmark/audio-chaos` on version

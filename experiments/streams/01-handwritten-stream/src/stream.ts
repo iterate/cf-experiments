@@ -507,7 +507,9 @@ export class Stream extends DurableObject {
     const mode =
       typeof durability === "string"
         ? durability
-        : (durability?.mode ?? this.#settings.defaultAppendDurabilityMode);
+        : typeof durability === "object"
+          ? durability.mode
+          : this.#settings.defaultAppendDurabilityMode;
     /**
      * Per-call durability wins over persisted stream settings, but object-form
      * modes and checkpoint thresholds still need validation before any write is
@@ -517,6 +519,8 @@ export class Stream extends DurableObject {
      * instead of falling through to an incidental property-access TypeError.
      * Runtime object durability values without `mode` must also fail explicitly
      * instead of silently falling back to persisted stream settings.
+     * Runtime object durability values with a present but non-string `mode`
+     * must also fail instead of being treated as omitted.
      * Unknown object fields must fail explicitly too, otherwise typoed runtime
      * options like `checkpointEveryUnconfirmedAppend` are ignored and the call
      * falls back to the stream's default threshold after allocating an offset.
@@ -530,10 +534,11 @@ export class Stream extends DurableObject {
      * object durability", "rejects non-integer checkpoint thresholds before
      * allocating an offset", "rejects null per-call durability before
      * allocating an offset", "rejects object durability without a mode before
-     * allocating an offset", "rejects unknown durability option fields before
-     * allocating an offset", and "rejects primitive per-call durability before
-     * falling back to stream settings" in `scripts/stream-capnweb.test.ts`
-     * cover each branch here.
+     * allocating an offset", "rejects non-string object durability modes before
+     * falling back to stream settings", "rejects unknown durability option
+     * fields before allocating an offset", and "rejects primitive per-call
+     * durability before falling back to stream settings" in
+     * `scripts/stream-capnweb.test.ts` cover each branch here.
      */
     this.#validateDurabilityMode(mode);
     return {
@@ -642,7 +647,7 @@ export class Stream extends DurableObject {
     return next;
   }
 
-  #validateDurabilityMode(mode: string): asserts mode is AppendDurabilityMode {
+  #validateDurabilityMode(mode: unknown): asserts mode is AppendDurabilityMode {
     if (mode !== "confirmed" && mode !== "best-effort" && mode !== "checkpointed") {
       throw new Error(`Unknown append durability mode: ${mode}`);
     }

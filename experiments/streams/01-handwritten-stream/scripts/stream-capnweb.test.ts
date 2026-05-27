@@ -1318,6 +1318,26 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects non-string object durability modes before falling back to stream settings", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+    await fixture.rpc.patchSettings({ defaultAppendDurabilityMode: "checkpointed" });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.non-string-object-mode" },
+        durability: JSON.parse('{"mode":null}'),
+      }),
+    ).rejects.toThrow(/Unknown append durability mode/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects unknown durability option fields before allocating an offset", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
