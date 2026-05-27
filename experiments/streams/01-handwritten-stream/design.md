@@ -70,7 +70,7 @@ passes, but that a competing implementation choice should fail a named probe.
 | Model subscriptions as returned `ReadableStream`, not `onEvent()` callback RPC | A pure subscriber would originate per-event return traffic/acks | "pure subscribers do not originate per-event websocket traffic" |
 | Do not await per-subscriber delivery in `#broadcast()` | One unread subscriber could slow active subscribers | "delivers to an active subscriber while another subscriber does not read" |
 | Remove a subscriber when its stream controller rejects `enqueue()` | One broken stream sink could remain registered and be retried on every append | "removes subscribers whose stream controller rejects enqueue" |
-| Release subscribers on both stream cancel and Cap'n Web session disposal | Dead sessions could stay in fan-out forever | "removes locally cancelled streams from live fan-out" and "removes cancelled subscribers from live fan-out" |
+| Release subscribers on both stream cancel and Cap'n Web session disposal | Dead sessions, including sessions that opened more than one stream, could stay in fan-out forever | "removes locally cancelled streams from live fan-out", "removes cancelled subscribers from live fan-out", and "removes every stream opened by a disposed capnweb session" |
 
 ## Checkpoints
 
@@ -79,7 +79,12 @@ Checkpointed mode is a throttle for best-effort writes, not confirmed append. On
 `storage.sync()` inside `blockConcurrencyWhile()`. That broad gate is intentional for checkpointed
 mode: later delivered events wait while the checkpoint catches up.
 
-The append that triggers a checkpoint can still resolve before the checkpoint completes.
+The append handler that triggers a checkpoint does not await that checkpoint internally; the
+`appendBatchDebug()` probe can capture `checkpointInProgress: true` before completion. However,
+because the checkpoint runs under `blockConcurrencyWhile()`, later delivered RPC result pulls can be
+gated by the checkpoint. The stronger user-visible split is that checkpointed live stream delivery
+happens before the delayed checkpoint barrier, while confirmed delivery waits for its explicit
+`storage.sync()`.
 
 ## Backpressure
 

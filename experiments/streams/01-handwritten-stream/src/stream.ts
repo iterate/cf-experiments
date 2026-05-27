@@ -332,13 +332,17 @@ export class Stream extends DurableObject {
          * uses the same enqueue/error-cleanup path as live delivery. The
          * multi-subscriber, replay/live, and enqueue-error tests in
          * `scripts/stream-capnweb.test.ts` fail if those properties change.
+         * A single Cap'n Web session can also open more than one stream; each
+         * subscriber must be tracked in that session-owned set so disposing the
+         * WebSocket releases all of them. See "removes every stream opened by a
+         * disposed capnweb session".
          *
          * `maxOffset` is also a contiguity claim: every offset from 1 through
          * that boundary must have an `event:${offset}` value. Silently skipping
          * a missing key would turn storage corruption into a sparse stream. See
          * "fails replay loudly when committed history has a missing event key"
          * in `scripts/stream-capnweb.test.ts`.
-         */
+        */
         this.#streamSubscribers.add(subscriber);
         sessionSubscribers?.add(subscriber);
 
@@ -491,8 +495,11 @@ export class Stream extends DurableObject {
        * explicit durability barrier has caught up.
        *
        * The call is intentionally fire-and-forget from `append()`. Awaiting it
-       * would turn the append that fills the window into a confirmed append,
-       * hiding the mode difference this experiment is measuring. See
+       * inside this method would make the handler wait until the checkpoint
+       * completes, hiding the mode difference this experiment is measuring. The
+       * checkpoint can still affect later delivered RPC result pulls through the
+       * broad DO gate; the sharper stream contract is that live event fan-out
+       * happens before the checkpoint barrier. See
        * "checkpointed appendBatch returns after scheduling but before awaiting
        * the checkpoint", "checkpointed append schedules a delayed checkpoint
        * that gates later RPC", and "checkpointed passes

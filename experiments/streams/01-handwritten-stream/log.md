@@ -5,6 +5,28 @@
 
 # Notes
 
+## 2026-05-27 00:50 UTC+1
+
+- Added "removes every stream opened by a disposed capnweb session". A single Cap'n Web WebSocket can
+  call `stream()` more than once; all resulting subscribers must be owned by that session and released
+  when the session disposes.
+- Mutation check: temporarily removing `sessionSubscribers?.add(subscriber)` made the new test fail
+  with both subscribers still present after disconnect.
+- While rerunning deployed tests, "checkpointed passes the live-before-durability probe that
+  confirmed intentionally fails" failed once because its checkpointed half used a 100 ms deployed
+  delivery timeout without a delayed checkpoint. Tightened the probe by setting
+  `debugCheckpointSyncDelayMs: 2000` and asserting live stream delivery within 1000 ms.
+- Attempted to also assert the checkpointed append RPC acknowledgement within that same 1000 ms
+  window. That failed locally: even when the append result is observed immediately, Cap'n Web result
+  delivery can still wait behind the `blockConcurrencyWhile()` checkpoint gate. The implementation
+  still does not `await` the checkpoint inside `append()` (covered by `appendBatchDebug()`), but the
+  external append result pull is not the right proof of live-before-checkpoint behavior. The stream
+  event delivery is.
+- Verification after the test/comment update: root `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 36 tests. Deployed version `048a0bfe-ecc8-4518-a1d3-2e5b8a338c19`.
+
 ## 2026-05-26 23:44 UTC+1
 
 - Added explicit DO-side audio benchmark delivery coverage fields:

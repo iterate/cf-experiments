@@ -458,6 +458,25 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("removes every stream opened by a disposed capnweb session", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+
+    {
+      await using reader = await withStream({ path });
+      await reader.rpc.stream();
+      await reader.rpc.stream();
+
+      expect(await reader.rpc.debug()).toMatchObject({
+        subscribers: [{ enqueuedEvents: 0 }, { enqueuedEvents: 0 }],
+      });
+    }
+
+    await using probe = await withStream({ path });
+    expect(await probe.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("removes locally cancelled streams from live fan-out", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
@@ -902,7 +921,7 @@ describe("handwritten stream capnweb", () => {
 
     const checkpointedPath = `stream-${crypto.randomUUID()}`;
     await using checkpointedWriter = await withStream({ path: checkpointedPath });
-    await checkpointedWriter.rpc.patchSettings({ debugConfirmedSyncDelayMs: 300 });
+    await checkpointedWriter.rpc.patchSettings({ debugCheckpointSyncDelayMs: 2_000 });
     await using checkpointedReader = await withStream({ path: checkpointedPath });
     const checkpointedReadable = await checkpointedReader.rpc.stream();
     const checkpointedStreamReader = (checkpointedReadable as unknown as ReadableStream<StreamEvent>)
@@ -913,7 +932,7 @@ describe("handwritten stream capnweb", () => {
       durability: { mode: "checkpointed", checkpointEveryUnconfirmedAppends: 1 },
     });
     const checkpointedLiveRead = checkpointedStreamReader.read();
-    const checkpointedDelivered = await withTimeout(checkpointedLiveRead, 100);
+    const checkpointedDelivered = await withTimeout(checkpointedLiveRead, 1_000);
     expect(checkpointedDelivered.done).toBe(false);
     expect(checkpointedDelivered.value).toMatchObject({
       type: "test.durability.checkpointed-live-before-sync",
