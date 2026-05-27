@@ -5,6 +5,21 @@
 
 # Notes
 
+## 2026-05-27 02:39 UTC+1
+
+- Repeated the DO-side full audio workload three times in best-effort mode after deploying
+  `91cb5c60-9586-4b8a-9e72-ce074d77d2b9`:
+  10 publishers, 36 active subscribers, 50 frames/publisher, 20 ms pacing, 24 kHz mono PCM16,
+  960 raw bytes / 1280 base64 chars per frame, `measureAppendAck=true`.
+- All three runs fully delivered all 500 frames to all 36 subscribers:
+  - run 1: all-subs p95 1674 ms, self-echo p95 1148 ms, append-ack p95 780 ms.
+  - run 2: all-subs p95 1472 ms, self-echo p95 1155 ms, append-ack p95 421 ms.
+  - run 3: all-subs p95 1406 ms, self-echo p95 1098 ms, append-ack p95 691 ms.
+- This is stronger evidence that the current single Stream DO design is correct but not
+  "hunky-dory" for the target audio-call latency shape. Running publishers/subscribers from DOs
+  removes local WiFi from the timing path, and best-effort mode removes intentional durability waits
+  from live fan-out, yet p95 delivery is still well over 1 second under 10x36 fan-out.
+
 ## 2026-05-27 02:37 UTC+1
 
 - Added "rejects primitive per-call durability before falling back to stream settings". Runtime
