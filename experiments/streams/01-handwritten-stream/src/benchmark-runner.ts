@@ -53,6 +53,7 @@ export type RunAudioChaosArgs = {
   durability?: AppendDurabilityMode;
   checkpointEveryUnconfirmedAppends?: number;
   measureAppendAck?: boolean;
+  measureSelfEcho?: boolean;
 };
 
 type AudioChaosConfig = {
@@ -72,6 +73,7 @@ type AudioChaosConfig = {
   durability: AppendDurabilityMode;
   checkpointEveryUnconfirmedAppends: number;
   measureAppendAck: boolean;
+  measureSelfEcho: boolean;
 };
 
 type AudioSample = {
@@ -111,6 +113,7 @@ export type AudioChaosResult = {
   totalEvents: number;
   durability: AppendDurabilityMode;
   measureAppendAck: boolean;
+  measureSelfEcho: boolean;
   checkpointEveryUnconfirmedAppends?: number;
   audio: {
     frameMs: number;
@@ -284,7 +287,7 @@ export class BenchmarkRunner extends DurableObject {
           ...config,
           audio,
           publisher,
-          selfEcho: publisher === 0,
+          selfEcho: config.measureSelfEcho && publisher === 0,
         },
       ),
     );
@@ -337,6 +340,7 @@ export class BenchmarkRunner extends DurableObject {
       totalEvents,
       durability: config.durability,
       measureAppendAck: config.measureAppendAck,
+      measureSelfEcho: config.measureSelfEcho,
       ...(config.durability === "checkpointed"
         ? { checkpointEveryUnconfirmedAppends: config.checkpointEveryUnconfirmedAppends }
         : {}),
@@ -612,6 +616,7 @@ function normalizeAudioChaosConfig(args: RunAudioChaosArgs): AudioChaosConfig {
     durability: args.durability ?? "best-effort",
     checkpointEveryUnconfirmedAppends: args.checkpointEveryUnconfirmedAppends ?? 100,
     measureAppendAck: args.measureAppendAck ?? false,
+    measureSelfEcho: args.measureSelfEcho ?? true,
   };
 }
 

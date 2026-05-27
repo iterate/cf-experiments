@@ -25,6 +25,7 @@ export default {
         durability: durabilityParam(url),
         checkpointEveryUnconfirmedAppends: positiveIntParam(url, "checkpoint-every"),
         measureAppendAck: url.searchParams.get("measure-append-ack") === "true",
+        measureSelfEcho: booleanParam(url, "measure-self-echo"),
       });
       return Response.json(result);
     }
@@ -59,6 +60,14 @@ function streamKindParam(url: URL) {
     throw new Error("stream-kind must be durable or volatile");
   }
   return raw;
+}
+
+function booleanParam(url: URL, name: string) {
+  const raw = url.searchParams.get(name);
+  if (raw === null) return undefined;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new Error(`${name} must be true or false`);
 }
 
 function durabilityParam(url: URL) {
