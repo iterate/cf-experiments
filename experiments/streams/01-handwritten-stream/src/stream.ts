@@ -81,8 +81,9 @@ export class Stream extends DurableObject {
      * durability resolution so malformed inputs do not produce incidental
      * property-access errors, consult idempotency keys, or allocate offsets. See
      * "rejects malformed append args before reading event or durability" and
-     * "rejects malformed append events before idempotency or durability handling"
-     * in `scripts/stream-capnweb.test.ts`.
+     * "rejects malformed append events before idempotency or durability handling",
+     * plus "rejects malformed idempotent retries before reading the idempotency
+     * index", in `scripts/stream-capnweb.test.ts`.
      */
     if (args === null || typeof args !== "object" || !("event" in args)) {
       throw new Error("append args must be an object with event");

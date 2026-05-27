@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 02:53 UTC+1
+
+- Added "rejects malformed idempotent retries before reading the idempotency index". This pins the
+  ordering decision introduced by append-boundary validation: malformed retry events should reject
+  as malformed input even if they carry an idempotency key that already exists.
+- Mutation check: temporarily adding a bad fallback that looked up `idempotency:{key}` after a failed
+  event parse made the new test fail. The failure came back as a Cap'n Web-shaped `'' is not a
+  function.` error rather than the expected stream validation error, which is still the point: once a
+  malformed event reaches idempotency/transport-shaped handling, the boundary contract is lost.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 42 tests. Deployed version `4d7a9fa4-5437-440f-8a26-57e877961050`.
+
 ## 2026-05-27 02:49 UTC+1
 
 - Added "rejects malformed append args before reading event or durability". Runtime Cap'n Web

@@ -133,6 +133,34 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects malformed idempotent retries before reading the idempotency index", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const idempotencyKey = crypto.randomUUID();
+    await using fixture = await withStream({ path });
+
+    await fixture.rpc.append({
+      event: { type: "test.append.malformed-idempotent-retry", idempotencyKey },
+      durability: "best-effort",
+    });
+
+    await expect(
+      fixture.rpc.append({
+        event: {
+          type: JSON.parse("123"),
+          idempotencyKey,
+        },
+        durability: JSON.parse('"not-a-mode"'),
+      }),
+    ).rejects.toThrow(/append event must be a valid StreamEventInput/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(1);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 1,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("rejects malformed append args before reading event or durability", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
