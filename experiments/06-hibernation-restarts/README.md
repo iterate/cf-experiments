@@ -3,45 +3,82 @@
 Tiny deployed-only repro for hibernatable Durable Object WebSockets after the
 object is restarted.
 
-## What we're trying to find out
+## Question
 
-Can a stream processor safely hold a hibernatable WebSocket connection to a
-Durable Object?
+Is the observed behavior intended, or is it a platform bug?
 
-The specific scary case is:
+The minimal scenario is:
 
-1. Client opens a hibernatable WebSocket with `ctx.acceptWebSocket(server)`.
-2. Durable Object crashes or is reset.
-3. Client-side WebSocket still looks open.
-4. The old socket no longer reaches the restarted Durable Object.
+1. A client opens a hibernatable WebSocket to a Durable Object.
+2. The Durable Object accepts it with `ctx.acceptWebSocket(server)`.
+3. The Durable Object is later restarted, either by normal hibernation or by a
+   reset such as `ctx.abort()` / memory pressure.
+4. The client sends messages on the original WebSocket.
 
-That is different from normal hibernation. During normal hibernation, a real
-message from the client should wake the Durable Object, rerun the constructor,
-and deliver the message to `webSocketMessage()`.
+For normal hibernation, the expected behavior is clear: the client WebSocket
+continues to work. A real message from the client wakes the Durable Object, the
+constructor reruns, and the message is delivered to `webSocketMessage()`.
 
-## What we observed
+This experiment asks whether reset/crash recovery has the same client-visible
+behavior.
 
-On the deployed worker, normal idle hibernation behaves as expected:
+## Expected Behavior
 
-- The client WebSocket stays open across an idle wait.
-- A real application message wakes the Durable Object.
-- The response contains a new `incarnationId`, proving the constructor reran.
+The best behavior would be the same as normal hibernation:
 
-After `ctx.abort()` and after an OOM-style memory reset, the old client socket is
-different:
+- the client WebSocket remains open;
+- after the Durable Object boots again, the existing WebSocket is attached to
+  the new Durable Object incarnation;
+- real messages from the client reach `webSocketMessage()`;
+- server messages can still be sent to that client.
 
-- A literal `"ping"` can still receive the hibernation auto-response.
-- A real application message times out and does not reach the restarted Durable
-  Object.
-- A fresh WebSocket connection reaches a new `incarnationId`.
+That would make restart recovery and hibernation equivalent from the client's
+point of view.
 
-So a plain `setWebSocketAutoResponse("ping", "pong")` is not a correctness
-heartbeat. It can prove that Cloudflare still has some socket state, but it does
-not prove that the socket is attached to the current Durable Object incarnation.
+## Observed Behavior
 
-## Minimal mitigation
+The deployed worker does behave correctly for normal idle hibernation:
 
-Make the auto-response a short-lived lease:
+- the client WebSocket stays open across the idle wait;
+- a real application message wakes the Durable Object;
+- the response contains a new `incarnationId`, proving the constructor reran.
+
+After `ctx.abort()` and after an OOM-style memory reset, we observed a worse
+state:
+
+- the client WebSocket still appears open;
+- a literal `"ping"` can still receive the configured hibernation
+  auto-response;
+- a real application message on the same WebSocket times out and does not reach
+  the restarted Durable Object;
+- a fresh WebSocket connection reaches a new `incarnationId`.
+
+That means the client appears to have no passive way to learn that the
+connection is no longer useful. It can only discover the problem by sending a
+real application message through the WebSocket and checking whether the Durable
+Object answers. That seems to undermine a major purpose of hibernatable
+WebSockets: the client cannot rely on the open WebSocket or the auto-response to
+prove that the Durable Object can still send it application events.
+
+## Better Behaviors
+
+If the observed behavior is not the intended one, the ideal behavior would be:
+
+- after reset, the restarted Durable Object picks up the waiting client
+  WebSocket, just like it does after normal hibernation.
+
+A less ideal but still better behavior would be:
+
+- after reset, the platform closes the client WebSocket, so the client can
+  reconnect instead of silently waiting on a dead connection.
+
+The observed behavior is worse than both: the WebSocket can stay open-looking
+and can still receive auto-responses, while real application messages no longer
+reach the Durable Object.
+
+## Workaround Found
+
+The only workaround we found is to make the auto-response a short-lived lease:
 
 ```ts
 this.ctx.setWebSocketAutoResponse(
@@ -52,18 +89,20 @@ this.ctx.setWebSocketAutoResponse(
 );
 ```
 
-The client can use cheap literal `"ping"` messages while the lease is fresh.
-When `expiresAt` is in the past, the client must send a real application message
-to renew the lease.
+This gives bounded reset detection without keeping the Durable Object awake all
+the time:
 
-- If the Durable Object merely hibernated, the real message wakes it and gets a
-  fresh response.
-- If the old socket is a post-crash ghost, the real message times out and the
-  client reconnects.
+- while the lease is fresh, the client can use cheap literal `"ping"` messages
+  that do not wake the Durable Object;
+- once the lease is expired, the client must send a real application message;
+- if the Durable Object merely hibernated, that real message wakes it and gets a
+  fresh response;
+- if the WebSocket is in the observed post-reset state, the real message times
+  out and the client reconnects.
 
-This gives bounded crash detection without keeping the Durable Object awake all
-the time. The lease needs to be longer than the hibernation idle threshold; this
-experiment uses `1s` only to make the test fast.
+It is not clear whether this workaround should be necessary. The lease needs to
+be longer than the hibernation idle threshold; this experiment uses `1s` only to
+make the test fast.
 
 ## How to run
 
