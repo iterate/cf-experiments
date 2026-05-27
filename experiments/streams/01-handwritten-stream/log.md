@@ -5,6 +5,22 @@
 
 # Notes
 
+## 2026-05-27 05:03 UTC+1
+
+- Ran deployed low-load DO-side `/benchmark/audio-chaos` on version
+  `456baa80-828e-4d0d-8ccc-35ebb32525fe`, with one publisher, one active subscriber, 50 frames,
+  20 ms pacing, and append-ack measurement.
+- Best-effort low-load result: all 50 frames delivered (`framesFullyDelivered=50`,
+  `framesMissingFullDelivery=0`), `allSubscribersCreatedAtLatencyMs.p95=40 ms`,
+  `publisherSelfEchoCreatedAtLatencyMs.p95=39 ms`, and `publisherAppendAckLatencyMs.p95=21 ms`.
+- Confirmed low-load result: all 50 frames delivered (`framesFullyDelivered=50`,
+  `framesMissingFullDelivery=0`), `allSubscribersCreatedAtLatencyMs.p95=144 ms`,
+  `publisherSelfEchoCreatedAtLatencyMs.p95=140 ms`, and `publisherAppendAckLatencyMs.p95=135 ms`.
+- Comparison to the full 10-publisher / 36-subscriber run immediately above: low-load best-effort
+  self-echo p95 was 39 ms versus 775 ms under full fan-out pressure. That continues to support the
+  interpretation that high read-your-own latency is primarily fan-out/scheduling/transport pressure
+  in the single stream DO, not simply an accidental await in the non-durable append path.
+
 ## 2026-05-27 05:00 UTC+1
 
 - Added "rejects non-number checkpoint thresholds before allocating an offset". Runtime clients can
