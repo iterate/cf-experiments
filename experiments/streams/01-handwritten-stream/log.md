@@ -5,6 +5,20 @@
 
 # Notes
 
+## 2026-05-27 03:12 UTC+1
+
+- Ran deployed DO-side `/benchmark/audio-chaos` again after version
+  `804d8ffe-07c4-47f9-bf7f-7b1622a91800`, with runner DOs driving 10 publishers, 36
+  active subscribers, one slow subscriber, 50 frames per publisher, 20 ms pacing, best-effort
+  durability, and append-ack measurement.
+- Result: all 500 frames were delivered to all 36 active subscribers
+  (`framesFullyDelivered=500`, `framesMissingFullDelivery=0`, min/max deliveries `36/36`).
+  `allSubscribersCreatedAtLatencyMs.p95=773 ms`, `publisherSelfEchoCreatedAtLatencyMs.p95=759 ms`,
+  and `publisherAppendAckLatencyMs.p95=395 ms`.
+- Interpretation unchanged: with the benchmark running from Durable Objects rather than the local
+  laptop/WiFi path, full fan-out is reliable but still hundreds of milliseconds at p95 under
+  10-publisher / 36-subscriber audio-shaped pressure.
+
 ## 2026-05-27 03:09 UTC+1
 
 - Added "checkpointed appends can schedule a second checkpoint after the first completes". A
