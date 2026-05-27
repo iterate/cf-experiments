@@ -19,8 +19,9 @@
   - `src/clean/stream.ts`: new `CleanStream` Durable Object with one minimal in-memory stream app and
     transport adapters selected by `transport=capnweb|orpc|rawws` in `fetch()`.
   - `src/clean/client.ts`: shared client interface for all transports with `append()` and
-    `subscribe().read()`. The endpoint can be a URL, for Vitest/Node clients, or a
-    `fetch(request)` function, for clients running inside Durable Objects.
+    `subscribe().read()`. It exposes explicit constructors for `capnweb`, `orpc`, and `rawws`, and
+    each returns the same `CleanStreamClient`. The endpoint can be a URL, for Vitest/Node clients, or
+    a `fetch(request)` function, for clients running inside Durable Objects.
   - `src/clean/client-runner.ts`: small Durable Object proving the same client library works with a
     DO-to-DO fetch endpoint.
   - Route `/clean/:name?transport=...` for the stream and `/clean-client-smoke` for the DO-side
@@ -47,13 +48,13 @@
 - Final verification:
   - fresh local server on port `8790`
   - `pnpm typecheck`
-  - `WORKER_URL=http://localhost:8790 pnpm vitest run scripts/clean-stream.test.ts`: `7 passed`
+  - `WORKER_URL=http://localhost:8791 pnpm vitest run scripts/clean-stream.test.ts`: `8 passed`
   - `WORKER_URL=http://localhost:8790 pnpm vitest run scripts/minimal-stream.test.ts scripts/stream-capnweb.test.ts`:
     `70 passed`, `1 expected fail`
   - `pnpm wrangler deploy --dry-run`
-  - deployed version `43c4cbd8-faad-48c2-94e8-6bd9ccf11a72`
+  - deployed version `1e84e9d6-82ea-4592-aa03-ad3a131171e0`
   - deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/clean-stream.test.ts`:
-    `7 passed`
+    `8 passed`
 
 ## 2026-05-27 08:32 UTC+1
 

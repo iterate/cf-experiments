@@ -116,7 +116,9 @@ curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmar
 The clean comparison surface is `/clean/:name?transport=capnweb|orpc|rawws`. It keeps one minimal
 in-memory stream application and swaps only the transport adapter. Use `src/clean/client.ts` from
 Vitest or from another Durable Object; it accepts either a URL endpoint or a `fetch(request)`
-endpoint.
+endpoint. The explicit client constructors are `connectCleanCapnwebStream`,
+`connectCleanOrpcStream`, and `connectCleanRawwsStream`; each returns the same `CleanStreamClient`
+interface.
 
 Deploy current code:
 

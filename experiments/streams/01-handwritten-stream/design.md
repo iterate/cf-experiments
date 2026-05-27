@@ -83,9 +83,12 @@ application core (`StreamApp`) that allocates offsets and timestamps events. The
   surface with `op=append`.
 - `transport=rawws`: JSON-over-WebSocket `subscribe`, `append`, `event`, and `ack` frames.
 
-`src/clean/client.ts` is the shared client interface for all three transports. It accepts either a
-URL endpoint for Vitest/Node clients or a `fetch(request)` endpoint for clients running inside another
-Durable Object. `scripts/clean-stream.test.ts` runs every transport through both paths.
+`src/clean/client.ts` is the shared client interface for all three transports. It exports explicit
+constructors for the initial transports (`connectCleanCapnwebStream`, `connectCleanOrpcStream`, and
+`connectCleanRawwsStream`) plus a generic dispatcher; all return the same `CleanStreamClient`
+interface. Each constructor accepts either a URL endpoint for Vitest/Node clients or a
+`fetch(request)` endpoint for clients running inside another Durable Object.
+`scripts/clean-stream.test.ts` runs every transport through both paths.
 
 ## Design-space guardrails
 

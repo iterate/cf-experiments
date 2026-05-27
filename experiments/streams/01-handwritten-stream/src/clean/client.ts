@@ -39,12 +39,14 @@ export async function connectCleanStream(args: {
   transport: CleanStreamTransport;
   endpoint: CleanStreamEndpoint;
 }): Promise<CleanStreamClient> {
-  if (args.transport === "capnweb") return connectCapnweb(args.endpoint);
-  if (args.transport === "orpc") return connectOrpc(args.endpoint);
-  return connectRawws(args.endpoint);
+  if (args.transport === "capnweb") return connectCleanCapnwebStream(args.endpoint);
+  if (args.transport === "orpc") return connectCleanOrpcStream(args.endpoint);
+  return connectCleanRawwsStream(args.endpoint);
 }
 
-async function connectCapnweb(endpoint: CleanStreamEndpoint): Promise<CleanStreamClient> {
+export async function connectCleanCapnwebStream(
+  endpoint: CleanStreamEndpoint,
+): Promise<CleanStreamClient> {
   const webSocket = await openWebSocket(endpoint, "capnweb");
   const rpc = newWebSocketRpcSession<CleanStreamRpc>(webSocket);
   return {
@@ -74,7 +76,9 @@ async function connectCapnweb(endpoint: CleanStreamEndpoint): Promise<CleanStrea
   };
 }
 
-async function connectRawws(endpoint: CleanStreamEndpoint): Promise<CleanStreamClient> {
+export async function connectCleanRawwsStream(
+  endpoint: CleanStreamEndpoint,
+): Promise<CleanStreamClient> {
   const webSocket = await openWebSocket(endpoint, "rawws");
   const inbox = new MessageInbox();
   webSocket.addEventListener("message", (event) => {
@@ -110,7 +114,9 @@ async function connectRawws(endpoint: CleanStreamEndpoint): Promise<CleanStreamC
   };
 }
 
-async function connectOrpc(endpoint: CleanStreamEndpoint): Promise<CleanStreamClient> {
+export async function connectCleanOrpcStream(
+  endpoint: CleanStreamEndpoint,
+): Promise<CleanStreamClient> {
   const webSocket = await openWebSocket(endpoint, "orpc", await orpcTokenParams());
   const client = createORPCClient<OrpcDurableIteratorClient>(
     new ORPCWebSocketLink({ websocket: webSocket }),

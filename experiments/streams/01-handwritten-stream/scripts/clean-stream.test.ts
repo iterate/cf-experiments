@@ -1,12 +1,24 @@
 import type { StreamEventInput } from "@cf-experiments/shared/event";
 import { describe, expect, it } from "vitest";
 import {
+  connectCleanCapnwebStream,
+  connectCleanOrpcStream,
+  connectCleanRawwsStream,
   connectCleanStream,
+  type CleanStreamClient,
+  type CleanStreamEndpoint,
   type CleanStreamTransport,
 } from "../src/clean/client.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
-const transports = ["capnweb", "orpc", "rawws"] as const satisfies readonly CleanStreamTransport[];
+const transports = [
+  { transport: "capnweb", connect: connectCleanCapnwebStream },
+  { transport: "orpc", connect: connectCleanOrpcStream },
+  { transport: "rawws", connect: connectCleanRawwsStream },
+] as const satisfies readonly {
+  transport: CleanStreamTransport;
+  connect: (endpoint: CleanStreamEndpoint) => Promise<CleanStreamClient>;
+}[];
 
 type SmokeResult = {
   transport: CleanStreamTransport;
@@ -20,7 +32,7 @@ function cleanStreamUrl(path: string) {
 }
 
 describe("clean stream transport comparison", () => {
-  for (const transport of transports) {
+  for (const { transport, connect } of transports) {
     it(`${transport} client appends and subscribes through the URL endpoint`, async () => {
       const path = `clean-${transport}-${crypto.randomUUID()}`;
       const event: StreamEventInput = {
@@ -28,14 +40,8 @@ describe("clean stream transport comparison", () => {
         payload: { transport, path },
       };
 
-      await using subscriber = await connectCleanStream({
-        transport,
-        endpoint: { url: cleanStreamUrl(path) },
-      });
-      await using publisher = await connectCleanStream({
-        transport,
-        endpoint: { url: cleanStreamUrl(path) },
-      });
+      await using subscriber = await connect({ url: cleanStreamUrl(path) });
+      await using publisher = await connect({ url: cleanStreamUrl(path) });
       await using subscription = await subscriber.subscribe();
 
       const appended = await publisher.append(event);
@@ -72,6 +78,27 @@ describe("clean stream transport comparison", () => {
       expect(result.delivered).toEqual(result.appended);
     });
   }
+
+  it("generic clean client dispatches to the selected transport", async () => {
+    const path = `clean-generic-${crypto.randomUUID()}`;
+    const event: StreamEventInput = {
+      type: "test.clean-stream.generic-client",
+      payload: { path },
+    };
+
+    await using subscriber = await connectCleanStream({
+      transport: "rawws",
+      endpoint: { url: cleanStreamUrl(path) },
+    });
+    await using publisher = await connectCleanStream({
+      transport: "rawws",
+      endpoint: { url: cleanStreamUrl(path) },
+    });
+    await using subscription = await subscriber.subscribe();
+
+    const appended = await publisher.append(event);
+    expect(await subscription.read()).toEqual(appended);
+  });
 
   it("requires an explicit clean stream transport", async () => {
     const path = `clean-${crypto.randomUUID()}`;
