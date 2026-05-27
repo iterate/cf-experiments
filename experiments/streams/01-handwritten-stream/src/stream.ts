@@ -447,6 +447,9 @@ export class Stream extends DurableObject {
     if (durability === null) {
       throw new Error("append durability must be a mode string or options object");
     }
+    if (typeof durability === "object" && !("mode" in durability)) {
+      throw new Error("append durability options must include mode");
+    }
     const mode =
       typeof durability === "string"
         ? durability
@@ -458,10 +461,14 @@ export class Stream extends DurableObject {
      * checkpointed so malformed option objects do not get silently accepted.
      * Runtime RPC callers can also send `null`; that must fail explicitly
      * instead of falling through to an incidental property-access TypeError.
+     * Runtime object durability values without `mode` must also fail explicitly
+     * instead of silently falling back to persisted stream settings.
      * The default/override/settings/invalid-mode/invalid-threshold tests,
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
      * object durability" and "rejects null per-call durability before allocating
-     * an offset", in `scripts/stream-capnweb.test.ts` cover each branch here.
+     * an offset", and "rejects object durability without a mode before
+     * allocating an offset" in `scripts/stream-capnweb.test.ts` cover each
+     * branch here.
      */
     this.#validateDurabilityMode(mode);
     return {

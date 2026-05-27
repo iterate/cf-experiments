@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 02:33 UTC+1
+
+- Added "rejects object durability without a mode before allocating an offset". A runtime Cap'n Web
+  caller can send an object that the TypeScript API would not allow, such as
+  `{ checkpointEveryUnconfirmedAppends: 1 }`.
+- Red result before the fix: the malformed object rejected with `'' is not a function.` instead of a
+  stream-level validation error.
+- Fixed `#resolveAppendDurability()` to reject object durability options without `mode` explicitly,
+  so they do not silently inherit persisted stream settings or fail with transport-shaped errors.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 38 tests. Deployed version `8f9baf53-c5fe-456d-a39b-8b7e97b7107f`.
+
 ## 2026-05-27 02:31 UTC+1
 
 - Added "rejects null per-call durability before allocating an offset" for malformed runtime RPC

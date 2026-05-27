@@ -1029,6 +1029,26 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects object durability without a mode before allocating an offset", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+    await fixture.rpc.patchSettings({ defaultAppendDurabilityMode: "checkpointed" });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.missing-mode" },
+        durability: JSON.parse('{"checkpointEveryUnconfirmedAppends":1}'),
+      }),
+    ).rejects.toThrow(/append durability options must include mode/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("uses checkpointed stream settings when append does not pass a per-call override", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
