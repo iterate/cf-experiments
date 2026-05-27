@@ -51,6 +51,11 @@ export class Stream extends DurableObject {
   #streamSubscribers = new Set<StreamSubscriber>();
   #volatileOffset = 0;
   #volatileSubscribers = new Set<StreamSubscriber>();
+  #durableWritePlanMs: number[] = [];
+  #durableBroadcastMs: number[] = [];
+  #durableAppendMs: number[] = [];
+  #volatileBroadcastMs: number[] = [];
+  #volatileAppendMs: number[] = [];
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -144,11 +149,14 @@ export class Stream extends DurableObject {
     }
 
     const durability = this.#resolveAppendDurability(args.durability);
+    const appendStartedAt = performance.now();
+    const writePlanStartedAt = performance.now();
     const committed = writeEventFromKv({
       storage: this.ctx.storage,
       input: event,
       allowUnconfirmedWrites: true,
     });
+    this.#recordTiming(this.#durableWritePlanMs, performance.now() - writePlanStartedAt);
 
     /**
      * Durability/egress contract for append.
@@ -205,11 +213,16 @@ export class Stream extends DurableObject {
     if (durability.mode === "confirmed") {
       await this.#delayForConfirmedAppendDebug();
       await this.ctx.storage.sync();
+      const broadcastStartedAt = performance.now();
       this.#broadcast(committed);
+      this.#recordTiming(this.#durableBroadcastMs, performance.now() - broadcastStartedAt);
+      this.#recordTiming(this.#durableAppendMs, performance.now() - appendStartedAt);
       return committed;
     }
 
+    const broadcastStartedAt = performance.now();
     this.#broadcast(committed);
+    this.#recordTiming(this.#durableBroadcastMs, performance.now() - broadcastStartedAt);
 
     /**
      * Only non-confirmed appends accrue stream-level unconfirmed debt. Confirmed
@@ -232,6 +245,7 @@ export class Stream extends DurableObject {
       this.#scheduleCheckpointIfNeeded(durability.checkpointEveryUnconfirmedAppends);
     }
 
+    this.#recordTiming(this.#durableAppendMs, performance.now() - appendStartedAt);
     return committed;
   }
 
@@ -252,13 +266,17 @@ export class Stream extends DurableObject {
     if (!parsedEvent.success) {
       throw new Error("append event must be a valid StreamEventInput");
     }
+    const appendStartedAt = performance.now();
     this.#volatileOffset += 1;
     const committed: StreamEvent = {
       ...parsedEvent.data,
       offset: this.#volatileOffset,
       createdAt: new Date().toISOString(),
     };
+    const broadcastStartedAt = performance.now();
     this.#broadcastVolatile(committed);
+    this.#recordTiming(this.#volatileBroadcastMs, performance.now() - broadcastStartedAt);
+    this.#recordTiming(this.#volatileAppendMs, performance.now() - appendStartedAt);
     return committed;
   }
 
@@ -311,6 +329,13 @@ export class Stream extends DurableObject {
         desiredSize: subscriber.controller.desiredSize,
         enqueuedEvents: subscriber.enqueuedEvents,
       })),
+      timings: {
+        durableWritePlanMs: this.#timingSummary(this.#durableWritePlanMs),
+        durableBroadcastMs: this.#timingSummary(this.#durableBroadcastMs),
+        durableAppendMs: this.#timingSummary(this.#durableAppendMs),
+        volatileBroadcastMs: this.#timingSummary(this.#volatileBroadcastMs),
+        volatileAppendMs: this.#timingSummary(this.#volatileAppendMs),
+      },
     };
   }
 
@@ -570,6 +595,30 @@ export class Stream extends DurableObject {
     this.#streamSubscribers.delete(subscriber);
     this.#volatileSubscribers.delete(subscriber);
     subscriber.sessionSubscribers?.delete(subscriber);
+  }
+
+  #recordTiming(samples: number[], value: number): void {
+    samples.push(value);
+    if (samples.length > 2_000) samples.shift();
+  }
+
+  #timingSummary(samples: number[]) {
+    const sorted = [...samples].sort((a, b) => a - b);
+    const percentile = (p: number) => {
+      if (sorted.length === 0) return 0;
+      return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))] ?? 0;
+    };
+    return {
+      count: sorted.length,
+      min: sorted[0] ?? 0,
+      p50: percentile(0.5),
+      p95: percentile(0.95),
+      max: sorted[sorted.length - 1] ?? 0,
+      avg:
+        sorted.length === 0
+          ? 0
+          : sorted.reduce((sum, value) => sum + value, 0) / sorted.length,
+    };
   }
 
   #resolveAppendDurability(durability: AppendDurability | undefined): {

@@ -7,6 +7,14 @@
 
 ## 2026-05-27 07:10 UTC+1
 
+- Added Stream DO timing summaries in `debug()`: durable write-plan, durable broadcast, durable
+  append, volatile broadcast, and volatile append durations. These are measured inside the Stream DO
+  and should tell us whether hundreds of milliseconds are being spent in the synchronous fan-out
+  loop itself or outside it in RPC/WebSocket scheduling and delivery.
+- Verification: package-local `pnpm typecheck` passed. Focused local Cap'n Web append test passed.
+
+## 2026-05-27 07:06 UTC+1
+
 - Added a volatile message-only stream path on the same `Stream` DO:
   `appendVolatile()` validates and broadcasts a `StreamEvent` without storage, replay, idempotency,
   offset preconditions, or durability; `streamVolatile()` opens a live-only `ReadableStream`.
