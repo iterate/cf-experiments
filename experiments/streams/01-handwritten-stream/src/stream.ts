@@ -529,8 +529,11 @@ export class Stream extends DurableObject {
      * String-form `"checkpointed"` overrides also use the persisted stream
      * checkpoint threshold; otherwise the convenient mode-only override would
      * silently checkpoint at a different cadence than the stream was configured
-     * for. See "uses stream checkpoint threshold for checkpointed string
-     * overrides".
+     * for. The same applies to object-form `{ mode: "checkpointed" }` without
+     * an explicit threshold; otherwise adding an options object would change
+     * checkpoint cadence. See "uses stream checkpoint threshold for checkpointed
+     * string overrides" and "uses stream checkpoint threshold for checkpointed
+     * object overrides without a threshold".
      * The default/override/settings/invalid-mode/invalid-threshold tests,
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
      * object durability", "rejects non-integer checkpoint thresholds before

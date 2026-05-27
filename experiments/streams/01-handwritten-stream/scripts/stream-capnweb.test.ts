@@ -1497,6 +1497,39 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("uses stream checkpoint threshold for checkpointed object overrides without a threshold", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+    await fixture.rpc.patchSettings({
+      defaultAppendDurabilityMode: "best-effort",
+      checkpointEveryUnconfirmedAppends: 2,
+    });
+
+    await fixture.rpc.append({
+      event: { type: "test.durability.object-checkpointed", payload: { n: 1 } },
+      durability: { mode: "checkpointed" },
+    });
+    expect(await fixture.rpc.debug()).toMatchObject({
+      settings: {
+        defaultAppendDurabilityMode: "best-effort",
+        checkpointEveryUnconfirmedAppends: 2,
+      },
+      unconfirmedWriteCount: 1,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+
+    await fixture.rpc.append({
+      event: { type: "test.durability.object-checkpointed", payload: { n: 2 } },
+      durability: { mode: "checkpointed" },
+    });
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 1,
+      checkpointCompletedCount: 1,
+    });
+  });
+
   it("lets unrelated RPC resolve while confirmed append waits for durability", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using writer = await withStream({ path });

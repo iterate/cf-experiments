@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 05:15 UTC+1
+
+- Added "uses stream checkpoint threshold for checkpointed object overrides without a threshold".
+  String-form `"checkpointed"` was already pinned to the stream's configured threshold, but the
+  object-form mode-only override has its own fallback branch in `#resolveAppendDurability()`.
+- Mutation check: temporarily falling back to the hard-coded default threshold instead of
+  `this.#settings.checkpointEveryUnconfirmedAppends` made the new test fail; after two appends the
+  checkpoint had not started and `unconfirmedWriteCount` stayed at 2.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 57 tests. Deployed version `80256e69-6b23-4575-9947-bbd2876c0d08`.
+
 ## 2026-05-27 05:11 UTC+1
 
 - Added "rejects unknown source object fields instead of dropping them" as a separate regression
