@@ -5,6 +5,24 @@
 
 # Notes
 
+## 2026-05-27 05:48 UTC+1
+
+- Added "rejects scalar metadata at the append envelope boundary". Metadata values are intentionally
+  arbitrary, but the `metadata` field itself is an object envelope; scalar metadata must not reach
+  durability handling or storage writes.
+- Mutation check: temporarily relaxing the shared event schema from `z.record(z.string(),
+  z.unknown())` to `z.unknown()` made the new test fail; scalar metadata reached durability
+  resolution and reported `Unknown append durability mode: not-a-mode`.
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`, and
+  local `pnpm vitest run scripts/stream-capnweb.test.ts` passed with 64 tests. Deployed targeted
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts -t "rejects scalar metadata at the append envelope boundary"`
+  passed on version `8ee0935c-66d2-4056-a7f7-9aa1b7cde7fb`.
+- Deployed full-suite reruns were unstable after this deploy: first "persists stream settings across
+  durable object restart" timed out, then "rejects unknown top-level append event fields instead of
+  dropping them" and "rejects unknown durability option fields before allocating an offset" timed out
+  in a later full run. Each timed-out test passed immediately when rerun in isolation, so this looks
+  like deployed WebSocket connection/setup instability rather than a metadata behavior regression.
+
 ## 2026-05-27 05:45 UTC+1
 
 - Added "rejects non-string event types at the append envelope boundary". The event `type` is the
