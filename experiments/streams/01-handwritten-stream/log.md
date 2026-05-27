@@ -5,6 +5,17 @@
 
 # Notes
 
+## 2026-05-27 06:53 UTC+1
+
+- Mutation-checked the existing fire-and-forget checkpoint proof. Temporarily changed checkpoint
+  scheduling so `append()` awaited `#scheduleCheckpointIfNeeded()`, made the helper async, and
+  awaited `blockConcurrencyWhile()`.
+- Result: "checkpointed appendBatch returns after scheduling but before awaiting the checkpoint"
+  failed. The observed debug state had `checkpointCompletedCount=2`, `checkpointInProgress=false`,
+  and `unconfirmedWriteCount=1` instead of the intended same-turn state
+  (`checkpointStartedCount=1`, `checkpointCompletedCount=0`, `checkpointInProgress=true`,
+  `unconfirmedWriteCount=5`). Restored the fire-and-forget implementation.
+
 ## 2026-05-27 06:52 UTC+1
 
 - Added "best-effort object thresholds are validated but do not schedule checkpoints". Runtime
