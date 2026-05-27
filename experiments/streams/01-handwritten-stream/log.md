@@ -5,6 +5,18 @@
 
 # Notes
 
+## 2026-05-27 05:38 UTC+1
+
+- Added "rejects non-positive event offsets at the append envelope boundary". This pins the
+  `positive()` half of the append offset schema separately from the existing fractional-offset test.
+- Mutation check: temporarily relaxing the shared event schema from
+  `z.number().int().positive()` to `z.number().int()` made the new test fail; `offset: 0` reached
+  durability resolution and reported `Unknown append durability mode: not-a-mode`.
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 61 tests. Deployed version `f4f5e34f-7a78-41bc-a523-038cc63daf4d`.
+
 ## 2026-05-27 05:35 UTC+1
 
 - Added "rejects non-integer event offsets at the append envelope boundary". A fractional `offset`
