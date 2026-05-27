@@ -12,6 +12,8 @@ const STREAM_SETTINGS_KEY = "settings";
 
 type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
 
+const APPEND_EVENT_INPUT_SCHEMA = StreamEventInputSchema.strict();
+
 type StreamSettings = {
   defaultAppendDurabilityMode: AppendDurabilityMode;
   checkpointEveryUnconfirmedAppends: number;
@@ -82,13 +84,14 @@ export class Stream extends DurableObject {
      * property-access errors, consult idempotency keys, or allocate offsets. See
      * "rejects malformed append args before reading event or durability" and
      * "rejects malformed append events before idempotency or durability handling",
+     * "rejects unknown top-level append event fields instead of dropping them",
      * plus "rejects malformed idempotent retries before reading the idempotency
      * index", in `scripts/stream-capnweb.test.ts`.
      */
     if (args === null || typeof args !== "object" || !("event" in args)) {
       throw new Error("append args must be an object with event");
     }
-    const parsedEvent = StreamEventInputSchema.safeParse(args.event);
+    const parsedEvent = APPEND_EVENT_INPUT_SCHEMA.safeParse(args.event);
     if (!parsedEvent.success) {
       throw new Error("append event must be a valid StreamEventInput");
     }

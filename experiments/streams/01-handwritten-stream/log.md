@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 03:00 UTC+1
+
+- Added "rejects unknown top-level append event fields instead of dropping them". Zod object parsing
+  strips unknown keys by default; using the parsed event would otherwise silently drop runtime client
+  fields that are not part of `StreamEventInput`.
+- Red result before the fix: an event with top-level `extra` failed with a Cap'n Web-shaped
+  `'' is not a function.` error instead of a stream-level validation error.
+- Fixed append-boundary validation to use `StreamEventInput.strict()` so payload/metadata can still
+  carry arbitrary nested data, but unknown top-level event fields reject before allocation.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 44 tests. Deployed version `20553886-06c8-4ef5-ba84-180c93175b14`.
+
 ## 2026-05-27 02:56 UTC+1
 
 - Added "does not expose session-owned stream internals over capnweb". `streamForSession()` and
