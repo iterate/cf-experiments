@@ -10,6 +10,7 @@ import { JonasStreamInboundFrame } from "./jonas-stream-types.js";
  * explicitly: wait for `storage.sync()`, then broadcast and return the committed event.
  */
 export class JonasStream extends DurableObject {
+  #incarnationId = crypto.randomUUID();
   #outboundWebSockets = new Set<{ metadata: { isSubscribed: boolean }; webSocket: WebSocket }>();
   #maxOffset: number | undefined;
   #simulatedStorageSyncDelayMs: number | null = null;
@@ -114,6 +115,10 @@ export class JonasStream extends DurableObject {
     throw new Error("This point should never be reached; abort should kill the DO.");
   }
 
+  ping() {
+    return { incarnationId: this.#incarnationId };
+  }
+
   // Application logic for our websocket protocol
   async #handleWebSocketMessage(
     webSocket: WebSocket,
@@ -191,7 +196,7 @@ export class JonasStream extends DurableObject {
 
 export type JonasStreamRpc = Pick<
   JonasStream,
-  "append" | "simulateStorageSyncDelay" | "kill" | "connectOutboundWebSocket"
+  "append" | "simulateStorageSyncDelay" | "kill" | "ping" | "connectOutboundWebSocket"
 >;
 
 export const JonasStreamRpcTarget = makeRpcTargetClass<JonasStreamRpc, JonasStream>(JonasStream, {

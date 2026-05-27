@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { withStream, withStreamCapnweb, withStreamRaw } from "./jonas-stream-client.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
+const deployedIt = workerUrl.includes("localhost") ? it.skip : it;
 
 describe("jonas stream websocket primitives", () => {
   it("rejects non-websocket requests at the durable object boundary", async () => {
@@ -186,6 +187,29 @@ describe("jonas stream websocket primitives", () => {
       offset: 1,
       createdAt: expect.any(String),
     });
+  });
+
+  deployedIt("keeps a raw websocket connected across deployed hibernation", async () => {
+    const path = `jonas-hibernate-${crypto.randomUUID()}`;
+    const event: StreamEventInput = {
+      type: "test.jonas.deployed-hibernation",
+      payload: { path },
+    };
+
+    await using raw = await withStreamRaw({ path });
+    const events = raw.stream();
+
+    const before = await withStreamCapnweb({ path });
+    const beforePing = await before.capnweb.ping();
+    await before[Symbol.asyncDispose]();
+
+    await new Promise((resolve) => setTimeout(resolve, 15_000));
+
+    const appended = await raw.appendAndWaitForResponse(event, { key: "after-hibernation" });
+    expect(await nextEvent(events)).toEqual(appended);
+
+    await using after = await withStreamCapnweb({ path });
+    await expect(after.capnweb.ping()).resolves.not.toEqual(beforePing);
   });
 
   it("idempotent appendAndWaitForResponse retries return the original event without rebroadcasting", async () => {
