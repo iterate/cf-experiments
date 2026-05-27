@@ -1,11 +1,20 @@
 import { BenchmarkRunner } from "./benchmark-runner.js";
 import { CleanStreamClientRunner } from "./clean/client-runner.js";
+import { JonasStream } from "./clean/jonas-stream.js";
 import { CleanStream } from "./clean/stream.js";
 import { MinimalStream } from "./minimal-stream.js";
 import { OrpcDurableStream } from "./orpc-durable-stream.js";
 import { Stream } from "./stream.js";
 
-export { BenchmarkRunner, CleanStream, CleanStreamClientRunner, MinimalStream, OrpcDurableStream, Stream };
+export {
+  BenchmarkRunner,
+  CleanStream,
+  CleanStreamClientRunner,
+  JonasStream,
+  MinimalStream,
+  OrpcDurableStream,
+  Stream,
+};
 
 export default {
   async fetch(request, env) {
@@ -51,6 +60,11 @@ export default {
     if (url.pathname.startsWith("/minimal/")) {
       const name = url.pathname.slice("/minimal/".length) || "default";
       return env.MINIMAL_STREAM.getByName(name).fetch(request);
+    }
+
+    if (url.pathname.startsWith("/jonas/")) {
+      const name = url.pathname.slice("/jonas/".length) || "default";
+      return env.JONAS_STREAM.getByName(name).fetch(request);
     }
 
     const name = url.pathname.slice(1) || "default";
