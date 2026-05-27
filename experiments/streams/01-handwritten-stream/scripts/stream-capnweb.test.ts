@@ -406,6 +406,19 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects stream arguments instead of silently ignoring subscription options", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+
+    await expect((fixture.rpc as any).stream(JSON.parse('{"fromOffset":2}'))).rejects.toThrow(
+      /stream does not accept arguments/,
+    );
+
+    expect(await fixture.rpc.debug()).toMatchObject({
+      subscribers: [],
+    });
+  });
+
   it("pure subscribers do not originate per-event websocket traffic", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const events: StreamEventInput[] = Array.from({ length: 10 }, (_, i) => ({

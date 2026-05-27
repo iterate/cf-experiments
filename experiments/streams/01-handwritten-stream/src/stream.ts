@@ -324,8 +324,14 @@ export class Stream extends DurableObject {
    * originate per-event websocket traffic" in `scripts/stream-capnweb.test.ts`,
    * which records the subscriber WebSocket and asserts no outbound pull/push
    * frames after subscription while events are delivered.
+   *
+   * The subscription intentionally has no options/cursor argument. Runtime
+   * callers must not be allowed to pass `fromOffset`-style objects and silently
+   * receive the default full replay stream. See "rejects stream arguments
+   * instead of silently ignoring subscription options".
    */
-  stream(): ReadableStream<StreamEvent> {
+  stream(args?: unknown): ReadableStream<StreamEvent> {
+    if (args !== undefined) throw new Error("stream does not accept arguments");
     return this.#openStream();
   }
 
@@ -700,7 +706,8 @@ export class StreamRpcTarget extends BaseStreamRpcTarget {
     this.#stream = stream;
   }
 
-  stream(): ReadableStream<StreamEvent> {
+  stream(args?: unknown): ReadableStream<StreamEvent> {
+    if (args !== undefined) throw new Error("stream does not accept arguments");
     return this.#stream.streamForSession(this.#subscribers);
   }
 

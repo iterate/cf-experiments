@@ -5,6 +5,20 @@
 
 # Notes
 
+## 2026-05-27 05:31 UTC+1
+
+- Added "rejects stream arguments instead of silently ignoring subscription options". `stream()` has
+  no cursor/options surface; accepting runtime arguments such as `{ fromOffset: 2 }` would silently
+  return the default full replay subscription and register a subscriber.
+- Red result before the fix: the call resolved instead of rejecting, so the new `rejects.toThrow()`
+  failed.
+- Fixed the direct `Stream.stream()` method and the session `StreamRpcTarget.stream()` wrapper to
+  reject any runtime argument.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 59 tests. Deployed version `7d70aac9-b1f6-4e19-9c39-9f624af2ffc9`.
+
 ## 2026-05-27 05:28 UTC+1
 
 - Added "accounts replayed events through the same subscriber enqueue path as live fan-out". Replay
