@@ -17,6 +17,7 @@ type StreamKind =
   | "durable"
   | "volatile"
   | "json-volatile"
+  | "batched-json-volatile"
   | "orpc-durable-iterator"
   | "raw-volatile"
   | "minimal-ws";
@@ -297,6 +298,7 @@ export class BenchmarkRunner extends DurableObject {
     if (
       config.streamKind === "volatile" ||
       config.streamKind === "json-volatile" ||
+      config.streamKind === "batched-json-volatile" ||
       config.streamKind === "orpc-durable-iterator" ||
       isRawWebSocketStreamKind(config.streamKind)
     ) {
@@ -513,6 +515,8 @@ export class BenchmarkRunner extends DurableObject {
       await fixture.rpc.streamVolatile();
     } else if (fixture.streamKind === "json-volatile") {
       await fixture.rpc.streamJsonVolatile();
+    } else if (fixture.streamKind === "batched-json-volatile") {
+      await fixture.rpc.streamBatchedJsonVolatile();
     } else {
       await fixture.rpc.stream();
     }
@@ -587,6 +591,8 @@ export class BenchmarkRunner extends DurableObject {
             ? fixture.rpc.appendVolatile({ event })
             : fixture.streamKind === "json-volatile"
               ? fixture.rpc.appendJsonVolatile({ event })
+              : fixture.streamKind === "batched-json-volatile"
+                ? fixture.rpc.appendBatchedJsonVolatile({ event })
               : fixture.rpc.append({
                   event,
                   durability: appendDurability(args),
@@ -1019,6 +1025,9 @@ async function debugSubscriberCount(env: Env, config: AudioChaosConfig): Promise
   const debug = await env.STREAM.getByName(config.stream).debug();
   if (config.streamKind === "raw-volatile") return debug.rawVolatileSubscribers;
   if (config.streamKind === "json-volatile") return debug.jsonVolatileSubscribers.length;
+  if (config.streamKind === "batched-json-volatile") {
+    return debug.batchedJsonVolatileSubscribers.length;
+  }
   return debug.volatileSubscribers.length;
 }
 
@@ -1184,11 +1193,16 @@ async function objectStreamReader(rpc: RpcStub<StreamRpc>, streamKind: StreamKin
       ? await rpc.streamVolatile()
       : streamKind === "json-volatile"
         ? await rpc.streamJsonVolatile()
-        : await rpc.stream();
+        : streamKind === "batched-json-volatile"
+          ? await rpc.streamBatchedJsonVolatile()
+          : await rpc.stream();
   // capnweb@0.8.0's TS surface only models ReadableStream<Uint8Array>, but this
   // experiment intentionally sends pass-by-value StreamEvent objects over Cap'n Web.
   const reader = (readable as unknown as ReadableStream<StreamEvent | string>).getReader();
-  if (streamKind !== "json-volatile") return reader as ReadableStreamDefaultReader<StreamEvent>;
+  if (streamKind !== "json-volatile" && streamKind !== "batched-json-volatile") {
+    return reader as ReadableStreamDefaultReader<StreamEvent>;
+  }
+  if (streamKind === "batched-json-volatile") return batchedJsonStreamReader(reader);
   return {
     async read() {
       const result = await reader.read();
@@ -1197,6 +1211,28 @@ async function objectStreamReader(rpc: RpcStub<StreamRpc>, streamKind: StreamKin
         done: false,
         value: JSON.parse(result.value as string) as StreamEvent,
       };
+    },
+    releaseLock() {
+      reader.releaseLock();
+    },
+  } as ReadableStreamDefaultReader<StreamEvent>;
+}
+
+function batchedJsonStreamReader(
+  reader: ReadableStreamDefaultReader<StreamEvent | string>,
+): ReadableStreamDefaultReader<StreamEvent> {
+  const pending: StreamEvent[] = [];
+  return {
+    async read() {
+      const pendingEvent = pending.shift();
+      if (pendingEvent !== undefined) return { done: false, value: pendingEvent };
+      const result = await reader.read();
+      if (result.done) return result as ReadableStreamReadResult<StreamEvent>;
+      const events = JSON.parse(result.value as string) as StreamEvent[];
+      const first = events.shift();
+      if (first === undefined) throw new Error("batched JSON stream produced an empty batch");
+      pending.push(...events);
+      return { done: false, value: first };
     },
     releaseLock() {
       reader.releaseLock();

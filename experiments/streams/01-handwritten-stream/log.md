@@ -6,8 +6,53 @@
   p95 append-to-all-subscribers, while Cap'n Web returned-stream modes are much slower in the same
   DO-side benchmark. This is still an experiment-level finding; repeat before copying to
   `docs/findings.md`.
+- Cap'n Web returned-stream latency is strongly related to returned-stream chunk count. A diagnostic
+  `batched-json-volatile` mode reduced 18,000 event fan-outs to 6,842 stream chunks and cut
+  all-subscriber p95 from `2439 ms` (`json-volatile`) to `461 ms` in the same deployed matrix. This
+  points at per-chunk Cap'n Web pipe/write/resolve overhead, not JSON serialization or storage.
 
 # Notes
+
+## 2026-05-27 08:32 UTC+1
+
+- Added `stream-kind=batched-json-volatile`: same `Stream` DO and same Cap'n Web returned-stream
+  transport as `json-volatile`, but each subscriber receives JSON arrays of events flushed by a
+  zero-delay timer. This is a diagnostic for returned-stream chunk granularity, not a proposed API.
+- Local smoke with 2 publishers / 2 subscribers / 5 frames delivered all frames and reported
+  `batchedJsonVolatileEvents=20` but `batchedJsonVolatileChunks=10`, proving the probe was actually
+  coalescing multiple events per Cap'n Web stream chunk.
+- Verification:
+  - `pnpm typecheck`
+  - local `WORKER_URL=http://localhost:8788 pnpm vitest run scripts/stream-capnweb.test.ts`:
+    `67 passed`, `1 expected fail`
+  - `pnpm wrangler deploy --dry-run`
+  - deployed version `e8ca943c-2f91-4fea-829a-445f7428afad`
+  - deployed focused batched stream test:
+    `1 passed`, `67 skipped`
+- Deployed 10 publishers / 36 active subscribers / 50 frames / 20 ms pacing / self-echo disabled /
+  append-ack measured on version `e8ca943c-2f91-4fea-829a-445f7428afad`:
+  - Batched Cap'n Web JSON-string `batched-json-volatile`: all frames delivered, all-subs p95
+    `461 ms`, first-subscriber p95 `428 ms`, append-ack p95 `6 ms`, event fan-out attempts `18000`,
+    stream chunk fan-out attempts `6842`, elapsed `1604 ms`.
+  - Unbatched Cap'n Web JSON-string `json-volatile`: all frames delivered, all-subs p95 `2439 ms`,
+    first-subscriber p95 `2325 ms`, append-ack p95 `1170 ms`, stream chunk fan-out attempts `18000`,
+    elapsed `3679 ms`.
+  - Cap'n Web object `volatile`: all frames delivered, all-subs p95 `1069 ms`,
+    first-subscriber p95 `979 ms`, append-ack p95 `579 ms`, stream chunk fan-out attempts `18000`,
+    elapsed `2096 ms`.
+  - Minimal raw WebSocket `minimal-ws`: all frames delivered, all-subs p95 `147 ms`,
+    first-subscriber p95 `126 ms`, append-ack p95 `7 ms`, fan-out attempts `18000`,
+    elapsed `1578 ms`.
+  - Embedded raw WebSocket `raw-volatile`: all frames delivered, all-subs p95 `139 ms`,
+    first-subscriber p95 `112 ms`, append-ack p95 `7 ms`, fan-out attempts `18000`,
+    elapsed `1555 ms`.
+  - ORPC durable iterator repeat after one failed attempt: all frames delivered, all-subs p95
+    `300 ms`, first-subscriber p95 `269 ms`, append-ack p95 `79 ms`, fan-out attempts `18000`,
+    elapsed `1657 ms`.
+- Interpretation: batching only changed returned-stream chunk granularity, yet it moved Cap'n Web
+  much closer to ORPC/raw and made append acks fast again. That is strong evidence the high
+  append-to-consume latency is mostly per-chunk Cap'n Web returned-stream pipe overhead under fan-out:
+  one `ReadableStream` chunk becomes one Cap'n Web stream write plus subscriber-side resolve traffic.
 
 ## 2026-05-27 08:20 UTC+1
 

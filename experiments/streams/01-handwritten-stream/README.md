@@ -91,6 +91,14 @@ pre-serialized JSON string instead of a pass-by-value event object:
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=json-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
 
+Set `stream-kind=batched-json-volatile` to keep Cap'n Web returned streams but coalesce events into
+JSON-array chunks on a zero-delay timer. This probes whether the expensive unit is one returned-stream
+chunk rather than one event payload:
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=batched-json-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
+```
+
 Set `stream-kind=orpc-durable-iterator` to use a separate volatile `OrpcDurableStream` DO, where
 subscribers connect through ORPC's Durable Iterator WebSocket path:
 

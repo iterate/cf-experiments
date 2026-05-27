@@ -40,6 +40,15 @@ type StringStreamSubscriber = {
   sessionSubscribers?: Set<StringStreamSubscriber>;
 };
 
+type BatchedStringStreamSubscriber = {
+  controller: ReadableStreamDefaultController<string>;
+  pendingEvents: StreamEvent[];
+  flushScheduled: boolean;
+  enqueuedEvents: number;
+  enqueuedChunks: number;
+  sessionSubscribers?: Set<BatchedStringStreamSubscriber>;
+};
+
 type RawAppendMessage = {
   op: "append";
   requestId: string;
@@ -64,6 +73,7 @@ export class Stream extends DurableObject {
   #volatileOffset = 0;
   #volatileSubscribers = new Set<StreamSubscriber>();
   #jsonVolatileSubscribers = new Set<StringStreamSubscriber>();
+  #batchedJsonVolatileSubscribers = new Set<BatchedStringStreamSubscriber>();
   #durableWritePlanMs: number[] = [];
   #durableBroadcastMs: number[] = [];
   #durableAppendMs: number[] = [];
@@ -72,6 +82,8 @@ export class Stream extends DurableObject {
   #durableFanoutAttempts = 0;
   #volatileFanoutAttempts = 0;
   #jsonVolatileFanoutAttempts = 0;
+  #batchedJsonVolatileEventFanoutAttempts = 0;
+  #batchedJsonVolatileChunkFanoutAttempts = 0;
   #rawVolatileOffset = 0;
   #rawVolatileSubscribers = new Set<WebSocket>();
   #rawVolatileFanoutAttempts = 0;
@@ -317,6 +329,24 @@ export class Stream extends DurableObject {
     return committed;
   }
 
+  appendBatchedJsonVolatile(args: { event: StreamEventInput }): StreamEvent {
+    if (args === null || typeof args !== "object" || !("event" in args)) {
+      throw new Error("append args must be an object with event");
+    }
+    const parsedEvent = APPEND_EVENT_INPUT_SCHEMA.safeParse(args.event);
+    if (!parsedEvent.success) {
+      throw new Error("append event must be a valid StreamEventInput");
+    }
+    this.#volatileOffset += 1;
+    const committed: StreamEvent = {
+      ...parsedEvent.data,
+      offset: this.#volatileOffset,
+      createdAt: new Date().toISOString(),
+    };
+    this.#broadcastBatchedJsonVolatile(committed);
+    return committed;
+  }
+
   async appendBatch(args: {
     events: StreamEventInput[];
     durability?: AppendDurability;
@@ -370,6 +400,15 @@ export class Stream extends DurableObject {
         desiredSize: subscriber.controller.desiredSize,
         enqueuedEvents: subscriber.enqueuedEvents,
       })),
+      batchedJsonVolatileSubscribers: Array.from(
+        this.#batchedJsonVolatileSubscribers,
+        (subscriber) => ({
+          desiredSize: subscriber.controller.desiredSize,
+          pendingEvents: subscriber.pendingEvents.length,
+          enqueuedEvents: subscriber.enqueuedEvents,
+          enqueuedChunks: subscriber.enqueuedChunks,
+        }),
+      ),
       rawVolatileSubscribers: this.#rawVolatileSubscribers.size,
       timings: {
         durableWritePlanMs: this.#timingSummary(this.#durableWritePlanMs),
@@ -382,6 +421,8 @@ export class Stream extends DurableObject {
         durable: this.#durableFanoutAttempts,
         volatile: this.#volatileFanoutAttempts,
         jsonVolatile: this.#jsonVolatileFanoutAttempts,
+        batchedJsonVolatileEvents: this.#batchedJsonVolatileEventFanoutAttempts,
+        batchedJsonVolatileChunks: this.#batchedJsonVolatileChunkFanoutAttempts,
         rawVolatile: this.#rawVolatileFanoutAttempts,
       },
     };
@@ -475,6 +516,12 @@ export class Stream extends DurableObject {
     return this.#openJsonVolatileStream(sessionSubscribers);
   }
 
+  streamBatchedJsonVolatileForSession(
+    sessionSubscribers: Set<BatchedStringStreamSubscriber>,
+  ): ReadableStream<string> {
+    return this.#openBatchedJsonVolatileStream(sessionSubscribers);
+  }
+
   releaseSessionSubscribers(sessionSubscribers: Set<StreamSubscriber>): void {
     for (const subscriber of sessionSubscribers) {
       this.#removeSubscriber(subscriber);
@@ -485,6 +532,15 @@ export class Stream extends DurableObject {
   releaseSessionStringSubscribers(sessionSubscribers: Set<StringStreamSubscriber>): void {
     for (const subscriber of sessionSubscribers) {
       this.#removeStringSubscriber(subscriber);
+    }
+    sessionSubscribers.clear();
+  }
+
+  releaseSessionBatchedStringSubscribers(
+    sessionSubscribers: Set<BatchedStringStreamSubscriber>,
+  ): void {
+    for (const subscriber of sessionSubscribers) {
+      this.#removeBatchedStringSubscriber(subscriber);
     }
     sessionSubscribers.clear();
   }
@@ -617,6 +673,32 @@ export class Stream extends DurableObject {
     });
   }
 
+  #openBatchedJsonVolatileStream(
+    sessionSubscribers?: Set<BatchedStringStreamSubscriber>,
+  ): ReadableStream<string> {
+    let subscriber: BatchedStringStreamSubscriber | undefined;
+
+    return new ReadableStream<string>({
+      start: (streamController) => {
+        subscriber = {
+          controller: streamController,
+          pendingEvents: [],
+          flushScheduled: false,
+          enqueuedEvents: 0,
+          enqueuedChunks: 0,
+          sessionSubscribers,
+        };
+        this.#batchedJsonVolatileSubscribers.add(subscriber);
+        sessionSubscribers?.add(subscriber);
+      },
+      cancel: () => {
+        if (subscriber !== undefined) {
+          this.#removeBatchedStringSubscriber(subscriber);
+        }
+      },
+    });
+  }
+
   getCapability(_policy?: unknown) {
     return new StreamRpcTarget(this);
   }
@@ -721,6 +803,42 @@ export class Stream extends DurableObject {
     }
   }
 
+  #broadcastBatchedJsonVolatile(event: StreamEvent): void {
+    this.#batchedJsonVolatileEventFanoutAttempts += this.#batchedJsonVolatileSubscribers.size;
+    for (const subscriber of this.#batchedJsonVolatileSubscribers) {
+      subscriber.pendingEvents.push(event);
+      if (!subscriber.flushScheduled) {
+        subscriber.flushScheduled = true;
+        /**
+         * This diagnostic intentionally trades a tiny scheduling delay for fewer
+         * Cap'n Web returned-stream writes. With 10 publishers sending one frame
+         * every 20 ms, a zero-delay timer can coalesce the same audio frame
+         * across publishers into one JSON-array chunk per subscriber. If this
+         * closes the gap with raw WebSocket, the expensive unit is per Cap'n Web
+         * stream chunk rather than payload bytes or storage work.
+         */
+        setTimeout(() => this.#flushBatchedJsonVolatile(subscriber), 0);
+      }
+    }
+  }
+
+  #flushBatchedJsonVolatile(subscriber: BatchedStringStreamSubscriber): void {
+    subscriber.flushScheduled = false;
+    if (!this.#batchedJsonVolatileSubscribers.has(subscriber)) return;
+    const events = subscriber.pendingEvents.splice(0);
+    if (events.length === 0) return;
+
+    try {
+      subscriber.controller.enqueue(JSON.stringify(events));
+      subscriber.enqueuedEvents += events.length;
+      subscriber.enqueuedChunks += 1;
+      this.#batchedJsonVolatileChunkFanoutAttempts += 1;
+    } catch (error) {
+      console.error("Error enqueuing batched JSON volatile events", events, error, subscriber);
+      this.#removeBatchedStringSubscriber(subscriber);
+    }
+  }
+
   #broadcastRawVolatile(event: StreamEvent): void {
     const message = JSON.stringify({ op: "event", event });
     this.#rawVolatileFanoutAttempts += this.#rawVolatileSubscribers.size;
@@ -761,6 +879,12 @@ export class Stream extends DurableObject {
 
   #removeStringSubscriber(subscriber: StringStreamSubscriber): void {
     this.#jsonVolatileSubscribers.delete(subscriber);
+    subscriber.sessionSubscribers?.delete(subscriber);
+  }
+
+  #removeBatchedStringSubscriber(subscriber: BatchedStringStreamSubscriber): void {
+    this.#batchedJsonVolatileSubscribers.delete(subscriber);
+    subscriber.pendingEvents = [];
     subscriber.sessionSubscribers?.delete(subscriber);
   }
 
@@ -984,15 +1108,21 @@ export type StreamRpc = Omit<
   | "streamForSession"
   | "streamVolatileForSession"
   | "streamJsonVolatileForSession"
+  | "streamBatchedJsonVolatileForSession"
   | "releaseSessionSubscribers"
   | "releaseSessionStringSubscribers"
+  | "releaseSessionBatchedStringSubscribers"
 > & {
   stream(args?: unknown): ReadableStream<StreamEvent>;
   streamVolatile(args?: unknown): ReadableStream<StreamEvent>;
   streamJsonVolatile(args?: unknown): ReadableStream<string>;
+  streamBatchedJsonVolatile(args?: unknown): ReadableStream<string>;
 };
 
-type BaseStreamRpc = Omit<StreamRpc, "stream" | "streamVolatile" | "streamJsonVolatile">;
+type BaseStreamRpc = Omit<
+  StreamRpc,
+  "stream" | "streamVolatile" | "streamJsonVolatile" | "streamBatchedJsonVolatile"
+>;
 
 const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
   /**
@@ -1009,8 +1139,10 @@ const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
     "streamForSession",
     "streamVolatileForSession",
     "streamJsonVolatileForSession",
+    "streamBatchedJsonVolatileForSession",
     "releaseSessionSubscribers",
     "releaseSessionStringSubscribers",
+    "releaseSessionBatchedStringSubscribers",
   ],
 });
 
@@ -1018,6 +1150,7 @@ export class StreamRpcTarget extends BaseStreamRpcTarget {
   #stream: Stream;
   #subscribers = new Set<StreamSubscriber>();
   #stringSubscribers = new Set<StringStreamSubscriber>();
+  #batchedStringSubscribers = new Set<BatchedStringStreamSubscriber>();
 
   constructor(stream: Stream) {
     super(stream);
@@ -1039,8 +1172,14 @@ export class StreamRpcTarget extends BaseStreamRpcTarget {
     return this.#stream.streamJsonVolatileForSession(this.#stringSubscribers);
   }
 
+  streamBatchedJsonVolatile(args?: unknown): ReadableStream<string> {
+    if (args !== undefined) throw new Error("stream does not accept arguments");
+    return this.#stream.streamBatchedJsonVolatileForSession(this.#batchedStringSubscribers);
+  }
+
   [Symbol.dispose](): void {
     this.#stream.releaseSessionSubscribers(this.#subscribers);
     this.#stream.releaseSessionStringSubscribers(this.#stringSubscribers);
+    this.#stream.releaseSessionBatchedStringSubscribers(this.#batchedStringSubscribers);
   }
 }

@@ -66,6 +66,11 @@ frames. The test-only companion client in `scripts/lib/minimal-stream.ts` record
 `scripts/minimal-stream.test.ts` can prove a pure subscriber originates no traffic after the initial
 subscription.
 
+`stream-kind=batched-json-volatile` keeps Cap'n Web returned streams but changes the chunk granularity:
+each subscriber receives JSON arrays of events, flushed on a zero-delay timer. This is not a proposed
+API; it is a diagnostic. If it improves latency while `json-volatile` stays slow, the expensive unit is
+likely per returned-stream chunk/write/resolve rather than JSON serialization or storage.
+
 ## Design-space guardrails
 
 These are the sharp edges currently protected by tests. The point is not only that the happy path
@@ -86,6 +91,7 @@ passes, but that a competing implementation choice should fail a named probe.
 | Treat `maxOffset` as a contiguous committed-history claim and clean up failed replay subscribers | A missing event key could be silently skipped, or a failed replay could leave a dead subscriber in live fan-out | "fails replay loudly when committed history has a missing event key" and "removes replay subscribers when committed history is corrupt" |
 | Model subscriptions as returned `ReadableStream`, not `onEvent()` callback RPC | A pure subscriber would expose an app callback that the Stream DO must call per event | "pure subscribers do not originate per-event pull or push websocket traffic"; the adjacent `it.fails` sentinel documents that capnweb@0.8.0 returned streams still emit per-chunk `resolve undefined` protocol frames |
 | Keep a separate minimal raw-WebSocket baseline | A regression in the larger `Stream` DO or Cap'n Web/ORPC stack could be mistaken for WebSocket fan-out cost | `scripts/minimal-stream.test.ts` proves append/broadcast/ack behavior and that pure subscribers send no frames after subscribe |
+| Probe Cap'n Web chunk granularity with batched JSON arrays | Per-event returned-stream writes could be mistaken for unavoidable per-event payload cost | "batched json volatile stream coalesces events into json-array chunks" and `/benchmark/audio-chaos?stream-kind=batched-json-volatile` |
 | Reject stream arguments because the subscription has no cursor/options surface | Runtime callers could pass `fromOffset`-style options and silently receive the default full replay subscription | "rejects stream arguments instead of silently ignoring subscription options" |
 | Keep session-owned stream internals off the Cap'n Web surface | A client could call `streamForSession()` directly and create a subscriber that session disposal does not own | "does not expose session-owned stream internals over capnweb" |
 | Do not await per-subscriber delivery in `#broadcast()` and keep iterating after subscriber-local failures | One unread or broken subscriber could slow active subscribers, or prevent later subscribers from seeing the current event | "delivers to an active subscriber while another subscriber does not read" and "continues fan-out to later subscribers after removing a broken subscriber" |

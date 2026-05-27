@@ -67,12 +67,13 @@ function streamKindParam(url: URL) {
     raw !== "durable" &&
     raw !== "volatile" &&
     raw !== "json-volatile" &&
+    raw !== "batched-json-volatile" &&
     raw !== "orpc-durable-iterator" &&
     raw !== "raw-volatile" &&
     raw !== "minimal-ws"
   ) {
     throw new Error(
-      "stream-kind must be durable, volatile, json-volatile, orpc-durable-iterator, raw-volatile, or minimal-ws",
+      "stream-kind must be durable, volatile, json-volatile, batched-json-volatile, orpc-durable-iterator, raw-volatile, or minimal-ws",
     );
   }
   return raw;

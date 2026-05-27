@@ -121,6 +121,30 @@ describe("handwritten stream capnweb", () => {
     expect(await fixture.rpc.maxOffset()).toBe(1);
   });
 
+  it("batched json volatile stream coalesces events into json-array chunks", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const events: StreamEventInput[] = Array.from({ length: 3 }, (_, i) => ({
+      type: "test.batched-json-volatile",
+      payload: { n: i + 1 },
+    }));
+
+    await using fixture = await withStream({ path });
+    const readable = await fixture.rpc.streamBatchedJsonVolatile();
+    const reader = (readable as unknown as ReadableStream<string>).getReader();
+
+    const chunkPromise = withTimeout(reader.read(), 1_000);
+    const appended = await Promise.all(
+      events.map((event) => fixture.rpc.appendBatchedJsonVolatile({ event })),
+    );
+    const chunk = await chunkPromise;
+
+    if (chunk.done) throw new Error("batched json volatile stream ended early");
+    const delivered = JSON.parse(chunk.value) as StreamEvent[];
+    expect(delivered).toEqual(appended);
+    expect(delivered.map((event) => event.offset)).toEqual([1, 2, 3]);
+    reader.releaseLock();
+  });
+
   it("rejects malformed append events before idempotency or durability handling", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });
