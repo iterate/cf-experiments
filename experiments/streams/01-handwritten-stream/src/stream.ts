@@ -366,9 +366,11 @@ export class Stream extends DurableObject {
          * synchronous, so "before vs after replay registration" is not itself a
          * meaningful race boundary; the observable contract is that each stream
          * is registered exactly once for later live broadcasts and that replay
-         * uses the same enqueue/error-cleanup path as live delivery. The
-         * multi-subscriber, replay/live, and enqueue-error tests in
-         * `scripts/stream-capnweb.test.ts` fail if those properties change.
+         * uses the same enqueue/error-accounting path as live delivery. The
+         * multi-subscriber, replay/live, "accounts replayed events through the
+         * same subscriber enqueue path as live fan-out", and enqueue-error
+         * tests in `scripts/stream-capnweb.test.ts` fail if those properties
+         * change.
          * A single Cap'n Web session can also open more than one stream; each
          * subscriber must be tracked in that session-owned set so disposing the
          * WebSocket releases all of them. See "removes every stream opened by a

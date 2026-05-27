@@ -575,6 +575,33 @@ describe("handwritten stream capnweb", () => {
     streamReader.releaseLock();
   });
 
+  it("accounts replayed events through the same subscriber enqueue path as live fan-out", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const history: StreamEventInput[] = [
+      { type: "test.replay.accounting", payload: { n: 1 } },
+      { type: "test.replay.accounting", payload: { n: 2 } },
+      { type: "test.replay.accounting", payload: { n: 3 } },
+    ];
+
+    await using writer = await withStream({ path });
+    await writer.rpc.appendBatch({ events: history, durability: "best-effort" });
+    await writer.rpc.sync();
+
+    await using reader = await withStream({ path });
+    const readable = await reader.rpc.stream();
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const streamReader = (readable as ReadableStream<StreamEvent>).getReader();
+
+    expect(await reader.rpc.debug()).toMatchObject({
+      subscribers: [{ enqueuedEvents: history.length }],
+    });
+
+    const replayed = await readEvents(streamReader, history.length, 500);
+    expect(replayed.map((event) => event.payload)).toEqual(history.map((event) => event.payload));
+
+    streamReader.releaseLock();
+  });
+
   it("fails replay loudly when committed history has a missing event key", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const history: StreamEventInput[] = [

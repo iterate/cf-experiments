@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 05:28 UTC+1
+
+- Added "accounts replayed events through the same subscriber enqueue path as live fan-out". Replay
+  ordering was already covered, but replay could bypass `#enqueueToSubscriber()` and lose the same
+  enqueue accounting/error path that live fan-out uses.
+- Mutation check: temporarily replacing replay's `#enqueueToSubscriber(subscriber, event)` call with
+  direct `streamController.enqueue(event)` made the new test fail; the subscriber received replayed
+  chunks but `enqueuedEvents` stayed at 0.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 58 tests. Deployed version `3c4151a9-8222-4b9a-9709-49b6302ac5a0`.
+
 ## 2026-05-27 05:26 UTC+1
 
 - Tried to turn the `allowUnconfirmedWrites: true` source sentinel into a deployed behavioral race:
