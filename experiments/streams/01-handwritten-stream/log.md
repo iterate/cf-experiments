@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 02:37 UTC+1
+
+- Added "rejects primitive per-call durability before falling back to stream settings". Runtime
+  clients can send `durability: 1` or `true`; those are not valid object/string durability choices.
+- Red result before the fix: a numeric durability rejected with `'' is not a function.` instead of a
+  stream-level validation error. The test sets default durability to `checkpointed` first so a
+  silent fallback would allocate an offset and schedule a checkpoint.
+- Fixed `#resolveAppendDurability()` to reject non-string, non-object, non-undefined durability
+  values explicitly before any persisted-setting fallback.
+- Verification: root `pnpm typecheck`, local `pnpm vitest run scripts/stream-capnweb.test.ts`, and
+  deployed `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 39 tests. Deployed version `91cb5c60-9586-4b8a-9e72-ce074d77d2b9`.
+
 ## 2026-05-27 02:33 UTC+1
 
 - Added "rejects object durability without a mode before allocating an offset". A runtime Cap'n Web

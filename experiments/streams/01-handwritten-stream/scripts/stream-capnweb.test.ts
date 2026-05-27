@@ -1049,6 +1049,26 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
+  it("rejects primitive per-call durability before falling back to stream settings", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    await using fixture = await withStream({ path });
+    await fixture.rpc.patchSettings({ defaultAppendDurabilityMode: "checkpointed" });
+
+    await expect(
+      fixture.rpc.append({
+        event: { type: "test.durability.primitive-mode" },
+        durability: JSON.parse("1"),
+      }),
+    ).rejects.toThrow(/append durability must be a mode string or options object/);
+
+    expect(await fixture.rpc.maxOffset()).toBe(0);
+    expect(await fixture.rpc.debug()).toMatchObject({
+      unconfirmedWriteCount: 0,
+      checkpointStartedCount: 0,
+      checkpointCompletedCount: 0,
+    });
+  });
+
   it("uses checkpointed stream settings when append does not pass a per-call override", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     await using fixture = await withStream({ path });

@@ -444,6 +444,13 @@ export class Stream extends DurableObject {
     mode: AppendDurabilityMode;
     checkpointEveryUnconfirmedAppends: number;
   } {
+    if (
+      durability !== undefined &&
+      typeof durability !== "string" &&
+      typeof durability !== "object"
+    ) {
+      throw new Error("append durability must be a mode string or options object");
+    }
     if (durability === null) {
       throw new Error("append durability must be a mode string or options object");
     }
@@ -467,8 +474,9 @@ export class Stream extends DurableObject {
      * including "rejects invalid checkpoint thresholds even on non-checkpointed
      * object durability" and "rejects null per-call durability before allocating
      * an offset", and "rejects object durability without a mode before
-     * allocating an offset" in `scripts/stream-capnweb.test.ts` cover each
-     * branch here.
+     * allocating an offset", and "rejects primitive per-call durability before
+     * falling back to stream settings" in `scripts/stream-capnweb.test.ts`
+     * cover each branch here.
      */
     this.#validateDurabilityMode(mode);
     return {
