@@ -9,9 +9,25 @@ type ProbeMessage =
       sockets: number;
     };
 
+const autoResponseLeaseMs = 1_000;
+
 export class HibernationRestartProbe extends DurableObject {
   #incarnationId = crypto.randomUUID();
   #chunks: Uint8Array[] = [];
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.ctx.setWebSocketAutoResponse(
+      new WebSocketRequestResponsePair(
+        "ping",
+        JSON.stringify({
+          op: "auto-pong",
+          incarnationId: this.#incarnationId,
+          expiresAt: Date.now() + autoResponseLeaseMs,
+        }),
+      ),
+    );
+  }
 
   ping() {
     return {
@@ -112,4 +128,3 @@ export default {
     );
   },
 } satisfies ExportedHandler<Env>;
-

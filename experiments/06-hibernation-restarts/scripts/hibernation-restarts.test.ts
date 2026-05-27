@@ -18,6 +18,12 @@ type SocketOutcome =
   | { kind: "errored"; error: unknown }
   | { kind: "stale" };
 
+type AutoPong = {
+  op: "auto-pong";
+  incarnationId: string;
+  expiresAt: number;
+};
+
 describe("hibernation restart probe", () => {
   deployedIt("keeps one hibernatable websocket connected across idle hibernation", async () => {
     const name = `hibernate-${crypto.randomUUID()}`;
@@ -26,6 +32,9 @@ describe("hibernation restart probe", () => {
     const before = await ping(name);
 
     await delay(hibernationWaitMs);
+
+    const autoPong = await socket.autoPing();
+    expect(autoPong.expiresAt).toBeLessThan(Date.now());
 
     const pong = await socket.ping();
     expect(pong.incarnationId).not.toBe(before.incarnationId);
@@ -43,6 +52,12 @@ describe("hibernation restart probe", () => {
 
     await expect(kill(name)).rejects.toThrow();
 
+    const autoPong = await socket.autoPing();
+    expect(autoPong.incarnationId).toBe(before.incarnationId);
+    await delay(Math.max(0, autoPong.expiresAt - Date.now()) + 100);
+    const expiredAutoPong = await socket.autoPing();
+    expect(expiredAutoPong.expiresAt).toBeLessThan(Date.now());
+
     const oldSocket = await observeOldSocket(socket, 1_000);
     expect(oldSocket.kind).not.toBe("responded");
 
@@ -58,6 +73,12 @@ describe("hibernation restart probe", () => {
     const before = await socket.ping();
 
     await expect(allocate(name, oomBytes)).rejects.toThrow();
+
+    const autoPong = await socket.autoPing();
+    expect(autoPong.incarnationId).toBe(before.incarnationId);
+    await delay(Math.max(0, autoPong.expiresAt - Date.now()) + 100);
+    const expiredAutoPong = await socket.autoPing();
+    expect(expiredAutoPong.expiresAt).toBeLessThan(Date.now());
 
     const oldSocket = await observeOldSocket(socket, 1_000);
     expect(oldSocket.kind).not.toBe("responded");
@@ -94,7 +115,7 @@ async function openProbeSocket(name: string) {
   let closed = false;
   let errored: unknown;
 
-  webSocket.addEventListener("message", (message) => inbox.push(JSON.parse(String(message.data))));
+  webSocket.addEventListener("message", (message) => inbox.push(parseMessage(String(message.data))));
   webSocket.addEventListener("close", () => {
     closed = true;
     inbox.close();
@@ -106,6 +127,14 @@ async function openProbeSocket(name: string) {
   await waitForOpen(webSocket);
 
   return {
+    async autoPing(timeoutMs = 2_000) {
+      webSocket.send("ping");
+      while (true) {
+        const result = await withTimeout(inbox.next(), timeoutMs);
+        if (result.done) throw new Error("WebSocket closed");
+        if (isAutoPong(result.value)) return result.value;
+      }
+    },
     async ping(timeoutMs = 2_000) {
       const id = crypto.randomUUID();
       webSocket.send(JSON.stringify({ op: "ping", id }));
@@ -204,6 +233,14 @@ function toWebSocketUrl(requestUrl: URL): string {
   return webSocketUrl.toString();
 }
 
+function parseMessage(data: string): unknown {
+  try {
+    return JSON.parse(data);
+  } catch {
+    return data;
+  }
+}
+
 function waitForOpen(webSocket: WebSocket): Promise<void> {
   if (webSocket.readyState === WebSocket.OPEN) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -229,4 +266,13 @@ function delay(ms: number): Promise<void> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isAutoPong(value: unknown): value is AutoPong {
+  return (
+    isRecord(value) &&
+    value.op === "auto-pong" &&
+    typeof value.incarnationId === "string" &&
+    typeof value.expiresAt === "number"
+  );
 }

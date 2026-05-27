@@ -9,6 +9,7 @@ When a Durable Object has a hibernatable WebSocket accepted with `ctx.acceptWebS
 - Does the WebSocket stay connected across normal deployed hibernation?
 - What does the client observe when the DO is reset with `ctx.abort()`?
 - What does the client observe when the DO is killed by memory pressure?
+- Can a hibernation auto-response be used as a cheap heartbeat without hiding a dead DO?
 
 The expected baseline is:
 
@@ -18,6 +19,10 @@ The expected baseline is:
   should not keep participating in the restarted DO's WebSocket set.
 - OOM behavior is intentionally treated as an opt-in deployed probe because it can crash the isolate
   and may vary by runtime.
+- A plain auto-response is not enough for crash detection: the runtime can keep answering it after
+  `ctx.abort()` / OOM. This experiment makes the auto-response a short-lived lease. When the lease
+  expires, the client must send a real application message to renew it. That wakes a normally
+  hibernated DO, but times out on a stale ghost connection after reset.
 
 ## How to run
 
@@ -54,6 +59,10 @@ Parameters:
 
 The deployed hibernation test passes only if the same client WebSocket receives a `pong` after the
 idle wait and the returned `incarnationId` differs from the pre-wait HTTP ping.
+
+The auto-response lease test passes only if literal `ping` receives an expired `auto-pong` after the
+DO has been idle or reset. A real JSON `ping` should renew against normal hibernation and should not
+respond on the old socket after abort/OOM.
 
 The abort and OOM probes report the old socket as `closed`, `errored`, `stale`, or `responded`.
 `responded` means the old socket still reached a live DO after reset and is unexpected for abort/OOM.
