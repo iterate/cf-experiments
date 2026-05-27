@@ -5,6 +5,19 @@
 
 # Notes
 
+## 2026-05-27 05:45 UTC+1
+
+- Added "rejects non-string event types at the append envelope boundary". The event `type` is the
+  stream log discriminator; runtime callers must not be able to send a non-string `type` and reach
+  durability handling or storage writes.
+- Mutation check: temporarily relaxing the shared event schema from `z.string()` to `z.unknown()`
+  for `type` made the new test fail; the malformed type reached durability resolution and reported
+  `Unknown append durability mode: not-a-mode`.
+- Verification: targeted local Vitest, shared `pnpm typecheck`, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 63 tests. Deployed version `9ba07624-9cda-48b7-b772-6fcb30fa860f`.
+
 ## 2026-05-27 05:42 UTC+1
 
 - Added "rejects non-string idempotency keys before idempotency lookup". Runtime callers can send
