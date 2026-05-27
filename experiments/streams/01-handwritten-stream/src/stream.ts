@@ -438,13 +438,18 @@ export class Stream extends DurableObject {
    * so chunks are RPC pass-by-value `StreamEvent` objects — no NDJSON byte encoding.
    *
    * The API is deliberately modeled as a returned `ReadableStream`, not as a
-   * subscriber passing an `onEvent(event)` callback capability into the DO. This
-   * stream is one-directional: after the initial `stream()` RPC, delivery does
-   * not require per-event subscriber acknowledgements, return values, or callback
-   * method calls from the DO to the subscriber. See "pure subscribers do not
-   * originate per-event websocket traffic" in `scripts/stream-capnweb.test.ts`,
-   * which records the subscriber WebSocket and asserts no outbound pull/push
-   * frames after subscription while events are delivered.
+   * subscriber passing an `onEvent(event)` callback capability into the DO. At
+   * the application contract level this is one-directional fan-out: after the
+   * initial `stream()` RPC, the subscriber never exposes an app callback that
+   * the Stream DO must call, await, or interpret as an acknowledgement.
+   *
+   * The websocket-frame tests make the current Cap'n Web reality explicit:
+   * "pure subscribers do not originate per-event pull or push websocket traffic"
+   * passes, but the adjacent `it.fails` sentinel shows returned streams still
+   * emit subscriber-originated per-chunk `resolve undefined` protocol frames.
+   * That is exactly why the benchmark compares returned streams against raw
+   * WebSocket fan-out and ORPC iterator probes instead of pretending this shape
+   * is zero-return-traffic on the wire.
    *
    * The subscription intentionally has no options/cursor argument. Runtime
    * callers must not be allowed to pass `fromOffset`-style objects and silently

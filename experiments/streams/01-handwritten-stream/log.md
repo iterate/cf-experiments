@@ -5,6 +5,58 @@
 
 # Notes
 
+## 2026-05-27 07:31 UTC+1
+
+- Tightened the subscriber websocket-frame proof. The old assertion only checked that a pure
+  subscriber sent no post-subscription Cap'n Web `pull` / `push` frames while receiving live stream
+  chunks. A stricter "no outbound frames at all" assertion failed locally: the subscriber sent
+  per-chunk `resolve undefined` protocol frames after subscription.
+- Kept the passing pull/push test, and added an adjacent `it.fails` sentinel:
+  "pure subscribers would send no per-event websocket frames if Cap'n Web returned streams were
+  wire-one-way". This documents that the returned `ReadableStream` shape avoids an application-level
+  `onEvent()` callback/ack contract, but capnweb@0.8.0 returned streams are not zero-return-traffic
+  on the WebSocket wire.
+- Tried a `callback-volatile` diagnostic contrast that deliberately modeled the rejected subscriber
+  shape: subscribers pass `onEvent(event)` capabilities and the Stream DO invokes them once per
+  event. The DO-side benchmark timed out locally as soon as a callback subscriber was involved, so
+  this is not kept as a benchmark mode. The real comparison target should be ORPC event iterators
+  versus Cap'n Web returned streams versus raw JSON-over-WebSocket.
+- Note on earlier `0 ms` Stream DO timing summaries: they should be read as "below the runtime timer
+  resolution / not externally observable", not as proof that the internal operation was literally
+  instantaneous. The external same-runner append/ack and websocket-frame boundaries remain the
+  meaningful measurements.
+- Read the installed capnweb@0.8.0 source. Returned `ReadableStream` values serialize as a pipe to a
+  remote `WritableStream`; each chunk is a `stream(["write"], payload)` call and the subscriber side
+  auto-resolves it with `resolve undefined`. There is no public Cap'n Web session option for stream
+  high-water mark/window tuning beyond `onSendError`, and user-supplied `ReadableStream` queuing
+  strategy would not change Cap'n Web's internal `TransformStream` / byte-window flow controller.
+- Added `stream-kind=orpc-durable-iterator`: separate volatile `OrpcDurableStream` DO, ORPC Durable
+  Iterator WebSocket subscribers, and `publishEvent()` fan-out. The earlier interim ORPC fetch/SSE
+  probe was removed to keep the matrix focused. Local smoke run with 1 publisher / 1 subscriber / 3
+  frames completed and delivered all frames.
+- Verification before deploy: package-local `pnpm typecheck`, focused local pure-subscriber frame
+  tests, full local `scripts/stream-capnweb.test.ts` (`66 passed`, `1 expected fail`), and
+  `pnpm wrangler deploy --dry-run` passed.
+- Deployed version `edb9aa96-672a-47b4-9bc4-b73332ec67e0`. Focused deployed pure-subscriber frame
+  tests passed.
+- Deployed 10 publishers / 36 active subscribers / 50 frames / 20 ms pacing / self-echo disabled /
+  append-ack measured:
+  - ORPC durable iterator first run: all frames delivered, all-subs p95 `1480 ms`, append-ack p95
+    `1002 ms`, fan-out attempts `18000`.
+  - ORPC durable iterator repeat: all frames delivered, all-subs p95 `377 ms`, append-ack p95
+    `128 ms`, fan-out attempts `18000`.
+  - Raw WebSocket repeat: all frames delivered, all-subs p95 `131 ms`, append-ack p95 `9 ms`,
+    fan-out attempts `18000`.
+  - Cap'n Web object `volatile` repeat: all frames delivered, all-subs p95 `897 ms`, append-ack p95
+    `480 ms`, fan-out attempts `18000`.
+  - Cap'n Web JSON-string `json-volatile` repeat: all frames delivered, all-subs p95 `1303 ms`,
+    append-ack p95 `624 ms`, fan-out attempts `18000`.
+- Interpretation: ORPC Durable Iterator is a credible improvement over Cap'n Web returned streams
+  after warm-up, but raw WebSocket is still much faster. The first ORPC run was much slower than the
+  repeat, so this needs repeated production runs before becoming a high-level finding. The deployed
+  evidence still supports "Cap'n Web returned-stream pipe/per-chunk resolve traffic is expensive",
+  but it does not support "any durable iterator transport is automatically raw-WebSocket fast".
+
 ## 2026-05-27 07:23 UTC+1
 
 - Added `stream-kind=json-volatile`: same Cap'n Web RPC and returned `ReadableStream` transport as

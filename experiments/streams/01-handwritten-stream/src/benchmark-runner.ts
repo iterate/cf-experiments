@@ -1,11 +1,24 @@
 import { DurableObject } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
-import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import { createORPCClient, type Client } from "@orpc/client";
+import { RPCLink as ORPCWebSocketLink } from "@orpc/client/websocket";
+import { signDurableIteratorToken } from "@orpc/experimental-durable-iterator";
+import {
+  StreamEvent as StreamEventSchema,
+  type StreamEvent,
+  type StreamEventInput,
+} from "@cf-experiments/shared/event";
+import { ORPC_DURABLE_ITERATOR_SIGNING_KEY } from "./orpc-durable-stream.js";
 import type { StreamRpc } from "./stream.js";
 
 export type BenchmarkMode = "rpc-serial" | "rpc-batch" | "rpc-pipelined";
 type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
-type StreamKind = "durable" | "volatile" | "json-volatile" | "raw-volatile";
+type StreamKind =
+  | "durable"
+  | "volatile"
+  | "json-volatile"
+  | "orpc-durable-iterator"
+  | "raw-volatile";
 type AppendDurability =
   | AppendDurabilityMode
   | {
@@ -175,6 +188,16 @@ type RawStreamFixture = {
   dispose(): void;
 };
 
+type OrpcDurableIteratorFixture = {
+  iterator: AsyncIterator<StreamEvent>;
+  webSocket: WebSocket;
+  dispose(): Promise<void>;
+};
+
+type OrpcDurableIteratorClient = {
+  subscribe: Client<Record<never, never>, undefined, AsyncIterator<StreamEvent>, unknown>;
+};
+
 export class BenchmarkRunner extends DurableObject {
   async runBenchmark(args: RunBenchmarkArgs): Promise<BenchmarkResult> {
     const stream = args.stream;
@@ -271,28 +294,17 @@ export class BenchmarkRunner extends DurableObject {
     if (
       config.streamKind === "volatile" ||
       config.streamKind === "json-volatile" ||
+      config.streamKind === "orpc-durable-iterator" ||
       config.streamKind === "raw-volatile"
     ) {
       const expectedSubscribers = config.subscribers + config.slowSubscribers;
       const attachDeadline = Date.now() + 5_000;
       while (Date.now() < attachDeadline) {
-        const debug = await stream.debug();
-        const attached =
-          config.streamKind === "raw-volatile"
-            ? debug.rawVolatileSubscribers
-            : config.streamKind === "json-volatile"
-              ? debug.jsonVolatileSubscribers.length
-            : debug.volatileSubscribers.length;
+        const attached = await debugSubscriberCount(this.env, config);
         if (attached >= expectedSubscribers) break;
         await sleep(25);
       }
-      const debug = await stream.debug();
-      const attached =
-        config.streamKind === "raw-volatile"
-          ? debug.rawVolatileSubscribers
-          : config.streamKind === "json-volatile"
-            ? debug.jsonVolatileSubscribers.length
-          : debug.volatileSubscribers.length;
+      const attached = await debugSubscriberCount(this.env, config);
       if (attached < expectedSubscribers) {
         throw new Error(
           `expected ${expectedSubscribers} ${config.streamKind} subscribers, saw ${attached}`,
@@ -348,7 +360,10 @@ export class BenchmarkRunner extends DurableObject {
       }
     }
     const selfEchoPublisher = publisherResults.find((publisher) => publisher.publisher === 0);
-    const serverDebug = await stream.debug();
+    const serverDebug =
+      config.streamKind === "orpc-durable-iterator"
+        ? await this.env.ORPC_STREAM.getByName(config.stream).debug()
+        : await stream.debug();
 
     return {
       type: "audio-chaos-benchmark-result",
@@ -430,6 +445,9 @@ export class BenchmarkRunner extends DurableObject {
     if (args.streamKind === "raw-volatile") {
       return this.runRawAudioSubscriber(args);
     }
+    if (args.streamKind === "orpc-durable-iterator") {
+      return this.runOrpcDurableIteratorAudioSubscriber(args);
+    }
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     const reader = await objectStreamReader(fixture.rpc, fixture.streamKind);
     const samples: AudioSample[] = [];
@@ -472,6 +490,19 @@ export class BenchmarkRunner extends DurableObject {
         fixture.dispose();
       }
     }
+    if (args.streamKind === "orpc-durable-iterator") {
+      const fixture = await connectOrpcDurableIterator(this.env, args.stream);
+      try {
+        await sleep(args.holdMs);
+        return {
+          runner: this.ctx.id.name ?? this.ctx.id.toString(),
+          subscriber: args.subscriber,
+          heldMs: args.holdMs,
+        };
+      } finally {
+        await fixture.dispose();
+      }
+    }
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     if (fixture.streamKind === "volatile") {
       await fixture.rpc.streamVolatile();
@@ -501,6 +532,9 @@ export class BenchmarkRunner extends DurableObject {
   ): Promise<AudioPublisherResult> {
     if (args.streamKind === "raw-volatile") {
       return this.runRawAudioPublisher(args);
+    }
+    if (args.streamKind === "orpc-durable-iterator") {
+      return this.runOrpcDurableIteratorAudioPublisher(args);
     }
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     const appendPromises: Promise<StreamEvent>[] = [];
@@ -623,6 +657,133 @@ export class BenchmarkRunner extends DurableObject {
       samples,
       latencyMs: summarize(samples.map((sample) => sample.latencyMs)),
     };
+  }
+
+  private async runOrpcDurableIteratorAudioSubscriber(
+    args: AudioChaosConfig & { subscriber: string },
+  ): Promise<AudioSubscriberResult> {
+    const fixture = await connectOrpcDurableIterator(this.env, args.stream);
+    const samples: AudioSample[] = [];
+    try {
+      for (let received = 0; received < args.publishers * args.framesPerPublisher; received += 1) {
+        const result = await withTimeout(fixture.iterator.next(), args.timeoutMs);
+        if (result.done) throw new Error(`${args.subscriber} ORPC iterator ended early`);
+        samples.push({
+          frameId: readFrameId(result.value),
+          latencyMs: Math.max(0, Date.now() - Date.parse(result.value.createdAt)),
+        });
+      }
+    } finally {
+      await fixture.dispose();
+    }
+
+    return {
+      runner: this.ctx.id.name ?? this.ctx.id.toString(),
+      subscriber: args.subscriber,
+      received: samples.length,
+      samples,
+      latencyMs: summarize(samples.map((sample) => sample.latencyMs)),
+    };
+  }
+
+  private async runOrpcDurableIteratorAudioPublisher(
+    args: AudioChaosConfig & {
+      audio: AudioFixture;
+      publisher: number;
+      selfEcho: boolean;
+    },
+  ): Promise<AudioPublisherResult> {
+    const stream = this.env.ORPC_STREAM.getByName(args.stream);
+    const selfEchoFixture = args.selfEcho
+      ? await connectOrpcDurableIterator(this.env, args.stream)
+      : undefined;
+    const appendPromises: Promise<StreamEvent>[] = [];
+    const appendStartedAtByFrame = new Map<string, number>();
+    const ackLatencyByFrame = new Map<string, number>();
+    const ackAtByFrame = new Map<string, number>();
+    const selfEchoLatencyByFrame = new Map<string, number>();
+    const appendStartToSelfEchoLatencyByFrame = new Map<string, number>();
+    const selfEchoAtByFrame = new Map<string, number>();
+    const selfEcho =
+      selfEchoFixture !== undefined
+        ? this.collectOrpcDurableIteratorSelfEcho({
+            ...args,
+            fixture: selfEchoFixture,
+            appendStartedAtByFrame,
+            selfEchoLatencyByFrame,
+            appendStartToSelfEchoLatencyByFrame,
+            selfEchoAtByFrame,
+          })
+        : Promise.resolve();
+
+    try {
+      const startedAt = Date.now();
+      for (let frame = 1; frame <= args.framesPerPublisher; frame += 1) {
+        const frameId = `p${args.publisher}-f${frame}`;
+        const appendStartedAt = Date.now();
+        appendStartedAtByFrame.set(frameId, appendStartedAt);
+        const append = stream
+          .fetch("https://orpc-durable-stream.internal/append", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              event: buildAudioEvent({
+                config: args,
+                audio: args.audio,
+                publisher: String(args.publisher),
+                frame,
+                frameId,
+              }),
+            }),
+          })
+          .then(async (response): Promise<StreamEvent> => {
+            if (!response.ok) {
+              throw new Error(`ORPC durable iterator append failed: ${await response.text()}`);
+            }
+            return StreamEventSchema.parse(await response.json());
+          });
+        appendPromises.push(
+          append.then((event) => {
+            if (args.measureAppendAck && args.publisher === 0) {
+              const ackAt = Date.now();
+              ackLatencyByFrame.set(frameId, ackAt - appendStartedAt);
+              ackAtByFrame.set(frameId, ackAt);
+            }
+            return event;
+          }),
+        );
+        if (args.paceMs > 0) {
+          const nextFrameAt = startedAt + frame * args.paceMs;
+          await sleep(Math.max(0, nextFrameAt - Date.now()));
+        }
+      }
+
+      await Promise.all(appendPromises);
+      await selfEcho;
+      const elapsedMs = Date.now() - startedAt;
+      const ackToSelfEchoLatencyMs =
+        args.measureAppendAck && args.publisher === 0
+          ? Array.from(ackAtByFrame, ([frameId, ackAt]) => {
+              const selfEchoAt = selfEchoAtByFrame.get(frameId);
+              return selfEchoAt === undefined ? 0 : selfEchoAt - ackAt;
+            }).filter((latency) => latency >= 0)
+          : [];
+
+      return {
+        runner: this.ctx.id.name ?? this.ctx.id.toString(),
+        publisher: args.publisher,
+        sent: args.framesPerPublisher,
+        elapsedMs,
+        appendAckLatencyMs: summarize(Array.from(ackLatencyByFrame.values())),
+        selfEchoLatencyMs: summarize(Array.from(selfEchoLatencyByFrame.values())),
+        appendStartToSelfEchoLatencyMs: summarize(
+          Array.from(appendStartToSelfEchoLatencyByFrame.values()),
+        ),
+        ackToSelfEchoLatencyMs: summarize(ackToSelfEchoLatencyMs),
+      };
+    } finally {
+      await selfEchoFixture?.dispose();
+    }
   }
 
   private async runRawAudioPublisher(
@@ -766,6 +927,35 @@ export class BenchmarkRunner extends DurableObject {
       reader.releaseLock();
     }
   }
+
+  private async collectOrpcDurableIteratorSelfEcho(args: AudioChaosConfig & {
+    fixture: OrpcDurableIteratorFixture;
+    appendStartedAtByFrame: Map<string, number>;
+    selfEchoLatencyByFrame: Map<string, number>;
+    appendStartToSelfEchoLatencyByFrame: Map<string, number>;
+    selfEchoAtByFrame: Map<string, number>;
+    publisher: number;
+  }) {
+    let ownFramesDelivered = 0;
+    while (ownFramesDelivered < args.framesPerPublisher) {
+      const result = await withTimeout(args.fixture.iterator.next(), args.timeoutMs);
+      if (result.done) throw new Error("ORPC iterator publisher self-echo ended early");
+      const frameId = readFrameId(result.value);
+      if (frameId.startsWith(`p${args.publisher}-`)) {
+        ownFramesDelivered += 1;
+        const selfEchoAt = Date.now();
+        const appendStartedAt = args.appendStartedAtByFrame.get(frameId);
+        args.selfEchoAtByFrame.set(frameId, selfEchoAt);
+        args.selfEchoLatencyByFrame.set(
+          frameId,
+          Math.max(0, selfEchoAt - Date.parse(result.value.createdAt)),
+        );
+        if (appendStartedAt !== undefined) {
+          args.appendStartToSelfEchoLatencyByFrame.set(frameId, selfEchoAt - appendStartedAt);
+        }
+      }
+    }
+  }
 }
 
 function buildEvent(n: number, runId: string, payloadBytes: number): StreamEventInput {
@@ -811,6 +1001,16 @@ function makeAudioFixture(config: AudioChaosConfig): AudioFixture {
     rawFrameBytes,
     base64: btoa(String.fromCharCode(...new Uint8Array(rawFrameBytes).fill(0x7f))),
   };
+}
+
+async function debugSubscriberCount(env: Env, config: AudioChaosConfig): Promise<number> {
+  if (config.streamKind === "orpc-durable-iterator") {
+    return (await env.ORPC_STREAM.getByName(config.stream).debug()).subscribers;
+  }
+  const debug = await env.STREAM.getByName(config.stream).debug();
+  if (config.streamKind === "raw-volatile") return debug.rawVolatileSubscribers;
+  if (config.streamKind === "json-volatile") return debug.jsonVolatileSubscribers.length;
+  return debug.volatileSubscribers.length;
 }
 
 function appendDurability(config: AudioChaosConfig): AppendDurability {
@@ -918,6 +1118,39 @@ async function connectRawStream(env: Env, stream: string): Promise<RawStreamFixt
       );
     },
     dispose() {
+      webSocket.close();
+    },
+  };
+}
+
+async function connectOrpcDurableIterator(
+  env: Env,
+  stream: string,
+): Promise<OrpcDurableIteratorFixture> {
+  const nowInSeconds = Math.floor(Date.now() / 1_000);
+  const token = await signDurableIteratorToken(ORPC_DURABLE_ITERATOR_SIGNING_KEY, {
+    chn: stream,
+    iat: nowInSeconds,
+    exp: nowInSeconds + 60 * 60,
+  });
+  const url = new URL("https://orpc-durable-stream.internal/");
+  url.searchParams.set("id", crypto.randomUUID());
+  url.searchParams.set("token", token);
+  const response = await env.ORPC_STREAM.getByName(stream).fetch(url, {
+    headers: { Upgrade: "websocket" },
+  });
+  const webSocket = response.webSocket;
+  if (webSocket === null) throw new Error("ORPC durable iterator did not return a WebSocket");
+  webSocket.accept();
+  const client = createORPCClient<OrpcDurableIteratorClient>(
+    new ORPCWebSocketLink({ websocket: webSocket }),
+  );
+  const iterator = await client.subscribe();
+  return {
+    iterator,
+    webSocket,
+    async dispose() {
+      await iterator.return?.();
       webSocket.close();
     },
   };

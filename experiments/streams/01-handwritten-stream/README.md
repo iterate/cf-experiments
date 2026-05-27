@@ -83,6 +83,13 @@ pre-serialized JSON string instead of a pass-by-value event object:
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=json-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
 
+Set `stream-kind=orpc-durable-iterator` to use a separate volatile `OrpcDurableStream` DO, where
+subscribers connect through ORPC's Durable Iterator WebSocket path:
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=orpc-durable-iterator&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
+```
+
 Deploy current code:
 
 ```sh

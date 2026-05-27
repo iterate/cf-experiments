@@ -25,6 +25,13 @@ function outboundPullPushFrames(
     .filter((data) => data[0] === "pull" || data[0] === "push");
 }
 
+function outboundFrames(wsMessages: { direction: string; data: string }[], afterFrameIndex: number) {
+  return wsMessages
+    .slice(afterFrameIndex)
+    .filter((frame) => frame.direction === "out")
+    .map((frame) => JSON.parse(frame.data));
+}
+
 async function readEvents(
   streamReader: ReadableStreamDefaultReader<StreamEvent>,
   count: number,
@@ -543,7 +550,7 @@ describe("handwritten stream capnweb", () => {
     });
   });
 
-  it("pure subscribers do not originate per-event websocket traffic", async () => {
+  it("pure subscribers do not originate per-event pull or push websocket traffic", async () => {
     const path = `stream-${crypto.randomUUID()}`;
     const events: StreamEventInput[] = Array.from({ length: 10 }, (_, i) => ({
       type: "test.pure-subscriber",
@@ -567,6 +574,33 @@ describe("handwritten stream capnweb", () => {
 
     reader.releaseLock();
   });
+
+  it.fails(
+    "pure subscribers would send no per-event websocket frames if Cap'n Web returned streams were wire-one-way",
+    async () => {
+      const path = `stream-${crypto.randomUUID()}`;
+      const events: StreamEventInput[] = Array.from({ length: 10 }, (_, i) => ({
+        type: "test.pure-subscriber",
+        payload: { n: i + 1 },
+      }));
+
+      await using subscriber = await withStream({ path });
+      const readable = await subscriber.rpc.stream();
+      const outboundAfterSubscribe = subscriber.wsMessages.length;
+      // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+      const reader = (readable as ReadableStream<StreamEvent>).getReader();
+
+      await using writer = await withStream({ path });
+      await writer.rpc.appendBatch({ events, durability: "best-effort" });
+
+      const delivered = await readEvents(reader, events.length, 1_000);
+      expect(delivered.map((event) => event.payload)).toEqual(events.map((event) => event.payload));
+
+      expect(outboundFrames(subscriber.wsMessages, outboundAfterSubscribe)).toEqual([]);
+
+      reader.releaseLock();
+    },
+  );
 
   it(
     "delivers global offset order to multiple subscribers with no per-event RPC from readers or writers",

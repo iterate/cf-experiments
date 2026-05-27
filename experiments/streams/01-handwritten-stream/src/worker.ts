@@ -1,7 +1,8 @@
 import { BenchmarkRunner } from "./benchmark-runner.js";
+import { OrpcDurableStream } from "./orpc-durable-stream.js";
 import { Stream } from "./stream.js";
 
-export { BenchmarkRunner, Stream };
+export { BenchmarkRunner, OrpcDurableStream, Stream };
 
 export default {
   async fetch(request, env) {
@@ -60,9 +61,12 @@ function streamKindParam(url: URL) {
     raw !== "durable" &&
     raw !== "volatile" &&
     raw !== "json-volatile" &&
+    raw !== "orpc-durable-iterator" &&
     raw !== "raw-volatile"
   ) {
-    throw new Error("stream-kind must be durable, volatile, json-volatile, or raw-volatile");
+    throw new Error(
+      "stream-kind must be durable, volatile, json-volatile, orpc-durable-iterator, or raw-volatile",
+    );
   }
   return raw;
 }

@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@cf-experiments/shared": "workspace:*",
+    "@orpc/client": "^1.14.3",
+    "@orpc/experimental-durable-iterator": "1.14.3",
     "capnweb": "^0.8.0"
   },
   "devDependencies": {

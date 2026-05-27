@@ -42,14 +42,22 @@ history and a `ping()` RPC should not be blocked by a new confirmed append waiti
 Subscribers receive a returned `ReadableStream<StreamEvent>`. They do not pass an `onEvent()`
 callback capability into the DO.
 
-That shape is intentional. The stream is one-directional fan-out: after the initial `stream()` RPC
-sets up the pipe, event delivery does not require subscriber return traffic, per-event method calls,
-or acknowledgements. A callback-shaped API would make every event a DO-to-client RPC call with a
-return path; this experiment wants append fan-out to be just stream chunks flowing out.
+That shape is intentional. At the application contract level, the stream is one-directional fan-out:
+after the initial `stream()` RPC sets up the pipe, the Stream DO does not call a subscriber-owned app
+method, wait for an app return value, or interpret a subscriber acknowledgement before moving on. A
+callback-shaped API would make every event a DO-to-client RPC call with a return path; this experiment
+wants the subscriber contract to be stream chunks flowing out.
 
-The isolated websocket-frame proof is "pure subscribers do not originate per-event websocket
-traffic" in `scripts/stream-capnweb.test.ts`: after subscription, the subscriber receives a burst and
-its recorded websocket frames contain no outbound `pull` or `push` frames.
+The isolated websocket-frame tests in `scripts/stream-capnweb.test.ts` document both the desired
+shape and the current Cap'n Web transport reality:
+
+- "pure subscribers do not originate per-event pull or push websocket traffic" passes: after
+  subscription, a pure reader receives a burst without sending app-level Cap'n Web `pull` / `push`
+  requests.
+- "pure subscribers would send no per-event websocket frames if Cap'n Web returned streams were
+  wire-one-way" is an `it.fails` sentinel: with capnweb@0.8.0, the subscriber still sends per-chunk
+  `resolve undefined` protocol frames. So the API avoids an application callback/ack contract, but
+  the current returned-stream implementation is not zero-return-traffic on the wire.
 
 ## Design-space guardrails
 
@@ -69,7 +77,7 @@ passes, but that a competing implementation choice should fail a named probe.
 | Keep checkpointed delivery best-effort while confirmed delivery waits for durability | The two durability modes would become indistinguishable at the subscriber boundary | "checkpointed passes the live-before-durability probe that confirmed intentionally fails" |
 | Capture one replay boundary, register each stream once, and use one enqueue path for replay/live fan-out | Replay/live ordering, subscriber accounting, or multi-subscriber fan-out could skip, duplicate, leak, or reorder events | "replays committed history before switching to live appends", "accounts replayed events through the same subscriber enqueue path as live fan-out", "delivers global offset order to multiple subscribers with no per-event RPC from readers or writers", and "removes subscribers whose stream controller rejects enqueue" |
 | Treat `maxOffset` as a contiguous committed-history claim and clean up failed replay subscribers | A missing event key could be silently skipped, or a failed replay could leave a dead subscriber in live fan-out | "fails replay loudly when committed history has a missing event key" and "removes replay subscribers when committed history is corrupt" |
-| Model subscriptions as returned `ReadableStream`, not `onEvent()` callback RPC | A pure subscriber would originate per-event return traffic/acks | "pure subscribers do not originate per-event websocket traffic" |
+| Model subscriptions as returned `ReadableStream`, not `onEvent()` callback RPC | A pure subscriber would expose an app callback that the Stream DO must call per event | "pure subscribers do not originate per-event pull or push websocket traffic"; the adjacent `it.fails` sentinel documents that capnweb@0.8.0 returned streams still emit per-chunk `resolve undefined` protocol frames |
 | Reject stream arguments because the subscription has no cursor/options surface | Runtime callers could pass `fromOffset`-style options and silently receive the default full replay subscription | "rejects stream arguments instead of silently ignoring subscription options" |
 | Keep session-owned stream internals off the Cap'n Web surface | A client could call `streamForSession()` directly and create a subscriber that session disposal does not own | "does not expose session-owned stream internals over capnweb" |
 | Do not await per-subscriber delivery in `#broadcast()` and keep iterating after subscriber-local failures | One unread or broken subscriber could slow active subscribers, or prevent later subscribers from seeing the current event | "delivers to an active subscriber while another subscriber does not read" and "continues fan-out to later subscribers after removing a broken subscriber" |
@@ -150,6 +158,14 @@ Cap'n Web / returned-stream framing rather than storage or raw WebSocket egress 
 pre-serialized JSON string. If this is close to raw WebSocket, pass-by-value object serialization is
 the expensive part. If this is still close to object `volatile`, the expensive part is the returned
 stream / Cap'n Web stream-result machinery around many chunks.
+
+`stream-kind=orpc-durable-iterator` uses a separate volatile `OrpcDurableStream` DO. Subscribers
+connect through ORPC's Durable Iterator WebSocket path, and appends publish events with
+`publishEvent()`. This is an isolation probe for the specific Cap'n Web `ReadableStream` pipe
+behavior. It is not durable and does not replay; the benchmark waits for ORPC subscribers before
+publishing just as it does for volatile/raw subscribers. Its append path is a simple DO `fetch()`
+diagnostic endpoint, so the subscriber fan-out metrics are the primary comparison; append-ack
+latency is useful, but not yet an ORPC client-RPC apples-to-apples result.
 
 ## Debug hooks
 
