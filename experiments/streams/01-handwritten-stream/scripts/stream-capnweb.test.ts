@@ -1023,6 +1023,9 @@ describe("handwritten stream capnweb", () => {
     await expect(fixture.rpc.patchSettings({ debugCheckpointSyncDelayMs: -1 })).rejects.toThrow(
       /debugCheckpointSyncDelayMs/,
     );
+    await expect(
+      fixture.rpc.patchSettings(JSON.parse('{"checkpointEveryUnconfirmedAppend":1}')),
+    ).rejects.toThrow(/Unknown stream setting/);
 
     await fixture.rpc.append({
       event: { type: "test.settings.invalid-defaults", payload: { mode: "still-confirmed" } },

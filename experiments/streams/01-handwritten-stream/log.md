@@ -5,6 +5,20 @@
 
 # Notes
 
+## 2026-05-27 05:21 UTC+1
+
+- Added a failing probe for unknown stream settings in "rejects invalid stream settings without
+  changing append defaults". `patchSettings()` is on the append path because omitted append
+  durability falls back to persisted settings; typoed runtime keys such as
+  `checkpointEveryUnconfirmedAppend` must be rejected instead of persisted and silently ignored.
+- Red result before the fix: the unknown setting was accepted, so the new `rejects.toThrow()` failed.
+- Fixed `#parseSettings()` to reject keys outside the persisted stream settings envelope before
+  merging with defaults.
+- Verification: targeted local Vitest, stream-local `pnpm typecheck`, local
+  `pnpm vitest run scripts/stream-capnweb.test.ts`, and deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 57 tests. Deployed version `46202117-a008-4290-8f75-c3048c1b463e`.
+
 ## 2026-05-27 05:15 UTC+1
 
 - Added "uses stream checkpoint threshold for checkpointed object overrides without a threshold".

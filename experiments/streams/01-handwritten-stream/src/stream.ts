@@ -61,10 +61,13 @@ export class Stream extends DurableObject {
    * This is on the append path because `#resolveAppendDurability()` falls back
    * to persisted settings when a caller omits per-call durability. If invalid
    * settings were accepted, future appends could start allocating offsets under
-   * an unknown mode or threshold. If settings were not persisted/read in the
-   * constructor, a DO restart would silently reset stream behavior. See
-   * "rejects invalid stream settings without changing append defaults" and
-   * "persists stream settings across durable object restart" in
+   * an unknown mode or threshold. Unknown runtime setting keys must also fail
+   * explicitly; otherwise typoed settings such as
+   * `checkpointEveryUnconfirmedAppend` can be persisted and then silently
+   * ignored by later `append()` durability resolution. If settings were not
+   * persisted/read in the constructor, a DO restart would silently reset stream
+   * behavior. See "rejects invalid stream settings without changing append
+   * defaults" and "persists stream settings across durable object restart" in
    * `scripts/stream-capnweb.test.ts`.
    */
   patchSettings(settings: Partial<StreamSettings>): StreamSettings {
@@ -637,7 +640,12 @@ export class Stream extends DurableObject {
   }
 
   #parseSettings(settings: Partial<StreamSettings>): StreamSettings {
-    const next = { ...defaultSettings(), ...settings };
+    const defaults = defaultSettings();
+    const unknownFields = Object.keys(settings).filter((field) => !(field in defaults));
+    if (unknownFields.length > 0) {
+      throw new Error(`Unknown stream setting: ${unknownFields.join(", ")}`);
+    }
+    const next = { ...defaults, ...settings };
     this.#validateDurabilityMode(next.defaultAppendDurabilityMode);
     this.#validateCheckpointEveryUnconfirmedAppends(next.checkpointEveryUnconfirmedAppends);
     if (!Number.isInteger(next.debugConfirmedSyncDelayMs) || next.debugConfirmedSyncDelayMs < 0) {
