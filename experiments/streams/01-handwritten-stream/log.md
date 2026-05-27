@@ -5,6 +5,21 @@
 
 # Notes
 
+## 2026-05-27 05:26 UTC+1
+
+- Tried to turn the `allowUnconfirmedWrites: true` source sentinel into a deployed behavioral race:
+  one reader subscribed, a writer appended 100 best-effort 4 KiB-payload events, and the probe raced
+  the first stream read against the appendBatch acknowledgement.
+- Current deployed fast path result on version `46202117-a008-4290-8f75-c3048c1b463e`: stream read
+  won.
+- Mutation result after temporarily deploying `allowUnconfirmedWrites: false` as version
+  `e17fcc93-e3e9-4047-967c-1986bf1dee62`: stream read still won. That race is therefore not a valid
+  guard for the output-gate choice.
+- Restored and redeployed `allowUnconfirmedWrites: true` as version
+  `858df27f-1d47-4780-8c4a-13e1abc953d6`; deployed
+  `WORKER_URL=https://01-handwritten-stream.iterate-dev-preview.workers.dev pnpm vitest run scripts/stream-capnweb.test.ts`
+  passed with 57 tests after restoration.
+
 ## 2026-05-27 05:21 UTC+1
 
 - Added a failing probe for unknown stream settings in "rejects invalid stream settings without
