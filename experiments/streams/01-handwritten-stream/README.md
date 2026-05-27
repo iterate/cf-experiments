@@ -62,6 +62,13 @@ not in the publisher/subscriber timing path:
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?publishers=10&subscribers=36&slow-subscribers=1&frames-per-publisher=50&pace-ms=20&durability=best-effort&checkpoint-every=100&measure-append-ack=true'
 ```
 
+Set `stream-kind=volatile` on `/benchmark/audio-chaos` to keep the same Stream DO, Cap'n Web
+WebSocket transport, and `ReadableStream<StreamEvent>` fan-out while bypassing persistence/replay:
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
+```
+
 Deploy current code:
 
 ```sh

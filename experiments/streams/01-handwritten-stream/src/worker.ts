@@ -10,6 +10,7 @@ export default {
       const runId = url.searchParams.get("run-id") ?? crypto.randomUUID();
       const result = await env.BENCHMARK_RUNNER.getByName(`${runId}:orchestrator`).runAudioChaos({
         stream: url.searchParams.get("stream") ?? undefined,
+        streamKind: streamKindParam(url),
         runId,
         publishers: positiveIntParam(url, "publishers"),
         subscribers: nonNegativeIntParam(url, "subscribers"),
@@ -49,6 +50,15 @@ function nonNegativeIntParam(url: URL, name: string) {
     throw new Error(`${name} must be a non-negative integer`);
   }
   return value;
+}
+
+function streamKindParam(url: URL) {
+  const raw = url.searchParams.get("stream-kind");
+  if (raw === null) return undefined;
+  if (raw !== "durable" && raw !== "volatile") {
+    throw new Error("stream-kind must be durable or volatile");
+  }
+  return raw;
 }
 
 function durabilityParam(url: URL) {

@@ -49,6 +49,8 @@ export class Stream extends DurableObject {
   #checkpointStartedCount = 0;
   #checkpointCompletedCount = 0;
   #streamSubscribers = new Set<StreamSubscriber>();
+  #volatileOffset = 0;
+  #volatileSubscribers = new Set<StreamSubscriber>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -233,6 +235,33 @@ export class Stream extends DurableObject {
     return committed;
   }
 
+  appendVolatile(args: { event: StreamEventInput }): StreamEvent {
+    /**
+     * Message-only append path for latency diagnosis. It deliberately keeps the
+     * same Cap'n Web WebSocket transport and `ReadableStream<StreamEvent>`
+     * chunks as `append()` / `stream()`, but removes storage, replay,
+     * idempotency, offset preconditions, and durability. If this path is fast
+     * while durable best-effort is slow, storage/write bookkeeping is suspect;
+     * if both are slow under fan-out, the bottleneck is transport/fan-out work.
+     * See the `/benchmark/audio-chaos?stream-kind=volatile` runs in `log.md`.
+     */
+    if (args === null || typeof args !== "object" || !("event" in args)) {
+      throw new Error("append args must be an object with event");
+    }
+    const parsedEvent = APPEND_EVENT_INPUT_SCHEMA.safeParse(args.event);
+    if (!parsedEvent.success) {
+      throw new Error("append event must be a valid StreamEventInput");
+    }
+    this.#volatileOffset += 1;
+    const committed: StreamEvent = {
+      ...parsedEvent.data,
+      offset: this.#volatileOffset,
+      createdAt: new Date().toISOString(),
+    };
+    this.#broadcastVolatile(committed);
+    return committed;
+  }
+
   async appendBatch(args: {
     events: StreamEventInput[];
     durability?: AppendDurability;
@@ -273,7 +302,12 @@ export class Stream extends DurableObject {
       checkpointInProgress: this.#checkpointInProgress,
       checkpointStartedCount: this.#checkpointStartedCount,
       checkpointCompletedCount: this.#checkpointCompletedCount,
+      volatileOffset: this.#volatileOffset,
       subscribers: Array.from(this.#streamSubscribers, (subscriber) => ({
+        desiredSize: subscriber.controller.desiredSize,
+        enqueuedEvents: subscriber.enqueuedEvents,
+      })),
+      volatileSubscribers: Array.from(this.#volatileSubscribers, (subscriber) => ({
         desiredSize: subscriber.controller.desiredSize,
         enqueuedEvents: subscriber.enqueuedEvents,
       })),
@@ -351,6 +385,10 @@ export class Stream extends DurableObject {
 
   streamForSession(sessionSubscribers: Set<StreamSubscriber>): ReadableStream<StreamEvent> {
     return this.#openStream(sessionSubscribers);
+  }
+
+  streamVolatileForSession(sessionSubscribers: Set<StreamSubscriber>): ReadableStream<StreamEvent> {
+    return this.#openVolatileStream(sessionSubscribers);
   }
 
   releaseSessionSubscribers(sessionSubscribers: Set<StreamSubscriber>): void {
@@ -444,6 +482,27 @@ export class Stream extends DurableObject {
     });
   }
 
+  #openVolatileStream(sessionSubscribers?: Set<StreamSubscriber>): ReadableStream<StreamEvent> {
+    let subscriber: StreamSubscriber | undefined;
+
+    return new ReadableStream<StreamEvent>({
+      start: (streamController) => {
+        subscriber = {
+          controller: streamController,
+          enqueuedEvents: 0,
+          sessionSubscribers,
+        };
+        this.#volatileSubscribers.add(subscriber);
+        sessionSubscribers?.add(subscriber);
+      },
+      cancel: () => {
+        if (subscriber !== undefined) {
+          this.#removeSubscriber(subscriber);
+        }
+      },
+    });
+  }
+
   getCapability(_policy?: unknown) {
     return new StreamRpcTarget(this);
   }
@@ -482,6 +541,12 @@ export class Stream extends DurableObject {
     }
   }
 
+  #broadcastVolatile(event: StreamEvent): void {
+    for (const subscriber of this.#volatileSubscribers) {
+      this.#enqueueToSubscriber(subscriber, event);
+    }
+  }
+
   #enqueueToSubscriber(subscriber: StreamSubscriber, event: StreamEvent): void {
     try {
       subscriber.controller.enqueue(event);
@@ -503,6 +568,7 @@ export class Stream extends DurableObject {
 
   #removeSubscriber(subscriber: StreamSubscriber): void {
     this.#streamSubscribers.delete(subscriber);
+    this.#volatileSubscribers.delete(subscriber);
     subscriber.sessionSubscribers?.delete(subscriber);
   }
 
@@ -695,10 +761,19 @@ export class Stream extends DurableObject {
 
 export type StreamRpc = Omit<
   Stream,
-  keyof DurableObject | "getCapability" | "fetch" | "streamForSession" | "releaseSessionSubscribers"
->;
+  | keyof DurableObject
+  | "getCapability"
+  | "fetch"
+  | "stream"
+  | "streamForSession"
+  | "streamVolatileForSession"
+  | "releaseSessionSubscribers"
+> & {
+  stream(args?: unknown): ReadableStream<StreamEvent>;
+  streamVolatile(args?: unknown): ReadableStream<StreamEvent>;
+};
 
-type BaseStreamRpc = Omit<StreamRpc, "stream">;
+type BaseStreamRpc = Omit<StreamRpc, "stream" | "streamVolatile">;
 
 const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
   /**
@@ -708,7 +783,14 @@ const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
    * disposal. See "does not expose session-owned stream internals over capnweb"
    * in `scripts/stream-capnweb.test.ts`.
    */
-  exclude: ["getCapability", "fetch", "stream", "streamForSession", "releaseSessionSubscribers"],
+  exclude: [
+    "getCapability",
+    "fetch",
+    "stream",
+    "streamForSession",
+    "streamVolatileForSession",
+    "releaseSessionSubscribers",
+  ],
 });
 
 export class StreamRpcTarget extends BaseStreamRpcTarget {
@@ -723,6 +805,11 @@ export class StreamRpcTarget extends BaseStreamRpcTarget {
   stream(args?: unknown): ReadableStream<StreamEvent> {
     if (args !== undefined) throw new Error("stream does not accept arguments");
     return this.#stream.streamForSession(this.#subscribers);
+  }
+
+  streamVolatile(args?: unknown): ReadableStream<StreamEvent> {
+    if (args !== undefined) throw new Error("stream does not accept arguments");
+    return this.#stream.streamVolatileForSession(this.#subscribers);
   }
 
   [Symbol.dispose](): void {

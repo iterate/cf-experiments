@@ -5,6 +5,16 @@
 
 # Notes
 
+## 2026-05-27 07:10 UTC+1
+
+- Added a volatile message-only stream path on the same `Stream` DO:
+  `appendVolatile()` validates and broadcasts a `StreamEvent` without storage, replay, idempotency,
+  offset preconditions, or durability; `streamVolatile()` opens a live-only `ReadableStream`.
+- Extended `/benchmark/audio-chaos` with `stream-kind=durable|volatile`. The volatile path keeps the
+  same BenchmarkRunner DOs, Stream DO, Cap'n Web WebSocket connection, event shape, and
+  `ReadableStream` chunking, so it isolates storage/write bookkeeping from fan-out/transport cost.
+- Verification in progress.
+
 ## 2026-05-27 06:58 UTC+1
 
 - Rechecked the suspicious active-subscriber sweep baseline. The `0 active subscribers` row was

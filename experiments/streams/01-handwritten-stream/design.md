@@ -133,6 +133,13 @@ own-stream delivery are both timestamped in the same publisher runner DO. This i
 for the websocket-frame tests, but it is the better latency probe when the question is whether the
 user's local network is polluting the result.
 
+For latency diagnosis, `/benchmark/audio-chaos?stream-kind=volatile` uses the same Stream DO class
+and Cap'n Web WebSocket transport but calls `appendVolatile()` / `streamVolatile()`, which skip
+storage, replay, idempotency, offset preconditions, and durability. This is not a product contract;
+it is an isolation probe. If volatile fan-out is fast while durable best-effort is slow, storage/write
+bookkeeping is implicated. If both are slow under the same subscriber shape, the bottleneck is in
+single-DO fan-out, Cap'n Web serialization, WebSocket transport, or runner scheduling.
+
 ## Debug hooks
 
 The experiment keeps a small debug surface:

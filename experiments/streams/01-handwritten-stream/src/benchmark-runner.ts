@@ -5,6 +5,7 @@ import type { StreamRpc } from "./stream.js";
 
 export type BenchmarkMode = "rpc-serial" | "rpc-batch" | "rpc-pipelined";
 type AppendDurabilityMode = "confirmed" | "best-effort" | "checkpointed";
+type StreamKind = "durable" | "volatile";
 type AppendDurability =
   | AppendDurabilityMode
   | {
@@ -37,6 +38,7 @@ export type BenchmarkResult = {
 
 export type RunAudioChaosArgs = {
   stream?: string;
+  streamKind?: StreamKind;
   runId?: string;
   publishers?: number;
   subscribers?: number;
@@ -55,6 +57,7 @@ export type RunAudioChaosArgs = {
 
 type AudioChaosConfig = {
   stream: string;
+  streamKind: StreamKind;
   runId: string;
   publishers: number;
   subscribers: number;
@@ -99,6 +102,7 @@ export type AudioChaosResult = {
   type: "audio-chaos-benchmark-result";
   runner: string;
   streamPath: string;
+  streamKind: StreamKind;
   runId: string;
   publishers: number;
   subscribers: number;
@@ -156,6 +160,7 @@ type Summary = {
 
 type StreamRpcFixture = {
   rpc: RpcStub<StreamRpc>;
+  streamKind: StreamKind;
   webSocket: WebSocket;
   dispose(): void;
 };
@@ -221,10 +226,12 @@ export class BenchmarkRunner extends DurableObject {
     const totalEvents = config.publishers * config.framesPerPublisher;
     const audio = makeAudioFixture(config);
     const stream = this.env.STREAM.getByName(config.stream);
-    await stream.patchSettings({
-      defaultAppendDurabilityMode: config.durability,
-      checkpointEveryUnconfirmedAppends: config.checkpointEveryUnconfirmedAppends,
-    });
+    if (config.streamKind === "durable") {
+      await stream.patchSettings({
+        defaultAppendDurabilityMode: config.durability,
+        checkpointEveryUnconfirmedAppends: config.checkpointEveryUnconfirmedAppends,
+      });
+    }
 
     /**
      * This benchmark deliberately runs publisher/subscriber clients in separate
@@ -305,6 +312,7 @@ export class BenchmarkRunner extends DurableObject {
       type: "audio-chaos-benchmark-result",
       runner: this.ctx.id.name ?? this.ctx.id.toString(),
       streamPath: config.stream,
+      streamKind: config.streamKind,
       runId: config.runId,
       publishers: config.publishers,
       subscribers: config.subscribers,
@@ -376,8 +384,8 @@ export class BenchmarkRunner extends DurableObject {
   async runAudioSubscriber(
     args: AudioChaosConfig & { subscriber: string },
   ): Promise<AudioSubscriberResult> {
-    const fixture = await connectStreamRpc(this.env, args.stream);
-    const reader = await objectStreamReader(fixture.rpc);
+    const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
+    const reader = await objectStreamReader(fixture.rpc, fixture.streamKind);
     const samples: AudioSample[] = [];
     try {
       for (let received = 0; received < args.publishers * args.framesPerPublisher; received += 1) {
@@ -403,8 +411,12 @@ export class BenchmarkRunner extends DurableObject {
   }
 
   async runAudioPassiveSubscriber(args: AudioChaosConfig & { subscriber: string; holdMs: number }) {
-    const fixture = await connectStreamRpc(this.env, args.stream);
-    await fixture.rpc.stream();
+    const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
+    if (fixture.streamKind === "volatile") {
+      await fixture.rpc.streamVolatile();
+    } else {
+      await fixture.rpc.stream();
+    }
     try {
       await sleep(args.holdMs);
       return {
@@ -424,7 +436,7 @@ export class BenchmarkRunner extends DurableObject {
       selfEcho: boolean;
     },
   ): Promise<AudioPublisherResult> {
-    const fixture = await connectStreamRpc(this.env, args.stream);
+    const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     const appendPromises: Promise<StreamEvent>[] = [];
     const appendStartedAtByFrame = new Map<string, number>();
     const ackLatencyByFrame = new Map<string, number>();
@@ -450,16 +462,20 @@ export class BenchmarkRunner extends DurableObject {
         const frameId = `p${args.publisher}-f${frame}`;
         const appendStartedAt = Date.now();
         appendStartedAtByFrame.set(frameId, appendStartedAt);
-        const append = fixture.rpc.append({
-          event: buildAudioEvent({
-            config: args,
-            audio: args.audio,
-            publisher: String(args.publisher),
-            frame,
-            frameId,
-          }),
-          durability: appendDurability(args),
+        const event = buildAudioEvent({
+          config: args,
+          audio: args.audio,
+          publisher: String(args.publisher),
+          frame,
+          frameId,
         });
+        const append =
+          fixture.streamKind === "volatile"
+            ? fixture.rpc.appendVolatile({ event })
+            : fixture.rpc.append({
+                event,
+                durability: appendDurability(args),
+              });
         appendPromises.push(
           append.then((event) => {
             if (args.measureAppendAck && args.publisher === 0) {
@@ -512,7 +528,7 @@ export class BenchmarkRunner extends DurableObject {
     selfEchoAtByFrame: Map<string, number>;
     publisher: number;
   }) {
-    const reader = await objectStreamReader(args.rpc);
+    const reader = await objectStreamReader(args.rpc, args.streamKind);
     try {
       for (let delivered = 0; delivered < args.publishers * args.framesPerPublisher; delivered += 1) {
         const result = await withTimeout(reader.read(), args.timeoutMs);
@@ -553,6 +569,7 @@ type AudioFixture = {
 function normalizeAudioChaosConfig(args: RunAudioChaosArgs): AudioChaosConfig {
   return {
     stream: args.stream ?? `audio-chaos-${crypto.randomUUID().slice(0, 8)}`,
+    streamKind: args.streamKind ?? "durable",
     runId: args.runId ?? crypto.randomUUID(),
     publishers: args.publishers ?? 10,
     subscribers: args.subscribers ?? 36,
@@ -625,7 +642,11 @@ function readFrameId(event: StreamEvent) {
   return event.payload.frameId;
 }
 
-async function connectStreamRpc(env: Env, stream: string): Promise<StreamRpcFixture> {
+async function connectStreamRpc(
+  env: Env,
+  stream: string,
+  streamKind: StreamKind,
+): Promise<StreamRpcFixture> {
   const response = await env.STREAM.getByName(stream).fetch("https://stream.internal/", {
     headers: { Upgrade: "websocket" },
   });
@@ -635,6 +656,7 @@ async function connectStreamRpc(env: Env, stream: string): Promise<StreamRpcFixt
   const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
   return {
     rpc,
+    streamKind,
     webSocket,
     dispose() {
       rpc[Symbol.dispose]();
@@ -643,8 +665,8 @@ async function connectStreamRpc(env: Env, stream: string): Promise<StreamRpcFixt
   };
 }
 
-async function objectStreamReader(rpc: RpcStub<StreamRpc>) {
-  const readable = await rpc.stream();
+async function objectStreamReader(rpc: RpcStub<StreamRpc>, streamKind: StreamKind) {
+  const readable = streamKind === "volatile" ? await rpc.streamVolatile() : await rpc.stream();
   // capnweb@0.8.0's TS surface only models ReadableStream<Uint8Array>, but this
   // experiment intentionally sends pass-by-value StreamEvent objects over Cap'n Web.
   return (readable as unknown as ReadableStream<StreamEvent>).getReader();
