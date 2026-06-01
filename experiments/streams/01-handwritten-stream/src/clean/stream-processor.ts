@@ -26,6 +26,7 @@ export type StreamProcessorInitOutboundSubscriptionArgs = {
 export class StreamProcessor extends DurableObject {
   #processor: SimpleStreamProcessor<ProcessorState, { env: Env }> | undefined;
   #streamRpcTarget: JonasStreamRpc | undefined;
+  #disposeStreamRpcTarget: (() => void) | undefined;
 
   async fetch(request: Request) {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -53,7 +54,10 @@ export class StreamProcessor extends DurableObject {
       throw new Error("StreamProcessor only supports captainweb-websocket subscribers");
     }
 
-    this.#streamRpcTarget = args.streamRpcTarget;
+    this.#disposeStreamRpcTarget?.();
+    const retainedStream = retainStreamRpcTarget(args.streamRpcTarget);
+    this.#streamRpcTarget = retainedStream.target;
+    this.#disposeStreamRpcTarget = retainedStream.dispose;
     this.#setProcessorSlug(subscriber.processorSlug);
     return {
       subscriberRpcTarget: new StreamProcessorSubscriberRpcTarget(this),
@@ -111,8 +115,13 @@ export class StreamProcessor extends DurableObject {
   }
 
   #append(event: StreamEventInput) {
-    const result = this.#readStreamRpcTarget().append({ event });
-    if (isDisposable(result)) result[Symbol.dispose]();
+    this.ctx.waitUntil(
+      Promise.resolve()
+        .then(() => this.#readStreamRpcTarget().append({ event }))
+        .catch((error) => {
+          console.error("StreamProcessor background append failed", error);
+        }),
+    );
   }
 
   #appendAndWait(event: StreamEventInput) {
@@ -134,14 +143,6 @@ function processorForSlug(
   throw new Error(`Unknown stream processor slug: ${slug}`);
 }
 
-function isDisposable(value: unknown): value is Disposable {
-  return (
-    ((typeof value === "object" && value !== null) || typeof value === "function") &&
-    Symbol.dispose in value &&
-    typeof value[Symbol.dispose] === "function"
-  );
-}
-
 export type StreamProcessorRpc = Pick<
   StreamProcessor,
   "initOutboundSubscription" | "initialize" | "status"
@@ -160,3 +161,27 @@ export const StreamProcessorSubscriberRpcTarget = makeRpcTargetClass<
 >(StreamProcessor, {
   exclude: ["fetch"],
 });
+
+function retainStreamRpcTarget(target: JonasStreamRpc): {
+  target: JonasStreamRpc;
+  dispose: () => void;
+} {
+  if (!isDuplicableStreamRpcTarget(target)) {
+    throw new Error("streamRpcTarget must be duplicable");
+  }
+  const retained = target.dup();
+  return {
+    target: retained,
+    dispose: () => retained[Symbol.dispose](),
+  };
+}
+
+function isDuplicableStreamRpcTarget(
+  value: JonasStreamRpc,
+): value is JonasStreamRpc & { dup(): JonasStreamRpc & Disposable } {
+  return (
+    ((typeof value === "object" && value !== null) || typeof value === "function") &&
+    "dup" in value &&
+    typeof value.dup === "function"
+  );
+}

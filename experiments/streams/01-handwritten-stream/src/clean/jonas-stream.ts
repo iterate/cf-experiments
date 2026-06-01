@@ -28,6 +28,7 @@ type LiveSubscriber = {
   direction: "inbound" | "outbound";
   subscriptionKey?: string;
   target: SubscriberRpcTarget;
+  disposeTarget: () => void;
 };
 
 type OutboundSession = {
@@ -206,15 +207,17 @@ export class JonasStream extends DurableObject<Env> {
     target: SubscriberRpcTarget;
     afterOffset?: number;
   }) {
+    const retainedTarget = retainSubscriberRpcTarget(args.target);
     const subscriber = {
       direction: args.direction,
       subscriptionKey: args.subscriptionKey,
-      target: args.target,
+      target: retainedTarget.target,
+      disposeTarget: retainedTarget.dispose,
     };
     this.#subscribers.add(subscriber);
     void this.#streamStoredEventsToSubscriber(subscriber, args.afterOffset ?? -1).catch((error) => {
       console.error("JonasStream replay failed", error);
-      this.#subscribers.delete(subscriber);
+      this.#removeSubscriber(subscriber);
     });
   }
 
@@ -248,8 +251,13 @@ export class JonasStream extends DurableObject<Env> {
       if (isDisposable(result)) result[Symbol.dispose]();
     } catch (error) {
       console.error("Error sending CaptainWeb event batch", error);
-      this.#subscribers.delete(subscriber);
+      this.#removeSubscriber(subscriber);
     }
+  }
+
+  #removeSubscriber(subscriber: LiveSubscriber) {
+    this.#subscribers.delete(subscriber);
+    subscriber.disposeTarget();
   }
 
   #readCoreState() {
@@ -271,6 +279,30 @@ function isDisposable(value: unknown): value is Disposable {
     ((typeof value === "object" && value !== null) || typeof value === "function") &&
     Symbol.dispose in value &&
     typeof value[Symbol.dispose] === "function"
+  );
+}
+
+function retainSubscriberRpcTarget(target: SubscriberRpcTarget): {
+  target: SubscriberRpcTarget;
+  dispose: () => void;
+} {
+  if (!isDuplicableSubscriberRpcTarget(target)) {
+    throw new Error("subscriberRpcTarget must be duplicable");
+  }
+  const retained = target.dup();
+  return {
+    target: retained,
+    dispose: () => retained[Symbol.dispose](),
+  };
+}
+
+function isDuplicableSubscriberRpcTarget(
+  value: SubscriberRpcTarget,
+): value is SubscriberRpcTarget & { dup(): SubscriberRpcTarget & Disposable } {
+  return (
+    ((typeof value === "object" && value !== null) || typeof value === "function") &&
+    "dup" in value &&
+    typeof value.dup === "function"
   );
 }
 
