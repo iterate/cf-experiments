@@ -6,14 +6,36 @@ export type Rpcify<T> = {
   [K in keyof T]: RpcMember<T[K]>;
 };
 
+type RpcMethodKey<T extends object> = {
+  [K in keyof T]: T[K] extends (...args: never[]) => unknown ? K : never;
+}[keyof T];
+
+export type RpcMethods<T extends object, TExcluded extends PropertyKey = never> = Pick<
+  T,
+  Exclude<RpcMethodKey<T>, TExcluded>
+>;
+
 export type RpcTargetClass<TApi extends object, TSource extends object = TApi> = new (
   source: TSource,
 ) => RpcTarget & Rpcify<TApi>;
 
+export function makeRpcTargetClass<
+  TSource extends object,
+  const TExcluded extends keyof TSource = never,
+>(
+  sourceClass: { prototype: TSource },
+  options?: { exclude?: readonly TExcluded[] },
+): RpcTargetClass<RpcMethods<TSource, TExcluded>, TSource>;
+
 export function makeRpcTargetClass<TApi extends object, TSource extends object = TApi>(
-  sourceClass: { prototype: TApi },
+  sourceClass: { prototype: TSource },
+  options?: { exclude?: readonly PropertyKey[] },
+): RpcTargetClass<TApi, TSource>;
+
+export function makeRpcTargetClass<TSource extends object>(
+  sourceClass: { prototype: TSource },
   options: { exclude?: readonly PropertyKey[] } = {},
-): RpcTargetClass<TApi, TSource> {
+): RpcTargetClass<object, TSource> {
   const exclude = new Set<PropertyKey>(["constructor", ...(options.exclude ?? [])]);
 
   class GeneratedRpcTarget extends RpcTarget {
@@ -51,5 +73,5 @@ export function makeRpcTargetClass<TApi extends object, TSource extends object =
     }
   }
 
-  return GeneratedRpcTarget as RpcTargetClass<TApi, TSource>;
+  return GeneratedRpcTarget as RpcTargetClass<object, TSource>;
 }

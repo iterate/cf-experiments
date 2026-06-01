@@ -1,4 +1,4 @@
-import { newWebSocketRpcSession } from "capnweb";
+import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import {
@@ -6,7 +6,7 @@ import {
   type SimpleStreamProcessor,
   type SimpleStreamProcessorSnapshot,
 } from "@cf-experiments/shared/simple-stream-processor";
-import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
+import { makeRpcTargetClass, type RpcMethods } from "@cf-experiments/shared/rpc-target";
 import { echoProcessor } from "./demo-processors/echo-processor.js";
 import type {
   CoreStreamState,
@@ -23,10 +23,11 @@ export type StreamProcessorInitOutboundSubscriptionArgs = {
   streamSnapshot: CoreStreamState;
 };
 
+type CapnWebStreamRpcTarget = RpcStub<JonasStreamRpc>;
+
 export class StreamProcessor extends DurableObject {
   #processor: SimpleStreamProcessor<ProcessorState, { env: Env }> | undefined;
-  #streamRpcTarget: JonasStreamRpc | undefined;
-  #disposeStreamRpcTarget: (() => void) | undefined;
+  #streamRpcTarget: CapnWebStreamRpcTarget | undefined;
 
   async fetch(request: Request) {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -45,7 +46,11 @@ export class StreamProcessor extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  initOutboundSubscription(args: StreamProcessorInitOutboundSubscriptionArgs): SubscriptionRequest {
+  initOutboundSubscription(args: {
+    streamRpcTarget: CapnWebStreamRpcTarget;
+    subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
+    streamSnapshot: CoreStreamState;
+  }): SubscriptionRequest {
     const subscriber = args.subscriptionConfiguredEvent.payload.subscriber;
     if (subscriber.type !== "built-in") {
       throw new Error("StreamProcessor only supports built-in subscribers");
@@ -54,10 +59,8 @@ export class StreamProcessor extends DurableObject {
       throw new Error("StreamProcessor only supports captainweb-websocket subscribers");
     }
 
-    this.#disposeStreamRpcTarget?.();
-    const retainedStream = retainStreamRpcTarget(args.streamRpcTarget);
-    this.#streamRpcTarget = retainedStream.target;
-    this.#disposeStreamRpcTarget = retainedStream.dispose;
+    this.#streamRpcTarget?.[Symbol.dispose]();
+    this.#streamRpcTarget = args.streamRpcTarget.dup();
     this.#setProcessorSlug(subscriber.processorSlug);
     return {
       subscriberRpcTarget: new StreamProcessorSubscriberRpcTarget(this),
@@ -143,10 +146,12 @@ function processorForSlug(
   throw new Error(`Unknown stream processor slug: ${slug}`);
 }
 
-export type StreamProcessorRpc = Pick<
-  StreamProcessor,
-  "initOutboundSubscription" | "initialize" | "status"
->;
+export type StreamProcessorRpc = Omit<
+  Pick<RpcMethods<StreamProcessor, "fetch">, "initOutboundSubscription" | "initialize" | "status">,
+  "initOutboundSubscription"
+> & {
+  initOutboundSubscription(args: StreamProcessorInitOutboundSubscriptionArgs): SubscriptionRequest;
+};
 
 export const StreamProcessorRpcTarget = makeRpcTargetClass<StreamProcessorRpc, StreamProcessor>(
   StreamProcessor,
@@ -161,27 +166,3 @@ export const StreamProcessorSubscriberRpcTarget = makeRpcTargetClass<
 >(StreamProcessor, {
   exclude: ["fetch"],
 });
-
-function retainStreamRpcTarget(target: JonasStreamRpc): {
-  target: JonasStreamRpc;
-  dispose: () => void;
-} {
-  if (!isDuplicableStreamRpcTarget(target)) {
-    throw new Error("streamRpcTarget must be duplicable");
-  }
-  const retained = target.dup();
-  return {
-    target: retained,
-    dispose: () => retained[Symbol.dispose](),
-  };
-}
-
-function isDuplicableStreamRpcTarget(
-  value: JonasStreamRpc,
-): value is JonasStreamRpc & { dup(): JonasStreamRpc & Disposable } {
-  return (
-    ((typeof value === "object" && value !== null) || typeof value === "function") &&
-    "dup" in value &&
-    typeof value.dup === "function"
-  );
-}

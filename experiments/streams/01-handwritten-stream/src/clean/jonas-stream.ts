@@ -1,11 +1,11 @@
-import { newWebSocketRpcSession, type RpcStub } from "capnweb";
+import { newWebSocketRpcSession, type RpcStub, type RpcTarget } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
 import {
   StreamEventInput as StreamEventInputSchema,
   type StreamEvent,
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
-import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
+import { makeRpcTargetClass, type RpcMethods } from "@cf-experiments/shared/rpc-target";
 import {
   initialCoreStreamState,
   reduceCoreStreamState,
@@ -15,7 +15,7 @@ import type { StreamProcessorRpc } from "./stream-processor.js";
 
 const STORAGE_REPLAY_BATCH_SIZE = 100;
 
-export type SubscriberRpcTarget = {
+export type SubscriberRpcTarget = RpcTarget & {
   consumeEvents(args: { events: StreamEvent[] }): unknown;
 };
 
@@ -24,11 +24,15 @@ export type SubscriptionRequest = {
   afterOffset?: number;
 };
 
+type CapnWebSubscriberRpcTarget = Disposable & {
+  dup(): CapnWebSubscriberRpcTarget;
+  consumeEvents(args: { events: StreamEvent[] }): Disposable;
+};
+
 type CaptainWebSubscription = {
   direction: "inbound" | "outbound";
   subscriptionKey?: string;
-  target: SubscriberRpcTarget;
-  disposeTarget: () => void;
+  subscriber: CapnWebSubscriberRpcTarget;
   outboundSession?: {
     webSocket: WebSocket;
     rpc: RpcStub<StreamProcessorRpc>;
@@ -75,10 +79,13 @@ export class JonasStream extends DurableObject<Env> {
     return result.event;
   }
 
-  initInboundSubscription(args: SubscriptionRequest): void {
+  initInboundSubscription(args: {
+    subscriberRpcTarget: CapnWebSubscriberRpcTarget;
+    afterOffset?: number;
+  }): void {
     this.#registerSubscription({
       direction: "inbound",
-      target: args.subscriberRpcTarget,
+      subscriber: args.subscriberRpcTarget,
       afterOffset: args.afterOffset,
     });
   }
@@ -191,7 +198,7 @@ export class JonasStream extends DurableObject<Env> {
       const subscription = this.#registerSubscription({
         direction: "outbound",
         subscriptionKey,
-        target: request.subscriberRpcTarget,
+        subscriber: request.subscriberRpcTarget,
         afterOffset: request.afterOffset,
         outboundSession: { webSocket, rpc },
       });
@@ -203,16 +210,14 @@ export class JonasStream extends DurableObject<Env> {
   #registerSubscription(args: {
     direction: "inbound" | "outbound";
     subscriptionKey?: string;
-    target: SubscriberRpcTarget;
+    subscriber: CapnWebSubscriberRpcTarget;
     afterOffset?: number;
     outboundSession?: CaptainWebSubscription["outboundSession"];
   }): CaptainWebSubscription {
-    const retainedTarget = retainSubscriberRpcTarget(args.target);
     const subscription = {
       direction: args.direction,
       subscriptionKey: args.subscriptionKey,
-      target: retainedTarget.target,
-      disposeTarget: retainedTarget.dispose,
+      subscriber: args.subscriber.dup(),
       outboundSession: args.outboundSession,
     };
     this.#subscriptions.add(subscription);
@@ -252,8 +257,8 @@ export class JonasStream extends DurableObject<Env> {
 
   #deliverBatch(subscription: CaptainWebSubscription, events: StreamEvent[]) {
     try {
-      const result = subscription.target.consumeEvents({ events });
-      if (isDisposable(result)) result[Symbol.dispose]();
+      const result = subscription.subscriber.consumeEvents({ events });
+      result[Symbol.dispose]();
     } catch (error) {
       console.error("Error sending CaptainWeb event batch", error);
       this.#removeSubscription(subscription);
@@ -262,7 +267,7 @@ export class JonasStream extends DurableObject<Env> {
 
   #removeSubscription(subscription: CaptainWebSubscription) {
     if (!this.#subscriptions.delete(subscription)) return;
-    subscription.disposeTarget();
+    subscription.subscriber[Symbol.dispose]();
     subscription.outboundSession?.rpc[Symbol.dispose]();
     subscription.outboundSession?.webSocket.close();
   }
@@ -288,48 +293,12 @@ export class JonasStream extends DurableObject<Env> {
   }
 }
 
-function isDisposable(value: unknown): value is Disposable {
-  return (
-    ((typeof value === "object" && value !== null) || typeof value === "function") &&
-    Symbol.dispose in value &&
-    typeof value[Symbol.dispose] === "function"
-  );
-}
-
-function retainSubscriberRpcTarget(target: SubscriberRpcTarget): {
-  target: SubscriberRpcTarget;
-  dispose: () => void;
-} {
-  if (!isDuplicableSubscriberRpcTarget(target)) {
-    throw new Error("subscriberRpcTarget must be duplicable");
-  }
-  const retained = target.dup();
-  return {
-    target: retained,
-    dispose: () => retained[Symbol.dispose](),
-  };
-}
-
-function isDuplicableSubscriberRpcTarget(
-  value: SubscriberRpcTarget,
-): value is SubscriberRpcTarget & { dup(): SubscriberRpcTarget & Disposable } {
-  return (
-    ((typeof value === "object" && value !== null) || typeof value === "function") &&
-    "dup" in value &&
-    typeof value.dup === "function"
-  );
-}
-
-export type JonasStreamRpc = Pick<
-  JonasStream,
-  | "append"
-  | "initInboundSubscription"
-  | "simulateStorageSyncDelay"
-  | "kill"
-  | "ping"
-  | "getMaxOffset"
-  | "debug"
->;
+export type JonasStreamRpc = Omit<
+  RpcMethods<JonasStream, "fetch" | "getCapability">,
+  "initInboundSubscription"
+> & {
+  initInboundSubscription(args: SubscriptionRequest): void;
+};
 
 export const JonasStreamRpcTarget = makeRpcTargetClass<JonasStreamRpc, JonasStream>(JonasStream, {
   exclude: ["fetch", "getCapability"],
