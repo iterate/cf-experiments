@@ -1,7 +1,13 @@
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import {
+  createSimpleStreamProcessorRunner,
+  type SimpleStreamProcessor,
+  type SimpleStreamProcessorSnapshot,
+} from "@cf-experiments/shared/simple-stream-processor";
 import type { JonasStreamRpc } from "./jonas-stream.js";
-import { JonasStreamAckFrame, JonasStreamEventFrame } from "./jonas-stream-types.js";
+import type { StreamProcessorRpc } from "./stream-processor.js";
+import { JonasStreamAckFrame, JonasStreamEventsFrame } from "./jonas-stream-types.js";
 
 const defaultWorkerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 
@@ -27,11 +33,24 @@ export type JonasStreamCapnwebClient = AsyncDisposable & {
   capnweb: RpcStub<JonasStreamRpc>;
 };
 
+export type StreamProcessorCapnwebClient = AsyncDisposable & {
+  capnweb: RpcStub<StreamProcessorRpc>;
+};
+
 export type JonasStreamFixture = AsyncDisposable & {
   raw: JonasStreamRawClient;
   capnweb: RpcStub<JonasStreamRpc>;
   append(args: { event: StreamEventInput }): Promise<StreamEvent>;
   stream(): AsyncIterableIterator<StreamEvent>;
+  withProcessor<State, Deps = undefined>(
+    processor: SimpleStreamProcessor<State, Deps>,
+    options?: { deps?: Deps },
+  ): Promise<JonasStreamProcessorFixture<State>>;
+};
+
+export type JonasStreamProcessorFixture<State> = AsyncDisposable & {
+  snapshot(): SimpleStreamProcessorSnapshot<State>;
+  done: Promise<SimpleStreamProcessorSnapshot<State>>;
 };
 
 export type JonasStreamEndpoint = {
@@ -65,12 +84,18 @@ export async function withStreamRaw(endpoint: JonasStreamEndpoint): Promise<Jona
       }
       return;
     }
-    events.push(JonasStreamEventFrame.parse(frame).event);
+    for (const event of JonasStreamEventsFrame.parse(frame).events) {
+      events.push(event);
+    }
   });
-  webSocket.addEventListener("close", () => {
-    events.close();
-    fail(new Error("WebSocket closed"));
-  }, { once: true });
+  webSocket.addEventListener(
+    "close",
+    () => {
+      events.close();
+      fail(new Error("WebSocket closed"));
+    },
+    { once: true },
+  );
   webSocket.addEventListener("error", () => fail(new Error("WebSocket failed")), { once: true });
 
   return {
@@ -85,7 +110,7 @@ export async function withStreamRaw(endpoint: JonasStreamEndpoint): Promise<Jona
       return ack.promise;
     },
     stream() {
-      send(webSocket, wsMessages, { op: "start" });
+      send(webSocket, wsMessages, { op: "subscribe" });
       return events;
     },
     async [Symbol.asyncDispose]() {
@@ -109,6 +134,27 @@ export async function withStreamCapnweb(
   };
 }
 
+export async function withStreamProcessorCapnweb(
+  endpoint: JonasStreamEndpoint,
+): Promise<StreamProcessorCapnwebClient> {
+  const webSocket = await openWebSocket(
+    {
+      ...endpoint,
+      url: streamProcessorUrl(endpoint),
+    },
+    "capnweb",
+  );
+  const capnweb = newWebSocketRpcSession<StreamProcessorRpc>(webSocket);
+
+  return {
+    capnweb,
+    async [Symbol.asyncDispose]() {
+      capnweb[Symbol.dispose]();
+      await closeWebSocket(webSocket);
+    },
+  };
+}
+
 export async function withStream(endpoint: JonasStreamEndpoint): Promise<JonasStreamFixture> {
   const raw = await withStreamRaw(endpoint);
   const capnwebClient = await withStreamCapnweb(endpoint);
@@ -121,6 +167,29 @@ export async function withStream(endpoint: JonasStreamEndpoint): Promise<JonasSt
     },
     stream() {
       return raw.stream();
+    },
+    async withProcessor(processor, options) {
+      const processorRaw = await withStreamRaw(endpoint);
+      const abort = new AbortController();
+      const runner = await createSimpleStreamProcessorRunner({
+        processor,
+        deps: options?.deps,
+        append: (event) => processorRaw.append(event),
+        appendAndWait: (event) => processorRaw.appendAndWaitForResponse(event),
+        signal: abort.signal,
+      });
+      const done = runner.run(processorRaw.stream()).finally(async () => {
+        await processorRaw[Symbol.asyncDispose]();
+      });
+
+      return {
+        snapshot: runner.snapshot,
+        done,
+        async [Symbol.asyncDispose]() {
+          abort.abort();
+          await processorRaw[Symbol.asyncDispose]();
+        },
+      };
     },
     async [Symbol.asyncDispose]() {
       await raw[Symbol.asyncDispose]();
@@ -199,6 +268,15 @@ function streamUrl(endpoint: JonasStreamEndpoint, transport: "raw-ws" | "capnweb
       : new URL(endpoint.url);
   if (endpoint.url === undefined) url.pathname = `/jonas/${endpoint.path ?? "default"}`;
   url.searchParams.set("transport", transport);
+  return url;
+}
+
+function streamProcessorUrl(endpoint: JonasStreamEndpoint) {
+  const url =
+    endpoint.url === undefined
+      ? new URL(endpoint.workerUrl ?? defaultWorkerUrl)
+      : new URL(endpoint.url);
+  if (endpoint.url === undefined) url.pathname = `/stream-processor/${endpoint.path ?? "default"}`;
   return url;
 }
 

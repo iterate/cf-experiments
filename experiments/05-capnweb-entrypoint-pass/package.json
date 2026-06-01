@@ -1,0 +1,25 @@
+{
+  "name": "@cf-experiments/05-capnweb-entrypoint-pass",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev -c wrangler.jsonc -c wrangler.upstream.jsonc",
+    "deploy": "wrangler deploy -c wrangler.upstream.jsonc && wrangler deploy -c wrangler.jsonc",
+    "deploy:upstream": "wrangler deploy -c wrangler.upstream.jsonc",
+    "deploy:main": "wrangler deploy -c wrangler.jsonc",
+    "test": "vitest run scripts/ --reporter=verbose",
+    "test:entrypoint": "vitest run scripts/entrypoint-pass.test.ts --reporter=verbose",
+    "test:stubs": "vitest run scripts/stub-pass.test.ts --reporter=verbose",
+    "test:pipelining": "vitest run scripts/pipelining.test.ts --reporter=verbose",
+    "test:streams-get-ping": "vitest run scripts/streams-get-ping.test.ts --reporter=verbose",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "capnweb": "^0.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "vitest": "^4.1.7",
+    "wrangler": "catalog:cloudflare"
+  }
+}

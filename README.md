@@ -45,6 +45,8 @@ We care MORE THAN ANYTHING about using the cloudflare platform properly. Read th
 
 Don't add random scripts like `"cf:types"` to package.json. We can just run `pnpm wrangler types` etc
 
+Durable Object / Workers RPC state: keep mutable internals in `#private` fields (or `#readFoo()` helpers for lazy/cached storage). Expose caller-facing reads as public RPC **methods** (`maxOffset()`, not a public field or getter mirroring a cache). Use `debug()` / `ping()` for experiment introspection (`incarnationId`, counters). Prototype getters are fine for cheap derived values used only inside the DO; don't expect class fields to appear on stubs automatically.
+
 
 # Debugging cloudflare workers
 

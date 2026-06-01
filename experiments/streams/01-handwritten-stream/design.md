@@ -140,7 +140,9 @@ The failure of any one processor should not affect other processors. This means,
 
 - In general, DO NOT block durable object output gates on writes. Only block egress about the specific event that was just appended
 
-## API Surfaces
+## Capnweb API
+
+The primary way to use 
 
 ### Capnweb RPC
 

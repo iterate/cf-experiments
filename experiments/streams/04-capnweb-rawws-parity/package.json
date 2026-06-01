@@ -1,0 +1,19 @@
+{
+  "name": "@cf-experiments/04-capnweb-rawws-parity",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "capnweb": "^0.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "vitest": "^4.1.7",
+    "wrangler": "catalog:cloudflare"
+  }
+}

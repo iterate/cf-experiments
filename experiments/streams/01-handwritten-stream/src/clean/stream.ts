@@ -9,23 +9,35 @@ import {
   type StreamEvent,
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
-import { CLEAN_STREAM_ORPC_SIGNING_KEY, type CleanStreamRpc } from "./protocol.js";
+import {
+  CLEAN_STREAM_ORPC_SIGNING_KEY,
+  type CleanStreamEventSink,
+  type CleanStreamRpc,
+} from "./protocol.js";
 
 const APPEND_EVENT_INPUT_SCHEMA = StreamEventInputSchema.strict();
 
-type Transport = "capnweb" | "orpc" | "rawws";
+type Transport = "capnweb" | "capnweb-oneway" | "orpc" | "rawws";
 
 type CapnwebSubscriber = {
   controller: ReadableStreamDefaultController<StreamEvent>;
   sessionSubscribers?: Set<CapnwebSubscriber>;
 };
 
+type CapnwebOneWaySubscriber = {
+  sink: CleanStreamEventSink;
+  disposeSink: () => void;
+  sessionSubscribers?: Set<CapnwebOneWaySubscriber>;
+};
+
 export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
   #app = new StreamApp();
   #capnwebSubscribers = new Set<CapnwebSubscriber>();
+  #capnwebOneWaySubscribers = new Set<CapnwebOneWaySubscriber>();
   #rawwsSubscribers = new Set<WebSocket>();
   #fanoutAttempts = {
     capnweb: 0,
+    capnwebOneWay: 0,
     orpc: 0,
     rawws: 0,
   };
@@ -41,7 +53,9 @@ export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
     const url = new URL(request.url);
     const transport = readTransport(url);
     if (transport === null) {
-      return new Response("transport must be capnweb, orpc, or rawws", { status: 400 });
+      return new Response("transport must be capnweb, capnweb-oneway, orpc, or rawws", {
+        status: 400,
+      });
     }
 
     if (url.searchParams.get("op") === "debug") {
@@ -57,7 +71,7 @@ export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
       return new Response("This endpoint only accepts WebSocket requests.", { status: 400 });
     }
 
-    if (transport === "capnweb") return this.#fetchCapnweb();
+    if (transport === "capnweb" || transport === "capnweb-oneway") return this.#fetchCapnweb();
     if (transport === "rawws") return this.#fetchRawws();
     return super.fetch(request);
   }
@@ -68,6 +82,7 @@ export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
       offset: this.#app.offset,
       subscribers: {
         capnweb: this.#capnwebSubscribers.size,
+        capnwebOneWay: this.#capnwebOneWaySubscribers.size,
         orpc: this.ctx.getWebSockets().length,
         rawws: this.#rawwsSubscribers.size,
       },
@@ -83,6 +98,17 @@ export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
     return this.#appendFromTransport("capnweb", args);
   }
 
+  /**
+   * Cap'n Web exposes the same clean app contract as the other transports, but
+   * capnweb@0.8.0 returned ReadableStreams are encoded as pipe writes:
+   *
+   *   in  ["stream",["pipeline",1,["write"],[event]]]
+   *   out ["resolve",2,["undefined"]]
+   *
+   * That outbound frame is write completion, not an app-level subscriber ack.
+   * It is still per-chunk return traffic, which is why this clean surface keeps
+   * `transport=rawws` as the baseline for one-way fan-out after subscribe.
+   */
   subscribeForSession(sessionSubscribers: Set<CapnwebSubscriber>): ReadableStream<StreamEvent> {
     let subscriber: CapnwebSubscriber | undefined;
 
@@ -101,6 +127,27 @@ export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
   releaseSessionSubscribers(sessionSubscribers: Set<CapnwebSubscriber>): void {
     for (const subscriber of sessionSubscribers) {
       this.#removeCapnwebSubscriber(subscriber);
+    }
+    sessionSubscribers.clear();
+  }
+
+  subscribeOneWayForSession(
+    sink: CleanStreamEventSink,
+    sessionSubscribers: Set<CapnwebOneWaySubscriber>,
+  ): void {
+    const retainedSink = retainEventSink(sink);
+    const subscriber = {
+      sink: retainedSink.sink,
+      disposeSink: retainedSink.dispose,
+      sessionSubscribers,
+    };
+    this.#capnwebOneWaySubscribers.add(subscriber);
+    sessionSubscribers.add(subscriber);
+  }
+
+  releaseOneWaySessionSubscribers(sessionSubscribers: Set<CapnwebOneWaySubscriber>): void {
+    for (const subscriber of sessionSubscribers) {
+      this.#removeCapnwebOneWaySubscriber(subscriber);
     }
     sessionSubscribers.clear();
   }
@@ -127,6 +174,24 @@ export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
       } catch (error) {
         console.error("Error enqueuing clean Cap'n Web event", event, error);
         this.#removeCapnwebSubscriber(subscriber);
+      }
+    }
+
+    this.#fanoutAttempts.capnwebOneWay += this.#capnwebOneWaySubscribers.size;
+    for (const subscriber of this.#capnwebOneWaySubscribers) {
+      try {
+        const result = subscriber.sink.event(event);
+        /**
+         * This is the one-way Cap'n Web probe. A normal Cap'n Web method call
+         * sends `push`; the caller only asks for a result if it sends `pull`.
+         * We deliberately never await the returned RpcPromise, then dispose it
+         * so the client can release the ignored result without sending a
+         * subscriber-originated `resolve`.
+         */
+        if (isDisposable(result)) result[Symbol.dispose]();
+      } catch (error) {
+        console.error("Error sending clean Cap'n Web one-way event", event, error);
+        this.#removeCapnwebOneWaySubscriber(subscriber);
       }
     }
 
@@ -197,6 +262,12 @@ export class CleanStream extends DurableIteratorObject<StreamEvent, Env> {
     this.#capnwebSubscribers.delete(subscriber);
     subscriber.sessionSubscribers?.delete(subscriber);
   }
+
+  #removeCapnwebOneWaySubscriber(subscriber: CapnwebOneWaySubscriber): void {
+    this.#capnwebOneWaySubscribers.delete(subscriber);
+    subscriber.sessionSubscribers?.delete(subscriber);
+    subscriber.disposeSink();
+  }
 }
 
 class StreamApp {
@@ -219,6 +290,7 @@ class StreamApp {
 class CleanStreamCapnwebTarget extends RpcTarget {
   #stream: CleanStream;
   #subscribers = new Set<CapnwebSubscriber>();
+  #oneWaySubscribers = new Set<CapnwebOneWaySubscriber>();
 
   constructor(stream: CleanStream) {
     super();
@@ -234,18 +306,26 @@ class CleanStreamCapnwebTarget extends RpcTarget {
     return this.#stream.subscribeForSession(this.#subscribers);
   }
 
+  subscribeOneWay(sink: CleanStreamEventSink, args?: unknown): void {
+    if (args !== undefined) throw new Error("subscribeOneWay does not accept arguments");
+    this.#stream.subscribeOneWayForSession(sink, this.#oneWaySubscribers);
+  }
+
   debug() {
     return this.#stream.debug();
   }
 
   [Symbol.dispose](): void {
     this.#stream.releaseSessionSubscribers(this.#subscribers);
+    this.#stream.releaseOneWaySessionSubscribers(this.#oneWaySubscribers);
   }
 }
 
 function readTransport(url: URL): Transport | null {
   const raw = url.searchParams.get("transport");
-  if (raw === "capnweb" || raw === "orpc" || raw === "rawws") return raw;
+  if (raw === "capnweb" || raw === "capnweb-oneway" || raw === "orpc" || raw === "rawws") {
+    return raw;
+  }
   return null;
 }
 
@@ -258,4 +338,32 @@ function parseFrame(data: unknown): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isDisposable(value: unknown): value is Disposable {
+  return (
+    isObjectLike(value) && Symbol.dispose in value && typeof value[Symbol.dispose] === "function"
+  );
+}
+
+function retainEventSink(sink: CleanStreamEventSink): {
+  sink: CleanStreamEventSink;
+  dispose: () => void;
+} {
+  if (!isDuplicableEventSink(sink)) throw new Error("one-way event sink must be duplicable");
+  const retained = sink.dup();
+  return {
+    sink: retained,
+    dispose: () => retained[Symbol.dispose](),
+  };
+}
+
+function isDuplicableEventSink(value: CleanStreamEventSink): value is CleanStreamEventSink & {
+  dup(): CleanStreamEventSink & Disposable;
+} {
+  return isObjectLike(value) && "dup" in value && typeof value.dup === "function";
+}
+
+function isObjectLike(value: unknown): value is object {
+  return (typeof value === "object" && value !== null) || typeof value === "function";
 }

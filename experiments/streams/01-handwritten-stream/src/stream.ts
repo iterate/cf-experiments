@@ -1,4 +1,4 @@
-import { newWebSocketRpcSession } from "capnweb";
+import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
 import {
   StreamEventInput as StreamEventInputSchema,
@@ -49,6 +49,14 @@ type BatchedStringStreamSubscriber = {
   sessionSubscribers?: Set<BatchedStringStreamSubscriber>;
 };
 
+type AfterAppendClientMain = {
+  afterAppend(args: { event: StreamEvent }): unknown;
+};
+
+type AfterAppendClientSubscriber = {
+  client: RpcStub<AfterAppendClientMain>;
+};
+
 type RawAppendMessage = {
   op: "append";
   requestId: string;
@@ -74,6 +82,7 @@ export class Stream extends DurableObject {
   #volatileSubscribers = new Set<StreamSubscriber>();
   #jsonVolatileSubscribers = new Set<StringStreamSubscriber>();
   #batchedJsonVolatileSubscribers = new Set<BatchedStringStreamSubscriber>();
+  #afterAppendClientSubscribers = new Set<AfterAppendClientSubscriber>();
   #durableWritePlanMs: number[] = [];
   #durableBroadcastMs: number[] = [];
   #durableAppendMs: number[] = [];
@@ -84,6 +93,7 @@ export class Stream extends DurableObject {
   #jsonVolatileFanoutAttempts = 0;
   #batchedJsonVolatileEventFanoutAttempts = 0;
   #batchedJsonVolatileChunkFanoutAttempts = 0;
+  #afterAppendClientFanoutAttempts = 0;
   #rawVolatileOffset = 0;
   #rawVolatileSubscribers = new Set<WebSocket>();
   #rawVolatileFanoutAttempts = 0;
@@ -409,6 +419,7 @@ export class Stream extends DurableObject {
           enqueuedChunks: subscriber.enqueuedChunks,
         }),
       ),
+      afterAppendClientSubscribers: this.#afterAppendClientSubscribers.size,
       rawVolatileSubscribers: this.#rawVolatileSubscribers.size,
       timings: {
         durableWritePlanMs: this.#timingSummary(this.#durableWritePlanMs),
@@ -423,6 +434,7 @@ export class Stream extends DurableObject {
         jsonVolatile: this.#jsonVolatileFanoutAttempts,
         batchedJsonVolatileEvents: this.#batchedJsonVolatileEventFanoutAttempts,
         batchedJsonVolatileChunks: this.#batchedJsonVolatileChunkFanoutAttempts,
+        afterAppendClient: this.#afterAppendClientFanoutAttempts,
         rawVolatile: this.#rawVolatileFanoutAttempts,
       },
     };
@@ -484,6 +496,17 @@ export class Stream extends DurableObject {
    * initial `stream()` RPC, the subscriber never exposes an app callback that
    * the Stream DO must call, await, or interpret as an acknowledgement.
    *
+   * KEY FINDING: capnweb@0.8.0 returned streams are not wire-one-way.
+   * Each chunk is carried as a remote WritableStream.write() and the subscriber
+   * side sends a write-completion frame:
+   *
+   *   in  ["stream",["pipeline",1,["write"],[event]]]
+   *   out ["resolve",2,["undefined"]]
+   *
+   * The resolve is not an application ack, but it is per-chunk return traffic.
+   * That pipe/write/resolve shape is the central explanation for the slower
+   * Cap'n Web returned-stream fan-out compared with raw WebSocket.
+   *
    * The websocket-frame tests make the current Cap'n Web reality explicit:
    * "pure subscribers do not originate per-event pull or push websocket traffic"
    * passes, but the adjacent `it.fails` sentinel shows returned streams still
@@ -541,6 +564,25 @@ export class Stream extends DurableObject {
   ): void {
     for (const subscriber of sessionSubscribers) {
       this.#removeBatchedStringSubscriber(subscriber);
+    }
+    sessionSubscribers.clear();
+  }
+
+  subscribeAfterAppendClientForSession(
+    client: RpcStub<AfterAppendClientMain> | undefined,
+    sessionSubscribers: Set<AfterAppendClientSubscriber>,
+  ): void {
+    if (client === undefined) throw new Error("connection did not provide a client main object");
+    const subscriber = { client };
+    this.#afterAppendClientSubscribers.add(subscriber);
+    sessionSubscribers.add(subscriber);
+  }
+
+  releaseSessionAfterAppendClientSubscribers(
+    sessionSubscribers: Set<AfterAppendClientSubscriber>,
+  ): void {
+    for (const subscriber of sessionSubscribers) {
+      this.#afterAppendClientSubscribers.delete(subscriber);
     }
     sessionSubscribers.clear();
   }
@@ -723,7 +765,9 @@ export class Stream extends DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
-    newWebSocketRpcSession(server, this.getCapability());
+    const target = new StreamRpcTarget(this);
+    const clientMain = newWebSocketRpcSession<AfterAppendClientMain>(server, target);
+    target.setClientMain(clientMain);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -786,6 +830,27 @@ export class Stream extends DurableObject {
     this.#volatileFanoutAttempts += this.#volatileSubscribers.size;
     for (const subscriber of this.#volatileSubscribers) {
       this.#enqueueToSubscriber(subscriber, event);
+    }
+    this.#broadcastAfterAppendClient(event);
+  }
+
+  #broadcastAfterAppendClient(event: StreamEvent): void {
+    this.#afterAppendClientFanoutAttempts += this.#afterAppendClientSubscribers.size;
+    for (const subscriber of this.#afterAppendClientSubscribers) {
+      try {
+        const result = subscriber.client.afterAppend({ event });
+        /**
+         * Cap'n Web one-way data plane: ordinary method calls send `push`, and
+         * only observed thenables send `pull`. We never await the result of the
+         * client-main `afterAppend()` callback; disposing the ignored thenable
+         * releases it from this side without causing subscriber-originated
+         * `resolve undefined` frames.
+         */
+        if (isDisposable(result)) result[Symbol.dispose]();
+      } catch (error) {
+        console.error("Error sending afterAppend client event", event, error);
+        this.#afterAppendClientSubscribers.delete(subscriber);
+      }
     }
   }
 
@@ -1099,6 +1164,14 @@ export class Stream extends DurableObject {
   }
 }
 
+function isDisposable(value: unknown): value is Disposable {
+  return (
+    ((typeof value === "object" && value !== null) || typeof value === "function") &&
+    Symbol.dispose in value &&
+    typeof value[Symbol.dispose] === "function"
+  );
+}
+
 export type StreamRpc = Omit<
   Stream,
   | keyof DurableObject
@@ -1109,19 +1182,26 @@ export type StreamRpc = Omit<
   | "streamVolatileForSession"
   | "streamJsonVolatileForSession"
   | "streamBatchedJsonVolatileForSession"
+  | "subscribeAfterAppendClientForSession"
   | "releaseSessionSubscribers"
   | "releaseSessionStringSubscribers"
   | "releaseSessionBatchedStringSubscribers"
+  | "releaseSessionAfterAppendClientSubscribers"
 > & {
   stream(args?: unknown): ReadableStream<StreamEvent>;
   streamVolatile(args?: unknown): ReadableStream<StreamEvent>;
   streamJsonVolatile(args?: unknown): ReadableStream<string>;
   streamBatchedJsonVolatile(args?: unknown): ReadableStream<string>;
+  subscribeAfterAppendVolatile(args?: unknown): void;
 };
 
 type BaseStreamRpc = Omit<
   StreamRpc,
-  "stream" | "streamVolatile" | "streamJsonVolatile" | "streamBatchedJsonVolatile"
+  | "stream"
+  | "streamVolatile"
+  | "streamJsonVolatile"
+  | "streamBatchedJsonVolatile"
+  | "subscribeAfterAppendVolatile"
 >;
 
 const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
@@ -1140,21 +1220,29 @@ const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
     "streamVolatileForSession",
     "streamJsonVolatileForSession",
     "streamBatchedJsonVolatileForSession",
+    "subscribeAfterAppendClientForSession",
     "releaseSessionSubscribers",
     "releaseSessionStringSubscribers",
     "releaseSessionBatchedStringSubscribers",
+    "releaseSessionAfterAppendClientSubscribers",
   ],
 });
 
 export class StreamRpcTarget extends BaseStreamRpcTarget {
   #stream: Stream;
+  #clientMain: RpcStub<AfterAppendClientMain> | undefined;
   #subscribers = new Set<StreamSubscriber>();
   #stringSubscribers = new Set<StringStreamSubscriber>();
   #batchedStringSubscribers = new Set<BatchedStringStreamSubscriber>();
+  #afterAppendClientSubscribers = new Set<AfterAppendClientSubscriber>();
 
   constructor(stream: Stream) {
     super(stream);
     this.#stream = stream;
+  }
+
+  setClientMain(clientMain: RpcStub<AfterAppendClientMain>): void {
+    this.#clientMain = clientMain;
   }
 
   stream(args?: unknown): ReadableStream<StreamEvent> {
@@ -1177,9 +1265,18 @@ export class StreamRpcTarget extends BaseStreamRpcTarget {
     return this.#stream.streamBatchedJsonVolatileForSession(this.#batchedStringSubscribers);
   }
 
+  subscribeAfterAppendVolatile(args?: unknown): void {
+    if (args !== undefined) throw new Error("subscribeAfterAppendVolatile does not accept arguments");
+    this.#stream.subscribeAfterAppendClientForSession(
+      this.#clientMain,
+      this.#afterAppendClientSubscribers,
+    );
+  }
+
   [Symbol.dispose](): void {
     this.#stream.releaseSessionSubscribers(this.#subscribers);
     this.#stream.releaseSessionStringSubscribers(this.#stringSubscribers);
     this.#stream.releaseSessionBatchedStringSubscribers(this.#batchedStringSubscribers);
+    this.#stream.releaseSessionAfterAppendClientSubscribers(this.#afterAppendClientSubscribers);
   }
 }

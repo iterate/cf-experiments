@@ -4,6 +4,31 @@ This experiment explores a Cap'n Web RPC interface directly on a `Stream` Durabl
 
 See [design.md](./design.md) for the durability/throughput contract and implementation notes.
 
+## Key finding
+
+capnweb@0.8.0 returned `ReadableStream` values are not wire-one-way. A subscriber does not pass an
+application `onEvent()` callback, but each stream chunk is carried as a remote
+`WritableStream.write()` and the subscriber sends a write-completion frame:
+
+```txt
+in  ["stream",["pipeline",1,["write"],[event]]]
+out ["resolve",2,["undefined"]]
+```
+
+That `resolve undefined` is not an application-level acknowledgement, but it is still per-chunk
+return traffic. In the audio-shaped benchmark this per-chunk pipe/write/resolve machinery is the
+central difference between slow Cap'n Web returned streams and much faster raw WebSocket fan-out.
+
+The clean comparison now includes `transport=capnweb-oneway`, which keeps Cap'n Web but avoids the
+returned-stream pipe. A subscriber passes a sink capability once; the DO `dup()`s that sink, calls
+`sink.event(event)` without awaiting the returned Cap'n Web thenable, and disposes the ignored result.
+After setup, the subscriber receives event calls without originating per-event WebSocket frames:
+
+```txt
+in ["push",["pipeline",sinkId,["event"],[event]]]
+in ["release",resultId,refcount]
+```
+
 ## What we're trying to find out
 
 Can a `Stream` DO expose `append()` over Cap'n Web while making the durability and egress trade-off
@@ -106,6 +131,14 @@ chunk rather than one event payload:
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=batched-json-volatile&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
 
+Set `stream-kind=capnweb-after-append` to keep Cap'n Web but avoid returned streams. Subscribers
+provide a client main object with `afterAppend({ event })`; the Stream DO calls it after each
+storage-free `appendVolatile()` and deliberately does not await the returned thenable:
+
+```sh
+curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=capnweb-after-append&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true&measure-self-echo=false'
+```
+
 Set `stream-kind=orpc-durable-iterator` to use a separate volatile `OrpcDurableStream` DO, where
 subscribers connect through ORPC's Durable Iterator WebSocket path:
 
@@ -113,11 +146,11 @@ subscribers connect through ORPC's Durable Iterator WebSocket path:
 curl -sS 'https://01-handwritten-stream.iterate-dev-preview.workers.dev/benchmark/audio-chaos?stream-kind=orpc-durable-iterator&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
 ```
 
-The clean comparison surface is `/clean/:name?transport=capnweb|orpc|rawws`. It keeps one minimal
+The clean comparison surface is `/clean/:name?transport=capnweb|capnweb-oneway|orpc|rawws`. It keeps one minimal
 in-memory stream application and swaps only the transport adapter. Use `src/clean/client.ts` from
 Vitest or from another Durable Object; it accepts either a URL endpoint or a `fetch(request)`
 endpoint. The explicit client constructors are `connectCleanCapnwebStream`,
-`connectCleanOrpcStream`, and `connectCleanRawwsStream`; each returns the same `CleanStreamClient`
+`connectCleanCapnwebOneWayStream`, `connectCleanOrpcStream`, and `connectCleanRawwsStream`; each returns the same `CleanStreamClient`
 interface.
 
 Deploy current code:

@@ -33,12 +33,14 @@ export type WithStreamOptions = {
   path: string;
   workerUrl?: string;
   log?: Pick<Console, "log">;
+  localMain?: object;
 };
 
 export async function withStream({
   path,
   workerUrl = defaultWorkerUrl,
   log = console,
+  localMain,
 }: WithStreamOptions): Promise<StreamFixture> {
   const url = toWebSocketUrl(workerUrl, path);
   log.log(`[with-stream] connecting ${url}`);
@@ -49,7 +51,10 @@ export async function withStream({
   await waitForWebSocketOpen(webSocket);
   log.log(`[with-stream] connected path=${path}`);
 
-  const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
+  const rpc =
+    localMain === undefined
+      ? newWebSocketRpcSession<StreamRpc>(webSocket)
+      : newWebSocketRpcSession<StreamRpc>(webSocket, localMain);
 
   const fixture: StreamFixture = {
     rpc,

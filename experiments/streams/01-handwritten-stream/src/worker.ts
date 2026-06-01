@@ -1,11 +1,22 @@
 import { BenchmarkRunner } from "./benchmark-runner.js";
 import { CleanStreamClientRunner } from "./clean/client-runner.js";
+import { JonasStream } from "./clean/jonas-stream.js";
+import { StreamProcessor } from "./clean/stream-processor.js";
 import { CleanStream } from "./clean/stream.js";
 import { MinimalStream } from "./minimal-stream.js";
 import { OrpcDurableStream } from "./orpc-durable-stream.js";
 import { Stream } from "./stream.js";
 
-export { BenchmarkRunner, CleanStream, CleanStreamClientRunner, MinimalStream, OrpcDurableStream, Stream };
+export {
+  BenchmarkRunner,
+  CleanStream,
+  CleanStreamClientRunner,
+  JonasStream,
+  MinimalStream,
+  OrpcDurableStream,
+  Stream,
+  StreamProcessor,
+};
 
 export default {
   async fetch(request, env) {
@@ -53,6 +64,16 @@ export default {
       return env.MINIMAL_STREAM.getByName(name).fetch(request);
     }
 
+    if (url.pathname.startsWith("/jonas/")) {
+      const name = url.pathname.slice("/jonas/".length) || "default";
+      return env.JONAS_STREAM.getByName(name).fetch(request);
+    }
+
+    if (url.pathname.startsWith("/stream-processor/")) {
+      const name = url.pathname.slice("/stream-processor/".length) || "default";
+      return env.STREAM_PROCESSOR.getByName(name).fetch(request);
+    }
+
     const name = url.pathname.slice(1) || "default";
     return env.STREAM.getByName(name).fetch(request);
   },
@@ -68,8 +89,10 @@ function positiveIntParam(url: URL, name: string) {
 
 function cleanTransportParam(url: URL) {
   const raw = url.searchParams.get("transport");
-  if (raw === "capnweb" || raw === "orpc" || raw === "rawws") return raw;
-  throw new Error("transport must be capnweb, orpc, or rawws");
+  if (raw === "capnweb" || raw === "capnweb-oneway" || raw === "orpc" || raw === "rawws") {
+    return raw;
+  }
+  throw new Error("transport must be capnweb, capnweb-oneway, orpc, or rawws");
 }
 
 function nonNegativeIntParam(url: URL, name: string) {
@@ -90,12 +113,13 @@ function streamKindParam(url: URL) {
     raw !== "volatile" &&
     raw !== "json-volatile" &&
     raw !== "batched-json-volatile" &&
+    raw !== "capnweb-after-append" &&
     raw !== "orpc-durable-iterator" &&
     raw !== "raw-volatile" &&
     raw !== "minimal-ws"
   ) {
     throw new Error(
-      "stream-kind must be durable, volatile, json-volatile, batched-json-volatile, orpc-durable-iterator, raw-volatile, or minimal-ws",
+      "stream-kind must be durable, volatile, json-volatile, batched-json-volatile, capnweb-after-append, orpc-durable-iterator, raw-volatile, or minimal-ws",
     );
   }
   return raw;

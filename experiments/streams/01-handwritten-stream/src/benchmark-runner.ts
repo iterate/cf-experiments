@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, RpcTarget } from "cloudflare:workers";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import { createORPCClient, type Client } from "@orpc/client";
 import { RPCLink as ORPCWebSocketLink } from "@orpc/client/websocket";
@@ -18,6 +18,7 @@ type StreamKind =
   | "volatile"
   | "json-volatile"
   | "batched-json-volatile"
+  | "capnweb-after-append"
   | "orpc-durable-iterator"
   | "raw-volatile"
   | "minimal-ws";
@@ -198,6 +199,13 @@ type OrpcDurableIteratorFixture = {
   dispose(): Promise<void>;
 };
 
+type AfterAppendFixture = {
+  rpc: RpcStub<StreamRpc>;
+  webSocket: WebSocket;
+  inbox: AfterAppendInbox;
+  dispose(): void;
+};
+
 type OrpcDurableIteratorClient = {
   subscribe: Client<Record<never, never>, undefined, AsyncIterator<StreamEvent>, unknown>;
 };
@@ -299,6 +307,7 @@ export class BenchmarkRunner extends DurableObject {
       config.streamKind === "volatile" ||
       config.streamKind === "json-volatile" ||
       config.streamKind === "batched-json-volatile" ||
+      config.streamKind === "capnweb-after-append" ||
       config.streamKind === "orpc-durable-iterator" ||
       isRawWebSocketStreamKind(config.streamKind)
     ) {
@@ -452,6 +461,9 @@ export class BenchmarkRunner extends DurableObject {
     if (isRawWebSocketStreamKind(args.streamKind)) {
       return this.runRawAudioSubscriber({ ...args, streamKind: args.streamKind });
     }
+    if (args.streamKind === "capnweb-after-append") {
+      return this.runAfterAppendAudioSubscriber(args);
+    }
     if (args.streamKind === "orpc-durable-iterator") {
       return this.runOrpcDurableIteratorAudioSubscriber(args);
     }
@@ -510,6 +522,20 @@ export class BenchmarkRunner extends DurableObject {
         await fixture.dispose();
       }
     }
+    if (args.streamKind === "capnweb-after-append") {
+      const fixture = await connectAfterAppendStream(this.env, args.stream);
+      await fixture.rpc.subscribeAfterAppendVolatile();
+      try {
+        await sleep(args.holdMs);
+        return {
+          runner: this.ctx.id.name ?? this.ctx.id.toString(),
+          subscriber: args.subscriber,
+          heldMs: args.holdMs,
+        };
+      } finally {
+        fixture.dispose();
+      }
+    }
     const fixture = await connectStreamRpc(this.env, args.stream, args.streamKind);
     if (fixture.streamKind === "volatile") {
       await fixture.rpc.streamVolatile();
@@ -541,6 +567,9 @@ export class BenchmarkRunner extends DurableObject {
   ): Promise<AudioPublisherResult> {
     if (isRawWebSocketStreamKind(args.streamKind)) {
       return this.runRawAudioPublisher({ ...args, streamKind: args.streamKind });
+    }
+    if (args.streamKind === "capnweb-after-append") {
+      return this.runAfterAppendAudioPublisher(args);
     }
     if (args.streamKind === "orpc-durable-iterator") {
       return this.runOrpcDurableIteratorAudioPublisher(args);
@@ -695,6 +724,119 @@ export class BenchmarkRunner extends DurableObject {
       samples,
       latencyMs: summarize(samples.map((sample) => sample.latencyMs)),
     };
+  }
+
+  private async runAfterAppendAudioSubscriber(
+    args: AudioChaosConfig & { subscriber: string },
+  ): Promise<AudioSubscriberResult> {
+    const fixture = await connectAfterAppendStream(this.env, args.stream);
+    const samples: AudioSample[] = [];
+    await fixture.rpc.subscribeAfterAppendVolatile();
+    try {
+      for (let received = 0; received < args.publishers * args.framesPerPublisher; received += 1) {
+        const event = await fixture.inbox.read(args.timeoutMs);
+        samples.push({
+          frameId: readFrameId(event),
+          latencyMs: Math.max(0, Date.now() - Date.parse(event.createdAt)),
+        });
+      }
+    } finally {
+      fixture.dispose();
+    }
+
+    return {
+      runner: this.ctx.id.name ?? this.ctx.id.toString(),
+      subscriber: args.subscriber,
+      received: samples.length,
+      samples,
+      latencyMs: summarize(samples.map((sample) => sample.latencyMs)),
+    };
+  }
+
+  private async runAfterAppendAudioPublisher(
+    args: AudioChaosConfig & {
+      audio: AudioFixture;
+      publisher: number;
+      selfEcho: boolean;
+    },
+  ): Promise<AudioPublisherResult> {
+    const fixture = await connectAfterAppendStream(this.env, args.stream);
+    const appendPromises: Promise<StreamEvent>[] = [];
+    const appendStartedAtByFrame = new Map<string, number>();
+    const ackLatencyByFrame = new Map<string, number>();
+    const ackAtByFrame = new Map<string, number>();
+    const selfEchoLatencyByFrame = new Map<string, number>();
+    const appendStartToSelfEchoLatencyByFrame = new Map<string, number>();
+    const selfEchoAtByFrame = new Map<string, number>();
+    const selfEcho = args.selfEcho
+      ? this.collectAfterAppendSelfEcho({
+          ...args,
+          fixture,
+          appendStartedAtByFrame,
+          selfEchoLatencyByFrame,
+          appendStartToSelfEchoLatencyByFrame,
+          selfEchoAtByFrame,
+        })
+      : Promise.resolve();
+
+    try {
+      if (args.selfEcho) await fixture.rpc.subscribeAfterAppendVolatile();
+      const startedAt = Date.now();
+      for (let frame = 1; frame <= args.framesPerPublisher; frame += 1) {
+        const frameId = `p${args.publisher}-f${frame}`;
+        const appendStartedAt = Date.now();
+        appendStartedAtByFrame.set(frameId, appendStartedAt);
+        const append = fixture.rpc.appendVolatile({
+          event: buildAudioEvent({
+            config: args,
+            audio: args.audio,
+            publisher: String(args.publisher),
+            frame,
+            frameId,
+          }),
+        });
+        appendPromises.push(
+          append.then((event) => {
+            if (args.measureAppendAck && args.publisher === 0) {
+              const ackAt = Date.now();
+              ackLatencyByFrame.set(frameId, ackAt - appendStartedAt);
+              ackAtByFrame.set(frameId, ackAt);
+            }
+            return event;
+          }),
+        );
+        if (args.paceMs > 0) {
+          const nextFrameAt = startedAt + frame * args.paceMs;
+          await sleep(Math.max(0, nextFrameAt - Date.now()));
+        }
+      }
+
+      await Promise.all(appendPromises);
+      await selfEcho;
+      const elapsedMs = Date.now() - startedAt;
+      const ackToSelfEchoLatencyMs =
+        args.measureAppendAck && args.publisher === 0
+          ? Array.from(ackAtByFrame, ([frameId, ackAt]) => {
+              const selfEchoAt = selfEchoAtByFrame.get(frameId);
+              return selfEchoAt === undefined ? 0 : selfEchoAt - ackAt;
+            }).filter((latency) => latency >= 0)
+          : [];
+
+      return {
+        runner: this.ctx.id.name ?? this.ctx.id.toString(),
+        publisher: args.publisher,
+        sent: args.framesPerPublisher,
+        elapsedMs,
+        appendAckLatencyMs: summarize(Array.from(ackLatencyByFrame.values())),
+        selfEchoLatencyMs: summarize(Array.from(selfEchoLatencyByFrame.values())),
+        appendStartToSelfEchoLatencyMs: summarize(
+          Array.from(appendStartToSelfEchoLatencyByFrame.values()),
+        ),
+        ackToSelfEchoLatencyMs: summarize(ackToSelfEchoLatencyMs),
+      };
+    } finally {
+      fixture.dispose();
+    }
   }
 
   private async runOrpcDurableIteratorAudioPublisher(
@@ -968,6 +1110,34 @@ export class BenchmarkRunner extends DurableObject {
       }
     }
   }
+
+  private async collectAfterAppendSelfEcho(args: AudioChaosConfig & {
+    fixture: AfterAppendFixture;
+    appendStartedAtByFrame: Map<string, number>;
+    selfEchoLatencyByFrame: Map<string, number>;
+    appendStartToSelfEchoLatencyByFrame: Map<string, number>;
+    selfEchoAtByFrame: Map<string, number>;
+    publisher: number;
+  }) {
+    let ownFramesDelivered = 0;
+    while (ownFramesDelivered < args.framesPerPublisher) {
+      const event = await args.fixture.inbox.read(args.timeoutMs);
+      const frameId = readFrameId(event);
+      if (frameId.startsWith(`p${args.publisher}-`)) {
+        ownFramesDelivered += 1;
+        const selfEchoAt = Date.now();
+        const appendStartedAt = args.appendStartedAtByFrame.get(frameId);
+        args.selfEchoAtByFrame.set(frameId, selfEchoAt);
+        args.selfEchoLatencyByFrame.set(
+          frameId,
+          Math.max(0, selfEchoAt - Date.parse(event.createdAt)),
+        );
+        if (appendStartedAt !== undefined) {
+          args.appendStartToSelfEchoLatencyByFrame.set(frameId, selfEchoAt - appendStartedAt);
+        }
+      }
+    }
+  }
 }
 
 function buildEvent(n: number, runId: string, payloadBytes: number): StreamEventInput {
@@ -1024,6 +1194,7 @@ async function debugSubscriberCount(env: Env, config: AudioChaosConfig): Promise
   }
   const debug = await env.STREAM.getByName(config.stream).debug();
   if (config.streamKind === "raw-volatile") return debug.rawVolatileSubscribers;
+  if (config.streamKind === "capnweb-after-append") return debug.afterAppendClientSubscribers;
   if (config.streamKind === "json-volatile") return debug.jsonVolatileSubscribers.length;
   if (config.streamKind === "batched-json-volatile") {
     return debug.batchedJsonVolatileSubscribers.length;
@@ -1103,6 +1274,28 @@ async function connectStreamRpc(
   };
 }
 
+async function connectAfterAppendStream(env: Env, stream: string): Promise<AfterAppendFixture> {
+  const inbox = new AfterAppendInbox();
+  const clientMain = new AfterAppendClientMainTarget((event) => inbox.push(event));
+  const response = await env.STREAM.getByName(stream).fetch("https://stream.internal/", {
+    headers: { Upgrade: "websocket" },
+  });
+  const webSocket = response.webSocket;
+  if (webSocket === null) throw new Error("afterAppend stream DO did not return a WebSocket");
+  webSocket.accept();
+  const rpc = newWebSocketRpcSession<StreamRpc>(webSocket, clientMain);
+  return {
+    rpc,
+    webSocket,
+    inbox,
+    dispose() {
+      clientMain[Symbol.dispose]();
+      rpc[Symbol.dispose]();
+      webSocket.close();
+    },
+  };
+}
+
 async function connectRawStream(
   env: Env,
   stream: string,
@@ -1152,6 +1345,49 @@ async function connectRawStream(
       webSocket.close();
     },
   };
+}
+
+class AfterAppendClientMainTarget extends RpcTarget {
+  #onEvent: (event: StreamEvent) => void;
+  #disposed = false;
+
+  constructor(onEvent: (event: StreamEvent) => void) {
+    super();
+    this.#onEvent = onEvent;
+  }
+
+  afterAppend(args: { event: StreamEvent }): undefined {
+    if (!this.#disposed) this.#onEvent(args.event);
+  }
+
+  [Symbol.dispose](): void {
+    this.#disposed = true;
+  }
+}
+
+class AfterAppendInbox {
+  #events: StreamEvent[] = [];
+  #waiters: ((event: StreamEvent) => void)[] = [];
+
+  push(event: StreamEvent): void {
+    const waiter = this.#waiters.shift();
+    if (waiter === undefined) {
+      this.#events.push(event);
+    } else {
+      waiter(event);
+    }
+  }
+
+  read(timeoutMs: number): Promise<StreamEvent> {
+    const event = this.#events.shift();
+    if (event !== undefined) return Promise.resolve(event);
+    return withTimeout(
+      new Promise((resolve) => {
+        this.#waiters.push(resolve);
+      }),
+      timeoutMs,
+    );
+  }
 }
 
 async function connectOrpcDurableIterator(

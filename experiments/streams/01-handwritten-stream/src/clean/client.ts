@@ -1,15 +1,19 @@
 import { createORPCClient, type Client } from "@orpc/client";
 import { RPCLink as ORPCWebSocketLink } from "@orpc/client/websocket";
 import { signDurableIteratorToken } from "@orpc/experimental-durable-iterator";
-import { newWebSocketRpcSession, type RpcStub } from "capnweb";
+import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 import {
   StreamEvent as StreamEventSchema,
   type StreamEvent,
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
-import { CLEAN_STREAM_ORPC_SIGNING_KEY, type CleanStreamRpc } from "./protocol.js";
+import {
+  CLEAN_STREAM_ORPC_SIGNING_KEY,
+  type CleanStreamEventSink,
+  type CleanStreamRpc,
+} from "./protocol.js";
 
-export type CleanStreamTransport = "capnweb" | "orpc" | "rawws";
+export type CleanStreamTransport = "capnweb" | "capnweb-oneway" | "orpc" | "rawws";
 
 export type CleanStreamEndpoint =
   | {
@@ -40,6 +44,7 @@ export async function connectCleanStream(args: {
   endpoint: CleanStreamEndpoint;
 }): Promise<CleanStreamClient> {
   if (args.transport === "capnweb") return connectCleanCapnwebStream(args.endpoint);
+  if (args.transport === "capnweb-oneway") return connectCleanCapnwebOneWayStream(args.endpoint);
   if (args.transport === "orpc") return connectCleanOrpcStream(args.endpoint);
   return connectCleanRawwsStream(args.endpoint);
 }
@@ -66,6 +71,38 @@ export async function connectCleanCapnwebStream(
         async [Symbol.asyncDispose]() {
           await reader.cancel();
           reader.releaseLock();
+        },
+      };
+    },
+    async [Symbol.asyncDispose]() {
+      rpc[Symbol.dispose]();
+      await closeWebSocket(webSocket);
+    },
+  };
+}
+
+export async function connectCleanCapnwebOneWayStream(
+  endpoint: CleanStreamEndpoint,
+): Promise<CleanStreamClient> {
+  const webSocket = await openWebSocket(endpoint, "capnweb-oneway");
+  const rpc = newWebSocketRpcSession<CleanStreamRpc>(webSocket);
+  return {
+    transport: "capnweb-oneway",
+    append(event) {
+      return Promise.resolve(rpc.append({ event }));
+    },
+    async subscribe() {
+      const inbox = new MessageInbox();
+      const sink = new CleanStreamEventSinkTarget((event) => {
+        inbox.push(event);
+      });
+      await rpc.subscribeOneWay(sink);
+      return {
+        async read(timeoutMs = 1_000) {
+          return StreamEventSchema.parse(await inbox.read(timeoutMs));
+        },
+        async [Symbol.asyncDispose]() {
+          sink[Symbol.dispose]();
         },
       };
     },
@@ -237,6 +274,24 @@ class MessageInbox {
       }),
       timeoutMs,
     );
+  }
+}
+
+class CleanStreamEventSinkTarget extends RpcTarget implements CleanStreamEventSink {
+  #onEvent: (event: StreamEvent) => void;
+  #disposed = false;
+
+  constructor(onEvent: (event: StreamEvent) => void) {
+    super();
+    this.#onEvent = onEvent;
+  }
+
+  event(event: StreamEvent): undefined {
+    if (!this.#disposed) this.#onEvent(event);
+  }
+
+  [Symbol.dispose](): void {
+    this.#disposed = true;
   }
 }
 

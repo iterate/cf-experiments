@@ -63,10 +63,47 @@
  */
 import { z } from "zod";
 
+export type StreamEventSource = {
+  processor?: {
+    slug: string;
+    version: string;
+  };
+};
+
+/** Append input for a stream event. Generic `Type` / `Payload` are used by stream processors. */
+export type StreamEventInput<
+  Type extends string = string,
+  Payload = unknown,
+> = {
+  type: Type;
+  payload?: Payload;
+  metadata?: Record<string, unknown>;
+  source?: StreamEventSource;
+  idempotencyKey?: string;
+  /** Precondition: must equal the next offset when set. */
+  offset?: number;
+};
+
+/** Committed stream event. `streamPath` is set on cross-stream processor wire events. */
+export type StreamEvent<
+  Type extends string = string,
+  Payload = unknown,
+> = StreamEventInput<Type, Payload> & {
+  streamPath?: string;
+  offset: number;
+  createdAt: string;
+};
+
+export const streamEventMetadataSchema = z.record(z.string(), z.unknown());
+export const streamEventOffsetSchema = z.number().int().positive();
+export const streamEventCreatedAtSchema = z.string();
+export const streamEventCreatedAtIsoSchema = z.iso.datetime({ offset: true });
+export const streamEventPathSchema = z.string().trim().min(1);
+
 export const StreamEventInput = z.object({
   type: z.string(),
   payload: z.unknown().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+  metadata: streamEventMetadataSchema.optional(),
   source: z
     .object({
       processor: z
@@ -81,17 +118,14 @@ export const StreamEventInput = z.object({
     .optional(),
   idempotencyKey: z.string().optional(),
   /** Precondition: must equal the next offset when set. */
-  offset: z.number().int().positive().optional(),
+  offset: streamEventOffsetSchema.optional(),
 });
-
-export type StreamEventInput = z.infer<typeof StreamEventInput>;
 
 export const StreamEvent = StreamEventInput.extend({
-  offset: z.number().int().positive(),
-  createdAt: z.string(),
+  streamPath: streamEventPathSchema.optional(),
+  offset: streamEventOffsetSchema,
+  createdAt: streamEventCreatedAtSchema,
 });
-
-export type StreamEvent = z.infer<typeof StreamEvent>;
 
 export type StreamEventRow = {
   offset: number;

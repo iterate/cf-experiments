@@ -1,4 +1,5 @@
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import { RpcTarget } from "capnweb";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { withStream } from "./lib/with-stream.js";
@@ -59,12 +60,39 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const startedAt = performance.now();
+  while (performance.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await sleep(10);
+  }
+  throw new Error(`timed out after ${timeoutMs}ms`);
+}
+
 async function expectTimesOut(promise: Promise<unknown>, ms: number) {
   await expect(withTimeout(promise, ms)).rejects.toThrow(/timed out/);
 }
 
 async function expectReadTimesOut(read: Promise<ReadableStreamReadResult<StreamEvent>>, ms: number) {
   await expectTimesOut(read, ms);
+}
+
+class TestAfterAppendClientMain extends RpcTarget {
+  #onEvent: (event: StreamEvent) => void;
+  #disposed = false;
+
+  constructor(onEvent: (event: StreamEvent) => void) {
+    super();
+    this.#onEvent = onEvent;
+  }
+
+  afterAppend(args: { event: StreamEvent }): undefined {
+    if (!this.#disposed) this.#onEvent(args.event);
+  }
+
+  [Symbol.dispose](): void {
+    this.#disposed = true;
+  }
 }
 
 describe("handwritten stream capnweb", () => {
@@ -597,6 +625,145 @@ describe("handwritten stream capnweb", () => {
     expect(subscriber.wireAnalysis().resultWaits).toHaveLength(1);
 
     reader.releaseLock();
+  });
+
+  it("documents the concrete Cap'n Web returned-stream pipe frames", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const events: StreamEventInput[] = Array.from({ length: 2 }, (_, i) => ({
+      type: "test.capnweb.pipe-frame",
+      payload: { n: i + 1 },
+    }));
+
+    await using subscriber = await withStream({ path });
+    const readable = await subscriber.rpc.stream();
+    const framesAfterSubscribe = subscriber.wsMessages.length;
+    // @ts-expect-error capnweb@0.8.0 types only model ReadableStream<Uint8Array>
+    const reader = (readable as ReadableStream<StreamEvent>).getReader();
+
+    await using writer = await withStream({ path });
+    await writer.rpc.appendBatch({ events, durability: "best-effort" });
+    await readEvents(reader, events.length, 1_000);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(subscriber.parsedWsMessages().slice(framesAfterSubscribe)).toMatchObject([
+      {
+        direction: "in",
+        data: [
+          "stream",
+          [
+            "pipeline",
+            expect.any(Number),
+            ["write"],
+            [
+              {
+                type: events[0]!.type,
+                payload: events[0]!.payload,
+                offset: 1,
+                createdAt: expect.any(String),
+              },
+            ],
+          ],
+        ],
+      },
+      { direction: "out", data: ["resolve", expect.any(Number), ["undefined"]] },
+      {
+        direction: "in",
+        data: [
+          "stream",
+          [
+            "pipeline",
+            expect.any(Number),
+            ["write"],
+            [
+              {
+                type: events[1]!.type,
+                payload: events[1]!.payload,
+                offset: 2,
+                createdAt: expect.any(String),
+              },
+            ],
+          ],
+        ],
+      },
+      { direction: "out", data: ["resolve", expect.any(Number), ["undefined"]] },
+    ]);
+
+    reader.releaseLock();
+  });
+
+  it("client-main afterAppend subscriber originates no websocket frames per event", async () => {
+    const path = `stream-${crypto.randomUUID()}`;
+    const events: StreamEventInput[] = Array.from({ length: 2 }, (_, i) => ({
+      type: "test.after-append-client-main",
+      payload: { n: i + 1 },
+    }));
+    const delivered: StreamEvent[] = [];
+    const clientMain = new TestAfterAppendClientMain((event) => delivered.push(event));
+
+    await using subscriber = await withStream({ path, localMain: clientMain });
+    await subscriber.rpc.subscribeAfterAppendVolatile();
+    const outboundAfterSubscribe = subscriber.wsMessages.length;
+
+    await using writer = await withStream({ path });
+    const appended = await Promise.all(
+      events.map((event) => writer.rpc.appendVolatile({ event })),
+    );
+    await waitFor(() => delivered.length === events.length, 1_000);
+
+    expect(delivered).toEqual(appended);
+    expect(outboundFrames(subscriber.wsMessages, outboundAfterSubscribe)).toEqual([]);
+    const inbound = subscriber
+      .parsedWsMessages()
+      .slice(outboundAfterSubscribe)
+      .filter((frame) => frame.direction === "in");
+    const pushFrames = inbound.filter((frame) => Array.isArray(frame.data) && frame.data[0] === "push");
+    expect(inbound.every((frame) => Array.isArray(frame.data) && (frame.data[0] === "push" || frame.data[0] === "release"))).toBe(true);
+    expect(pushFrames).toMatchObject([
+      {
+        direction: "in",
+        data: [
+          "push",
+          [
+            "pipeline",
+            expect.any(Number),
+            ["afterAppend"],
+            [
+              {
+                event: {
+                  type: events[0]!.type,
+                  payload: events[0]!.payload,
+                  offset: 1,
+                  createdAt: expect.any(String),
+                },
+              },
+            ],
+          ],
+        ],
+      },
+      {
+        direction: "in",
+        data: [
+          "push",
+          [
+            "pipeline",
+            expect.any(Number),
+            ["afterAppend"],
+            [
+              {
+                event: {
+                  type: events[1]!.type,
+                  payload: events[1]!.payload,
+                  offset: 2,
+                  createdAt: expect.any(String),
+                },
+              },
+            ],
+          ],
+        ],
+      },
+    ]);
+
+    clientMain[Symbol.dispose]();
   });
 
   it.fails(

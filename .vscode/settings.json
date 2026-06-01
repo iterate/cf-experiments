@@ -6,5 +6,6 @@
   },
   "[typescriptreact]": {
     "editor.defaultFormatter": "oxc.oxc-vscode"
-  }
+  },
+  "typescript.native-preview.tsdk": "/Users/jonastemplestein/github.com/src/iterate/cf-experiments/node_modules/@typescript/native-preview"
 }

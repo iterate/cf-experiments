@@ -1,0 +1,18 @@
+{
+  "name": "@cf-experiments/06-hibernation-restarts",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsgo --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:cloudflare",
+    "@types/node": "^24.12.4",
+    "vitest": "^4.1.7",
+    "wrangler": "catalog:cloudflare"
+  }
+}
+

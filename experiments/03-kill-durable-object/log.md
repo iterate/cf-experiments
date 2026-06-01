@@ -13,7 +13,7 @@ The memory helper now reports:
 
 Use `touch=fill` or `touch=random` for serious OOM threshold work. `touch=none` is fast but can overstate real committed memory because zero-filled buffers may be lazily backed by V8/workerd. `touch=pages` is a cheaper middle ground: one write per 4 KiB page. These are still experiment-side counters, not runtime heap metrics.
 
-Follow-up production smoke after adding `touch=fill` showed the earlier OOM boundary was **not only** a lazy-zero-buffer artifact: full fills still retained through 192 MiB, silently reset after 208 MiB, and hard-failed at 263 MiB. So the old byte accounting was incomplete, but the observed Cloudflare behavior remains real for this probe.
+Follow-up production smoke after adding `touch=fill` showed the earlier OOM boundary was **not only** a lazy-zero-buffer artifact: full fills still retained through **197 MiB**, silently reset from **198 MiB**, and hard-failed at **264 MiB** (saner sweep 2026-05-27: fresh DO per size, 2 MiB steps in the transition band). So the old byte accounting was incomplete, and the old sparse sweep overstated stability at 192 MiB and understated how tight the reset band is.
 
 **Yes — alternating consume + release does NOT crash the DO**, even at per-cycle sizes that would OOM if held cumulatively. Verified in production (`iterate-dev-preview`).
 
@@ -53,7 +53,7 @@ Only the abort reason propagates. See docstring on `kill()` in `src/worker.ts`.
 | Kill in-flight `ping` | Yes — long ping also 500 (~511ms) | Yes — long ping 500 (~548ms) |
 | Recovery (`ping` same `name`) | Yes — 200 pong immediately after | Yes — 200 pong immediately after |
 | **HTTP body on kill** | Plain-text **stack trace**; message = abort reason (`Error: <reason>`) | Generic **`error code: 1101`** (16 bytes); reason **not** in body |
-| **OOM: retain + ping** | **No limit observed** through 600 MiB single-shot `touch=fill` (2026-05-26 re-run) | Silent reset after **192 MiB** retained; `ping.heldBytes=0` from **208 MiB** upward |
+| **OOM: retain + ping** | **No limit observed** through 600 MiB single-shot `touch=fill` (2026-05-26 re-run) | Stable through **197 MiB**; silent reset from **198 MiB** (`ping.heldBytes=0`, new `incarnationId`) |
 | **OOM: hard fail** | Not observed through 600 MiB | HTTP **500** / `1101` at **264 MiB** single-shot |
 | **Abort reason visible** | Wrangler stderr + response body | `wrangler tail` on **worker** `fetch` invocation only |
 | DO invocation in tail | Not separate JSON events (bundled into worker log lines) | Separate events: `executionModel: "durableObject"`, `event.rpcMethod: "kill"` / `"ping"` |
@@ -124,6 +124,31 @@ curl -si -X POST 'http://localhost:<port>/kill?reason=my-reason'
 ---
 
 ## Log
+
+### 2026-05-27 — Sane memory threshold sweep (fresh DO per size)
+
+Earlier `test:oom` reused one DO name across the whole sweep (DELETE between sizes) and used sparse steps (64, 128, 192, 208, …), which left a 16 MiB hole and mis-framed **192 MiB as “last good”** when finer probing shows **197 MiB** is still stable.
+
+New script: `pnpm test:sweep` (`scripts/memory-threshold-sweep.test.ts`).
+
+Protocol: **fresh `name` per size**, `touch=fill`, single alloc then follow-up ping. Outcomes: `stable` (same `incarnationId`, `heldBytes` matches), `replaced` (alloc 200 but new incarnation / zero held), `alloc_failed` (500 / 1101).
+
+Production (`03-kill-durable-object.iterate-dev-preview.workers.dev`), ~22s for full default sweep:
+
+| Size (MiB) | Outcome |
+|------------|---------|
+| 64–196 | stable |
+| 198–263 | replaced |
+| 264+ | alloc_failed (1101) |
+
+Pin-down: **197 MiB stable**, **198 MiB replaced** (separate run).
+
+Summary line:
+- last stable: **197 MiB**
+- first replaced: **198 MiB**
+- first hard fail: **264 MiB**
+
+So the silent-reset threshold is **between 197 and 198 MiB retained** (~206–208 MiB `byteLength`), not “somewhere between 192 and 208”.
 
 ### 2026-05-26 — Incarnation IDs added to prove reset/recreation
 

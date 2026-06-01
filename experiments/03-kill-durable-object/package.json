@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "test:oom": "vitest run scripts/oom-sweep.test.ts --reporter=verbose",
+    "test:sweep": "vitest run scripts/memory-threshold-sweep.test.ts --reporter=verbose",
     "test:kill-response": "vitest run scripts/kill-response.test.ts --reporter=verbose",
     "typecheck": "tsgo --noEmit"
   },

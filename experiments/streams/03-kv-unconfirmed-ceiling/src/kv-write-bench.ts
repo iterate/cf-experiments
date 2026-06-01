@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import {
   countStreamEvents,
-  countStreamEventsFromKv,
   initStreamEventsTable,
+  maxOffsetFromKv,
   type StreamEventInput,
   writeEvent,
   writeEventFromKv,
@@ -194,11 +194,11 @@ function writeOne(args: {
 
 function countForMode(storage: DurableObjectStorage, mode: WriteMode) {
   if (mode === "sql") return countStreamEvents({ sql: storage.sql });
-  return countStreamEventsFromKv({ kv: storage.kv });
+  return maxOffsetFromKv({ kv: storage.kv });
 }
 
 function readMetaCount(storage: DurableObjectStorage) {
-  return countStreamEventsFromKv({ kv: storage.kv });
+  return maxOffsetFromKv({ kv: storage.kv });
 }
 
 async function flushStorage(storage: DurableObjectStorage) {

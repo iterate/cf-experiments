@@ -1,5 +1,14 @@
 # High level findings
 
+- KEY FINDING: capnweb@0.8.0 returned `ReadableStream` chunks are not wire-one-way. The stream is
+  encoded as a pipe to a remote `WritableStream`, so every subscriber event chunk produces a server
+  write frame and a subscriber-originated write-completion frame:
+  ```txt
+  in  ["stream",["pipeline",1,["write"],[event]]]
+  out ["resolve",2,["undefined"]]
+  ```
+  That `resolve undefined` is not an application acknowledgement, but it is still per-chunk return
+  traffic and it is the central reason Cap'n Web returned-stream fan-out is slow in this experiment.
 - Raw WebSocket fan-out from one DO is not the current bottleneck at the 10 publisher / 36
   subscriber / 50 frame audio-shaped load. Both the embedded `raw-volatile` path and separate
   `minimal-ws` baseline repeatedly deliver all 18,000 fan-out messages with low-hundreds-of-ms
@@ -17,8 +26,89 @@
   is serialized as a pipe write to a remote writable stream and the subscriber side sends a
   per-chunk `resolve undefined`. Unless chunks are batched/coalesced, that per-chunk stream machinery
   dominates high-frequency fan-out latency.
+- Cap'n Web unawaited callback fan-out can be made wire-one-way after setup, but the deployed
+  storage-free benchmark is still much slower than raw WebSocket at 10 publishers / 36 subscribers /
+  50 frames. The new `capnweb-after-append` mode delivered all 18,000 fan-outs without
+  subscriber-originated per-event frames, but landed at `622 ms` then `928 ms` all-subscriber p95;
+  `raw-volatile` was `145 ms` then `146 ms` in the same matrix.
 
 # Notes
+
+## 2026-05-27 11:29 UTC+1
+
+- Added `stream-kind=capnweb-after-append`, the requested client-main callback shape:
+  - the subscriber opens a Cap'n Web WebSocket with a local main object;
+  - that client main object exposes `afterAppend({ event })`;
+  - the subscriber calls `subscribeAfterAppendVolatile()` once;
+  - the Stream DO stores the session's client main stub and, on each `appendVolatile()`, calls
+    `client.afterAppend({ event })` without awaiting the returned Cap'n Web thenable;
+  - the Stream DO disposes the ignored result, so cleanup is server-originated `release` traffic,
+    not subscriber-originated `resolve undefined`.
+- Added frame-level proof:
+  - `scripts/stream-capnweb.test.ts`: "client-main afterAppend subscriber originates no websocket
+    frames per event".
+  - Deployed focused run passed: `3 passed`, `1 expected fail`, `66 skipped`.
+- Added BenchmarkRunner DO support for the storage-free mode:
+  - active and passive subscribers use the client-main callback path;
+  - publishers call `appendVolatile()`;
+  - publisher self-echo can also use the same callback path.
+- Deployed version `bd893599-4f38-4cf9-91ff-4d6897acc7aa`.
+- Deployed DO-orchestrated benchmark, 10 publishers / 36 subscribers / 50 frames / 20 ms pacing /
+  storage out / append-ack measured / self-echo disabled:
+  - `capnweb-after-append`: all 18,000 fan-outs delivered, all-subs p95 `622 ms`, first-sub p95
+    `573 ms`, append-ack p95 `375 ms`, elapsed `1826 ms`, fanout attempts `18000`.
+  - `raw-volatile`: all delivered, all-subs p95 `145 ms`, first-sub p95 `125 ms`, append-ack p95
+    `5 ms`, elapsed `1630 ms`, fanout attempts `18000`.
+  - `minimal-ws`: all delivered, all-subs p95 `138 ms`, first-sub p95 `116 ms`, append-ack p95
+    `15 ms`, elapsed `1625 ms`, fanout attempts `18000`.
+  - `volatile` returned `ReadableStream`: all delivered, all-subs p95 `1623 ms`, first-sub p95
+    `1564 ms`, append-ack p95 `760 ms`, elapsed `2465 ms`, fanout attempts `18000`.
+- Repeat of the two main contenders:
+  - `capnweb-after-append`: all delivered, all-subs p95 `928 ms`, first-sub p95 `886 ms`,
+    append-ack p95 `642 ms`, elapsed `2183 ms`, fanout attempts `18000`.
+  - `raw-volatile`: all delivered, all-subs p95 `146 ms`, first-sub p95 `115 ms`, append-ack p95
+    `11 ms`, elapsed `1541 ms`, fanout attempts `18000`.
+- Interpretation: the unawaited client-main callback shape solves the alternating
+  stream-write/resolve traffic problem and beats Cap'n Web returned streams, but it does not get close
+  to raw WebSocket for this audio-shaped fan-out load. The remaining gap is likely ordinary Cap'n Web
+  RPC call framing/object-capability overhead per event, not storage or returned-stream write acks.
+
+## 2026-05-27 11:15 UTC+1
+
+- Added `transport=capnweb-oneway` to the clean transport comparison. It keeps Cap'n Web but avoids
+  returned `ReadableStream` transport by having subscribers pass an event sink capability once.
+- The stream DO must `dup()` the sink before storing it. Without the duplicate, Cap'n Web disposes the
+  argument after `subscribeOneWay()` returns, and later event calls fail with
+  `This RpcImportHook was already disposed`.
+- The DO calls `sink.event(event)` for each event, deliberately does not await the returned Cap'n Web
+  thenable, and disposes the ignored result. The subscriber's post-setup event traffic is:
+  ```txt
+  in ["push",["pipeline",sinkId,["event"],[event]]]
+  in ["release",resultId,refcount]
+  ```
+  There are no subscriber-originated per-event frames in the local frame-level test.
+- Interpretation: Cap'n Web can tell whether a result was observed because `RpcPromise` is a custom
+  thenable. `await` / `.then()` sends a `pull`; a voided and disposed result does not. This gives us a
+  truly one-way Cap'n Web consumption path after setup, at the cost of changing from returned-stream
+  consumption to a sink-capability data plane.
+
+## 2026-05-27 11:00 UTC+1
+
+- Promoted the Cap'n Web returned-stream protocol shape to the front of the experiment notes because
+  it is the key finding:
+  ```txt
+  in  ["stream",["pipeline",1,["write"],[{"type":"probe.protocol","payload":{"n":1},"offset":1,"createdAt":"..."}]]]
+  out ["resolve",2,["undefined"]]
+  in  ["stream",["pipeline",1,["write"],[{"type":"probe.protocol","payload":{"n":2},"offset":2,"createdAt":"..."}]]]
+  out ["resolve",3,["undefined"]]
+  ```
+- Interpretation: Cap'n Web is giving us nice returned `ReadableStream` API semantics, but
+  capnweb@0.8.0 implements them as per-chunk remote `WritableStream.write()` calls. The outbound
+  `resolve undefined` frames are write-completion traffic, not app-level subscriber acks. Still, for
+  audio-frame fan-out they behave like per-event return traffic at the transport layer.
+- This explains why batching is so effective. Batching keeps the same returned-stream abstraction but
+  reduces the number of write/resolve pairs. A raw WebSocket client can still expose a nice local
+  `ReadableStream` facade while keeping the wire protocol one-way after the initial subscribe.
 
 ## 2026-05-27 09:33 UTC+1
 

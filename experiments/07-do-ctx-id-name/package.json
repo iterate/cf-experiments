@@ -1,0 +1,16 @@
+{
+  "name": "@cf-experiments/07-do-ctx-id-name",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run scripts/ctx-id-name.test.ts --reporter=verbose",
+    "typecheck": "tsgo --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.4",
+    "vitest": "^4.1.7",
+    "wrangler": "catalog:cloudflare"
+  }
+}

@@ -13,7 +13,7 @@ Worker version: `d0354836-081b-4572-8701-66fd5c21218e` (2026-05-26 extended test
 | `POST /pressure` | One-shot max messages until in-DO error |
 | `flush-every=N` | Sync every N appends during loop |
 
-`metaCount` reads `stream:meta:nextOffset` from sync KV — includes unconfirmed appends in-process.
+`metaCount` reads `maxOffset` from sync KV — includes unconfirmed appends in-process.
 
 ---
 
