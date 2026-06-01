@@ -7,7 +7,10 @@ export const coreStreamProcessorContract = defineProcessorContract({
   version: "0.1.0",
   description: "Maintains the stream's own reduced state.",
   stateSchema: z.object({
+    streamNamespace: z.string().trim().min(1),
+    streamPath: z.string().trim().min(1),
     createdAt: z.string(),
+    incarnationId: z.string().trim().min(1),
     eventCount: z.number().int().min(0),
     maxOffset: z.number().int().min(-1),
     subscriptionsByKey: z.record(
@@ -42,7 +45,29 @@ export const coreStreamProcessorContract = defineProcessorContract({
       }),
     ),
   }),
+  initialState: {
+    streamNamespace: "uninitialized",
+    streamPath: "uninitialized",
+    createdAt: "uninitialized",
+    incarnationId: "uninitialized",
+    eventCount: 0,
+    maxOffset: -1,
+    subscriptionsByKey: {},
+  },
   events: {
+    "events.iterate.com/stream/created": {
+      description: "Initializes the core reduced state for a stream.",
+      payloadSchema: z.object({
+        streamNamespace: z.string().trim().min(1),
+        streamPath: z.string().trim().min(1),
+      }),
+    },
+    "events.iterate.com/stream/woken": {
+      description: "Records that a Durable Object incarnation has started running this stream.",
+      payloadSchema: z.object({
+        incarnationId: z.string().trim().min(1),
+      }),
+    },
     "events.iterate.com/stream/subscription-configured": {
       description: "Configures or replaces an outbound subscription for this stream.",
       payloadSchema: z.object({
@@ -68,42 +93,53 @@ export const coreStreamProcessorContract = defineProcessorContract({
       }),
     },
   },
-  consumes: ["*"],
+  consumes: [
+    "*",
+    "events.iterate.com/stream/created",
+    "events.iterate.com/stream/woken",
+    "events.iterate.com/stream/subscription-configured",
+  ],
   emits: [],
-  reduce({ state, event }) {
+  reduce({ contract, state, event }) {
+    // All events increment the event count and max offset
     const next = {
       ...state,
       eventCount: Math.max(state.eventCount, event.offset + 1),
       maxOffset: Math.max(state.maxOffset, event.offset),
     };
 
+    if (event.type === "events.iterate.com/stream/created") {
+      const payload =
+        contract.events["events.iterate.com/stream/created"].payloadSchema.parse(
+          event.payload,
+        );
+      return {
+        ...next,
+        streamNamespace: payload.streamNamespace,
+        streamPath: payload.streamPath,
+        createdAt: event.createdAt,
+      };
+    }
+
+    if (event.type === "events.iterate.com/stream/woken") {
+      const payload =
+        contract.events["events.iterate.com/stream/woken"].payloadSchema.parse(
+          event.payload,
+        );
+      return {
+        ...next,
+        incarnationId: payload.incarnationId,
+      };
+    }
+
     if (event.type !== "events.iterate.com/stream/subscription-configured") {
       return next;
     }
 
-    const payload = z
-      .object({
-        subscriptionKey: z.string().trim().min(1),
-        subscriber: z.discriminatedUnion("type", [
-          z.object({
-            type: z.literal("built-in"),
-            transport: z.literal("captainweb-websocket"),
-            processorSlug: z.string().trim().min(1),
-          }),
-          z.object({
-            type: z.literal("dynamic-worker"),
-            transport: z.literal("captainweb-websocket"),
-            workerName: z.string().trim().min(1),
-            entrypoint: z.string().trim().min(1),
-          }),
-          z.object({
-            type: z.literal("external-url"),
-            transport: z.literal("https-webhook"),
-            url: z.url(),
-          }),
-        ]),
-      })
-      .parse(event.payload);
+    const payload =
+      contract.events["events.iterate.com/stream/subscription-configured"].payloadSchema.parse(
+        event.payload,
+      );
     const latestConfiguredEvent = {
       ...event,
       type: "events.iterate.com/stream/subscription-configured" as const,
@@ -124,15 +160,6 @@ export type CoreStreamState = z.infer<typeof coreStreamProcessorContract.stateSc
 
 export type SubscriptionConfiguredEvent =
   CoreStreamState["subscriptionsByKey"][string]["latestConfiguredEvent"];
-
-export function initialCoreStreamState(createdAt: string): CoreStreamState {
-  return coreStreamProcessorContract.stateSchema.parse({
-    createdAt,
-    eventCount: 0,
-    maxOffset: -1,
-    subscriptionsByKey: {},
-  });
-}
 
 export function reduceCoreStreamState(args: {
   state: CoreStreamState;

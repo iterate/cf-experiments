@@ -66,7 +66,7 @@ export default {
 
     if (url.pathname.startsWith("/jonas/")) {
       const name = url.pathname.slice("/jonas/".length) || "default";
-      return env.JONAS_STREAM.getByName(name).fetch(request);
+      return env.JONAS_STREAM.getByName(`jonas:${name}`).fetch(request);
     }
 
     if (url.pathname.startsWith("/stream-processor/")) {

@@ -34,11 +34,6 @@ export class StreamProcessor extends DurableObject {
       return new Response("WebSocket only", { status: 400 });
     }
 
-    const transport = new URL(request.url).searchParams.get("transport") ?? "capnweb";
-    if (transport !== "capnweb") {
-      return new Response("transport must be capnweb", { status: 400 });
-    }
-
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();

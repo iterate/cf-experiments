@@ -21,7 +21,7 @@ class TestSubscriberRpcTarget extends RpcTarget implements SubscriberRpcTarget {
 }
 
 describe("jonas stream CaptainWeb protocol", () => {
-  e2eIt("appends zero-based events over CaptainWeb", async () => {
+  e2eIt("appends events after the stream-created event over CaptainWeb", async () => {
     const path = `jonas-capnweb-append-${crypto.randomUUID()}`;
     await using stream = await connectJonasStream(path);
 
@@ -35,10 +35,10 @@ describe("jonas stream CaptainWeb protocol", () => {
     expect(appended).toMatchObject({
       type: "test.jonas.capnweb-append",
       payload: { path },
-      offset: 0,
+      offset: 2,
       createdAt: expect.any(String),
     });
-    expect(await stream.rpc.getMaxOffset()).toBe(0);
+    expect(await stream.rpc.getMaxOffset()).toBe(2);
   });
 
   e2eIt("replays history and then delivers live batches to inbound subscribers", async () => {
@@ -64,7 +64,27 @@ describe("jonas stream CaptainWeb protocol", () => {
     });
     await waitFor(() => subscriberTarget.batches.length === 2, 1_000);
 
-    expect(subscriberTarget.batches).toEqual([[first], [second]]);
+    expect(subscriberTarget.batches).toEqual([
+      [
+        expect.objectContaining({
+          type: "events.iterate.com/stream/created",
+          offset: 0,
+          payload: {
+            streamNamespace: "jonas",
+            streamPath: path,
+          },
+        }),
+        expect.objectContaining({
+          type: "events.iterate.com/stream/woken",
+          offset: 1,
+          payload: {
+            incarnationId: expect.any(String),
+          },
+        }),
+        first,
+      ],
+      [second],
+    ]);
   });
 
   e2eIt("runs a built-in outbound processor from subscription-configured", async () => {
@@ -72,7 +92,7 @@ describe("jonas stream CaptainWeb protocol", () => {
     const subscriptionKey = "echo";
     await using stream = await connectJonasStream(path);
     await using processor = await withStreamProcessorCapnweb({
-      path: `${path}:${subscriptionKey}`,
+      path: `jonas:${path}:${subscriptionKey}`,
       workerUrl,
     });
 
@@ -109,7 +129,7 @@ describe("jonas stream CaptainWeb protocol", () => {
 
     await waitFor(async () => {
       const status = await processor.capnweb.status();
-      return status.snapshot?.state.seen === 1 && status.snapshot.offset >= 2;
+      return status.snapshot?.state.seen === 1 && status.snapshot.offset >= 4;
     }, 1_000);
   });
 
@@ -120,6 +140,7 @@ describe("jonas stream CaptainWeb protocol", () => {
     await using subscriber = await connectJonasStream(path);
     await subscriber.rpc.initInboundSubscription({
       subscriberRpcTarget: subscriberTarget,
+      afterOffset: 1,
     });
     const afterSubscribe = subscriber.wsMessages.length;
 
@@ -134,7 +155,7 @@ describe("jonas stream CaptainWeb protocol", () => {
     expect(appended).toMatchObject({
       type: input.type,
       payload: input.payload,
-      offset: 0,
+      offset: 2,
       createdAt: expect.any(String),
     });
     expect(subscriberTarget.batches).toEqual([[appended]]);
@@ -160,7 +181,7 @@ describe("jonas stream CaptainWeb protocol", () => {
                     {
                       type: input.type,
                       payload: input.payload,
-                      offset: 0,
+                      offset: 2,
                       createdAt: expect.any(String),
                     },
                   ],
@@ -214,7 +235,6 @@ function newRecordingWebSocket(url: string, wsMessages: WsMessage[]) {
 function toJonasWebSocketUrl(path: string) {
   const url = new URL(workerUrl);
   url.pathname = `/jonas/${path}`;
-  url.searchParams.set("transport", "capnweb");
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   return url.toString();

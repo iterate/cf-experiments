@@ -267,7 +267,7 @@ function streamUrl(endpoint: JonasStreamEndpoint, transport: "raw-ws" | "capnweb
       ? new URL(endpoint.workerUrl ?? defaultWorkerUrl)
       : new URL(endpoint.url);
   if (endpoint.url === undefined) url.pathname = `/jonas/${endpoint.path ?? "default"}`;
-  url.searchParams.set("transport", transport);
+  if (transport !== "capnweb") url.searchParams.set("transport", transport);
   return url;
 }
 
