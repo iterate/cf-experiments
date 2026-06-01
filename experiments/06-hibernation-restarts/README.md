@@ -1,7 +1,9 @@
 # 06-hibernation-restarts
 
-Tiny deployed-only repro for hibernatable Durable Object WebSockets after the
-object is restarted.
+When cancelling a Durable Object using `this.ctx.abort()`, WebSocket clients for
+hibernatable WebSockets can keep receiving auto-responses even though real
+messages no longer reach the restarted object. This is a tiny deployed-only
+repro for that behavior.
 
 ## Question
 
