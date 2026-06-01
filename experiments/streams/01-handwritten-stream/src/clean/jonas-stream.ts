@@ -24,7 +24,7 @@ export type SubscriptionRequest = {
   afterOffset?: number;
 };
 
-type CaptainWebSubscriber = {
+type CaptainWebSubscription = {
   direction: "inbound" | "outbound";
   subscriptionKey?: string;
   target: SubscriberRpcTarget;
@@ -40,7 +40,7 @@ export class JonasStream extends DurableObject<Env> {
   #streamName: string | undefined;
   #simulatedStorageSyncDelayMs: number | null = null;
   #coreState: CoreStreamState | undefined;
-  #subscribers = new Set<CaptainWebSubscriber>();
+  #subscriptions = new Set<CaptainWebSubscription>();
 
   async fetch(request: Request) {
     this.#streamName = new URL(request.url).pathname.slice("/jonas/".length) || "default";
@@ -76,7 +76,7 @@ export class JonasStream extends DurableObject<Env> {
   }
 
   initInboundSubscription(args: SubscriptionRequest): void {
-    this.#registerSubscriber({
+    this.#registerSubscription({
       direction: "inbound",
       target: args.subscriberRpcTarget,
       afterOffset: args.afterOffset,
@@ -111,10 +111,10 @@ export class JonasStream extends DurableObject<Env> {
       streamName: this.#readStreamName(),
       reducedState: this.#readCoreState(),
       runtime: {
-        subscribers: [...this.#subscribers].map((subscriber) => ({
-          direction: subscriber.direction,
-          subscriptionKey: subscriber.subscriptionKey,
-          hasOutboundSession: subscriber.outboundSession !== undefined,
+        subscriptions: [...this.#subscriptions].map((subscription) => ({
+          direction: subscription.direction,
+          subscriptionKey: subscription.subscriptionKey,
+          hasOutboundSession: subscription.outboundSession !== undefined,
         })),
       },
     };
@@ -157,9 +157,11 @@ export class JonasStream extends DurableObject<Env> {
 
   async #reconcileOutboundSubscriptions() {
     const state = this.#readCoreState();
-    for (const [subscriptionKey, subscription] of Object.entries(state.subscriptionsByKey)) {
-      if (this.#hasOutboundSubscriber(subscriptionKey)) continue;
-      const event = subscription.latestConfiguredEvent;
+    for (const [subscriptionKey, configuredSubscription] of Object.entries(
+      state.subscriptionsByKey,
+    )) {
+      if (this.#hasOutboundSubscription(subscriptionKey)) continue;
+      const event = configuredSubscription.latestConfiguredEvent;
       if (
         event.payload.subscriber.type !== "built-in" ||
         event.payload.subscriber.transport !== "captainweb-websocket"
@@ -186,42 +188,45 @@ export class JonasStream extends DurableObject<Env> {
         subscriptionConfiguredEvent: event,
         streamSnapshot: state,
       });
-      const subscriber = this.#registerSubscriber({
+      const subscription = this.#registerSubscription({
         direction: "outbound",
         subscriptionKey,
         target: request.subscriberRpcTarget,
         afterOffset: request.afterOffset,
         outboundSession: { webSocket, rpc },
       });
-      webSocket.addEventListener("close", () => this.#removeSubscriber(subscriber));
-      webSocket.addEventListener("error", () => this.#removeSubscriber(subscriber));
+      webSocket.addEventListener("close", () => this.#removeSubscription(subscription));
+      webSocket.addEventListener("error", () => this.#removeSubscription(subscription));
     }
   }
 
-  #registerSubscriber(args: {
+  #registerSubscription(args: {
     direction: "inbound" | "outbound";
     subscriptionKey?: string;
     target: SubscriberRpcTarget;
     afterOffset?: number;
-    outboundSession?: CaptainWebSubscriber["outboundSession"];
-  }): CaptainWebSubscriber {
+    outboundSession?: CaptainWebSubscription["outboundSession"];
+  }): CaptainWebSubscription {
     const retainedTarget = retainSubscriberRpcTarget(args.target);
-    const subscriber = {
+    const subscription = {
       direction: args.direction,
       subscriptionKey: args.subscriptionKey,
       target: retainedTarget.target,
       disposeTarget: retainedTarget.dispose,
       outboundSession: args.outboundSession,
     };
-    this.#subscribers.add(subscriber);
-    void this.#streamStoredEventsToSubscriber(subscriber, args.afterOffset ?? -1).catch((error) => {
+    this.#subscriptions.add(subscription);
+    void this.#streamStoredEventsToSubscription(subscription, args.afterOffset ?? -1).catch((error) => {
       console.error("JonasStream replay failed", error);
-      this.#removeSubscriber(subscriber);
+      this.#removeSubscription(subscription);
     });
-    return subscriber;
+    return subscription;
   }
 
-  async #streamStoredEventsToSubscriber(subscriber: CaptainWebSubscriber, afterOffset: number) {
+  async #streamStoredEventsToSubscription(
+    subscription: CaptainWebSubscription,
+    afterOffset: number,
+  ) {
     const maxOffset = this.#readCoreState().maxOffset;
     let batch: StreamEvent[] = [];
 
@@ -230,42 +235,42 @@ export class JonasStream extends DurableObject<Env> {
       if (event !== undefined) batch.push(event);
 
       if (batch.length === STORAGE_REPLAY_BATCH_SIZE) {
-        this.#deliverBatch(subscriber, batch);
+        this.#deliverBatch(subscription, batch);
         batch = [];
         await Promise.resolve();
       }
     }
 
-    if (batch.length > 0) this.#deliverBatch(subscriber, batch);
+    if (batch.length > 0) this.#deliverBatch(subscription, batch);
   }
 
   #broadcast(events: StreamEvent[]) {
-    for (const subscriber of this.#subscribers) {
-      this.#deliverBatch(subscriber, events);
+    for (const subscription of this.#subscriptions) {
+      this.#deliverBatch(subscription, events);
     }
   }
 
-  #deliverBatch(subscriber: CaptainWebSubscriber, events: StreamEvent[]) {
+  #deliverBatch(subscription: CaptainWebSubscription, events: StreamEvent[]) {
     try {
-      const result = subscriber.target.consumeEvents({ events });
+      const result = subscription.target.consumeEvents({ events });
       if (isDisposable(result)) result[Symbol.dispose]();
     } catch (error) {
       console.error("Error sending CaptainWeb event batch", error);
-      this.#removeSubscriber(subscriber);
+      this.#removeSubscription(subscription);
     }
   }
 
-  #removeSubscriber(subscriber: CaptainWebSubscriber) {
-    if (!this.#subscribers.delete(subscriber)) return;
-    subscriber.disposeTarget();
-    subscriber.outboundSession?.rpc[Symbol.dispose]();
-    subscriber.outboundSession?.webSocket.close();
+  #removeSubscription(subscription: CaptainWebSubscription) {
+    if (!this.#subscriptions.delete(subscription)) return;
+    subscription.disposeTarget();
+    subscription.outboundSession?.rpc[Symbol.dispose]();
+    subscription.outboundSession?.webSocket.close();
   }
 
-  #hasOutboundSubscriber(subscriptionKey: string) {
-    return [...this.#subscribers].some(
-      (subscriber) =>
-        subscriber.direction === "outbound" && subscriber.subscriptionKey === subscriptionKey,
+  #hasOutboundSubscription(subscriptionKey: string) {
+    return [...this.#subscriptions].some(
+      (subscription) =>
+        subscription.direction === "outbound" && subscription.subscriptionKey === subscriptionKey,
     );
   }
 
