@@ -1,4 +1,9 @@
-import { newWebSocketRpcSession, type RpcStub, type RpcTarget } from "capnweb";
+import {
+  newWebSocketRpcSession,
+  newWorkersRpcResponse,
+  type RpcStub,
+  type RpcTarget,
+} from "capnweb";
 import { DurableObject } from "cloudflare:workers";
 import {
   StreamEventInput as StreamEventInputSchema,
@@ -24,46 +29,46 @@ export type SubscriptionRequest = {
   afterOffset?: number;
 };
 
-type CapnWebSubscriberRpcTarget = Disposable & {
-  dup(): CapnWebSubscriberRpcTarget;
-  consumeEvents(args: { events: StreamEvent[] }): Disposable;
-};
+type CapnWebSubscriberRpcTarget = RpcStub<SubscriberRpcTarget>;
 
 type CaptainWebSubscription = {
   direction: "inbound" | "outbound";
   subscriptionKey?: string;
   subscriber: CapnWebSubscriberRpcTarget;
-  outboundSession?: {
-    webSocket: WebSocket;
-    rpc: RpcStub<StreamProcessorRpc>;
-  };
+};
+
+type CaptainWebOutboundSession = {
+  subscriptionKey: string;
+  webSocket: WebSocket;
+  rpc: RpcStub<StreamProcessorRpc>;
+  subscription?: CaptainWebSubscription;
 };
 
 export class JonasStream extends DurableObject<Env> {
   #incarnationId = crypto.randomUUID();
-  #streamName: string | undefined;
+  #streamName: string;
   #simulatedStorageSyncDelayMs: number | null = null;
   #coreState: CoreStreamState | undefined;
   #subscriptions = new Set<CaptainWebSubscription>();
+  #outboundSessions = new Map<string, CaptainWebOutboundSession>();
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    // Every JS object incarnation gets a fresh id, so debug output can distinguish
+    // durable state from runtime state after eviction/restart.
+    if (this.ctx.id.name === undefined) {
+      throw new Error("JonasStream must be addressed by name");
+    }
+    // The worker routes /jonas/:path to a Durable Object named by that path.
+    // That name is the stable stream identity used for processor object names too.
+    this.#streamName = this.ctx.id.name;
+  }
 
   async fetch(request: Request) {
-    this.#streamName = new URL(request.url).pathname.slice("/jonas/".length) || "default";
-    this.ctx.storage.kv.put("streamName", this.#streamName);
-
-    if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
-      return new Response("WebSocket only", { status: 400 });
-    }
-
     const transport = new URL(request.url).searchParams.get("transport") ?? "capnweb";
-    if (transport !== "capnweb") {
-      return new Response("transport must be capnweb", { status: 400 });
-    }
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    server.accept();
-    newWebSocketRpcSession(server, this.getCapability());
-    return new Response(null, { status: 101, webSocket: client });
+    if (transport !== "capnweb") return new Response("transport must be capnweb", { status: 400 });
+    return newWorkersRpcResponse(request, new JonasStreamRpcTarget(this));
   }
 
   async append(args: { event: StreamEventInput }): Promise<StreamEvent> {
@@ -121,14 +126,10 @@ export class JonasStream extends DurableObject<Env> {
         subscriptions: [...this.#subscriptions].map((subscription) => ({
           direction: subscription.direction,
           subscriptionKey: subscription.subscriptionKey,
-          hasOutboundSession: subscription.outboundSession !== undefined,
         })),
+        outboundSessions: [...this.#outboundSessions.keys()],
       },
     };
-  }
-
-  getCapability(_policy?: unknown) {
-    return new JonasStreamRpcTarget(this);
   }
 
   #writeAppend(input: StreamEventInput) {
@@ -167,7 +168,7 @@ export class JonasStream extends DurableObject<Env> {
     for (const [subscriptionKey, configuredSubscription] of Object.entries(
       state.subscriptionsByKey,
     )) {
-      if (this.#hasOutboundSubscription(subscriptionKey)) continue;
+      if (this.#outboundSessions.has(subscriptionKey)) continue;
       const event = configuredSubscription.latestConfiguredEvent;
       if (
         event.payload.subscriber.type !== "built-in" ||
@@ -189,21 +190,29 @@ export class JonasStream extends DurableObject<Env> {
 
       webSocket.accept();
       const rpc = newWebSocketRpcSession<StreamProcessorRpc>(webSocket);
+      const outboundSession: CaptainWebOutboundSession = { subscriptionKey, webSocket, rpc };
+      this.#outboundSessions.set(subscriptionKey, outboundSession);
 
       const request = await rpc.initOutboundSubscription({
-        streamRpcTarget: this.getCapability(),
+        streamRpcTarget: new JonasStreamRpcTarget(this),
         subscriptionConfiguredEvent: event,
         streamSnapshot: state,
       });
-      const subscription = this.#registerSubscription({
+      outboundSession.subscription = this.#registerSubscription({
         direction: "outbound",
         subscriptionKey,
         subscriber: request.subscriberRpcTarget,
         afterOffset: request.afterOffset,
-        outboundSession: { webSocket, rpc },
       });
-      webSocket.addEventListener("close", () => this.#removeSubscription(subscription));
-      webSocket.addEventListener("error", () => this.#removeSubscription(subscription));
+      const removeOutboundSession = () => {
+        this.#outboundSessions.delete(subscriptionKey);
+        rpc[Symbol.dispose]();
+        if (outboundSession.subscription !== undefined) {
+          this.#removeSubscription(outboundSession.subscription);
+        }
+      };
+      webSocket.addEventListener("close", removeOutboundSession);
+      webSocket.addEventListener("error", removeOutboundSession);
     }
   }
 
@@ -212,13 +221,11 @@ export class JonasStream extends DurableObject<Env> {
     subscriptionKey?: string;
     subscriber: CapnWebSubscriberRpcTarget;
     afterOffset?: number;
-    outboundSession?: CaptainWebSubscription["outboundSession"];
   }): CaptainWebSubscription {
     const subscription = {
       direction: args.direction,
       subscriptionKey: args.subscriptionKey,
       subscriber: args.subscriber.dup(),
-      outboundSession: args.outboundSession,
     };
     this.#subscriptions.add(subscription);
     void this.#streamStoredEventsToSubscription(subscription, args.afterOffset ?? -1).catch((error) => {
@@ -268,15 +275,14 @@ export class JonasStream extends DurableObject<Env> {
   #removeSubscription(subscription: CaptainWebSubscription) {
     if (!this.#subscriptions.delete(subscription)) return;
     subscription.subscriber[Symbol.dispose]();
-    subscription.outboundSession?.rpc[Symbol.dispose]();
-    subscription.outboundSession?.webSocket.close();
-  }
-
-  #hasOutboundSubscription(subscriptionKey: string) {
-    return [...this.#subscriptions].some(
-      (subscription) =>
-        subscription.direction === "outbound" && subscription.subscriptionKey === subscriptionKey,
-    );
+    if (subscription.direction === "outbound" && subscription.subscriptionKey !== undefined) {
+      const outboundSession = this.#outboundSessions.get(subscription.subscriptionKey);
+      if (outboundSession?.subscription === subscription) {
+        this.#outboundSessions.delete(subscription.subscriptionKey);
+        outboundSession.rpc[Symbol.dispose]();
+        outboundSession.webSocket.close();
+      }
+    }
   }
 
   #readCoreState() {
@@ -287,19 +293,17 @@ export class JonasStream extends DurableObject<Env> {
   }
 
   #readStreamName() {
-    this.#streamName ??= this.ctx.storage.kv.get<string>("streamName");
-    if (this.#streamName === undefined) throw new Error("missing stream name");
     return this.#streamName;
   }
 }
 
 export type JonasStreamRpc = Omit<
-  RpcMethods<JonasStream, "fetch" | "getCapability">,
+  RpcMethods<JonasStream, "fetch">,
   "initInboundSubscription"
 > & {
   initInboundSubscription(args: SubscriptionRequest): void;
 };
 
 export const JonasStreamRpcTarget = makeRpcTargetClass<JonasStreamRpc, JonasStream>(JonasStream, {
-  exclude: ["fetch", "getCapability"],
+  exclude: ["fetch"],
 });
