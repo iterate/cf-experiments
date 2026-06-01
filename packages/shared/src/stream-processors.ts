@@ -209,7 +209,7 @@ export type EventFromTypes<
   Events extends EventCatalog,
   ProcessorDeps extends readonly unknown[],
   Types extends readonly string[],
-> = EventFromType<Events, ProcessorDeps, Types[number]>;
+> = "*" extends Types[number] ? StreamEvent : EventFromType<Events, ProcessorDeps, Types[number]>;
 
 export type EventFromType<
   Events extends EventCatalog,
@@ -316,6 +316,12 @@ export type UnresolvedEventTypes<
   Types extends readonly string[],
 > = Exclude<Types[number], ResolvedEventType<Events, ProcessorDeps>>;
 
+export type UnresolvedConsumedEventTypes<
+  Events extends EventCatalog,
+  ProcessorDeps extends readonly unknown[],
+  Types extends readonly string[],
+> = Exclude<Exclude<Types[number], "*">, ResolvedEventType<Events, ProcessorDeps>>;
+
 /**
  * Compile-time typo guard for `consumes` and `emits`.
  *
@@ -329,6 +335,12 @@ export type ResolvedEventTypesOnly<
   ProcessorDeps extends readonly unknown[],
   Types extends readonly string[],
 > = [UnresolvedEventTypes<Events, ProcessorDeps, Types>] extends [never] ? unknown : never;
+
+export type ResolvedConsumedEventTypesOnly<
+  Events extends EventCatalog,
+  ProcessorDeps extends readonly unknown[],
+  Types extends readonly string[],
+> = [UnresolvedConsumedEventTypes<Events, ProcessorDeps, Types>] extends [never] ? unknown : never;
 
 export type ProcessorContractInput<
   StateSchema extends z.ZodType,
@@ -344,7 +356,7 @@ export type ProcessorContractInput<
   initialState?: z.input<StateSchema>;
   processorDeps: ProcessorDeps;
   events: Events & EventCatalogWithPayloadExamples<Events>;
-  consumes: Consumes & ResolvedEventTypesOnly<Events, ProcessorDeps, Consumes>;
+  consumes: Consumes & ResolvedConsumedEventTypesOnly<Events, ProcessorDeps, Consumes>;
   emits: Emits & ResolvedEventTypesOnly<Events, ProcessorDeps, Emits>;
   reduce?: ProcessorContractShape<StateSchema, Events, ProcessorDeps, Consumes, Emits>["reduce"];
 };
@@ -362,7 +374,7 @@ export type ProcessorContractInputWithoutDeps<
   initialState?: z.input<StateSchema>;
   processorDeps?: never;
   events: Events & EventCatalogWithPayloadExamples<Events>;
-  consumes: Consumes & ResolvedEventTypesOnly<Events, readonly [], Consumes>;
+  consumes: Consumes & ResolvedConsumedEventTypesOnly<Events, readonly [], Consumes>;
   emits: Emits & ResolvedEventTypesOnly<Events, readonly [], Emits>;
   reduce?: ProcessorContractShape<StateSchema, Events, readonly [], Consumes, Emits>["reduce"];
 };
@@ -688,7 +700,7 @@ export function defineProcessorContract<
   const StateSchema extends z.ZodType,
   const Events extends EventCatalog,
   const ProcessorDeps extends readonly unknown[],
-  const Consumes extends readonly ResolvedEventType<Events, ProcessorDeps>[],
+  const Consumes extends readonly (ResolvedEventType<Events, ProcessorDeps> | "*")[],
   const Emits extends readonly ResolvedEventType<Events, ProcessorDeps>[],
 >(
   contract: ProcessorContractInput<StateSchema, Events, ProcessorDeps, Consumes, Emits>,
@@ -705,7 +717,7 @@ export function defineProcessorContract<
 export function defineProcessorContract<
   const StateSchema extends z.ZodType,
   const Events extends EventCatalog,
-  const Consumes extends readonly ResolvedEventType<Events, readonly []>[],
+  const Consumes extends readonly (ResolvedEventType<Events, readonly []> | "*")[],
   const Emits extends readonly ResolvedEventType<Events, readonly []>[],
 >(
   contract: ProcessorContractInputWithoutDeps<StateSchema, Events, Consumes, Emits>,
@@ -808,6 +820,7 @@ export function validateProcessorContract(contract: {
     field: "consumes",
     resolvedEvents,
     eventTypes: contract.consumes,
+    allowWildcard: true,
   });
   assertResolvedEventTypes({
     field: "emits",
@@ -1307,7 +1320,7 @@ function getConsumedEventDefinition(args: {
   eventType: string;
 }): EventDefinition | undefined {
   if (!args.contract.consumes.includes(args.eventType)) {
-    if (args.contract.consumesAllEvents === true) {
+    if (args.contract.consumes.includes("*") || args.contract.consumesAllEvents === true) {
       return {
         payloadSchema: z.unknown(),
       };
@@ -1372,8 +1385,12 @@ function assertResolvedEventTypes(args: {
   field: "consumes" | "emits";
   resolvedEvents: Map<string, { owner: string; event: EventDefinition }>;
   eventTypes: readonly string[];
+  allowWildcard?: boolean;
 }) {
   for (const eventType of args.eventTypes) {
+    if (args.allowWildcard === true && eventType === "*") {
+      continue;
+    }
     if (args.resolvedEvents.has(eventType)) {
       continue;
     }

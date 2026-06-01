@@ -95,7 +95,7 @@ export type StreamEvent<
 };
 
 export const streamEventMetadataSchema = z.record(z.string(), z.unknown());
-export const streamEventOffsetSchema = z.number().int().positive();
+export const streamEventOffsetSchema = z.number().int().nonnegative();
 export const streamEventCreatedAtSchema = z.string();
 export const streamEventCreatedAtIsoSchema = z.iso.datetime({ offset: true });
 export const streamEventPathSchema = z.string().trim().min(1);

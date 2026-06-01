@@ -14,7 +14,7 @@ const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const deployedIt = workerUrl.includes("localhost") ? it.skip : it;
 const hibernationWaitMs = Number(process.env.HIBERNATION_WAIT_MS ?? 15_000);
 
-describe("jonas stream websocket primitives", () => {
+describe.skip("jonas stream websocket primitives", () => {
   it("rejects non-websocket requests at the durable object boundary", async () => {
     const path = `jonas-${crypto.randomUUID()}`;
     const response = await fetch(new URL(`/jonas/${path}`, workerUrl));

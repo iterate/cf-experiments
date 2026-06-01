@@ -44,7 +44,7 @@ export async function createSimpleStreamProcessorRunner<State, Deps = undefined>
   let snapshot =
     (await args.loadSnapshot?.()) ?? {
       state: args.processor.stateSchema.parse(args.processor.initialState),
-      offset: 0,
+      offset: -1,
     };
   await args.saveSnapshot?.(snapshot);
   console.log("SimpleStreamProcessor runner started", { offset: snapshot.offset });

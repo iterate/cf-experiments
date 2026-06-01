@@ -8,44 +8,61 @@ import {
 } from "@cf-experiments/shared/simple-stream-processor";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import { echoProcessor } from "./demo-processors/echo-processor.js";
-import { JonasStreamAckFrame, JonasStreamEventsFrame } from "./jonas-stream-types.js";
+import type {
+  CoreStreamState,
+  SubscriptionConfiguredEvent,
+} from "./core-stream-processor.js";
+import type { JonasStreamRpc, SubscriberRpcTarget, SubscriptionRequest } from "./jonas-stream.js";
 
 export type ProcessorSlug = "echo";
 type ProcessorState = { seen: number };
 
+export type StreamProcessorInitOutboundSubscriptionArgs = {
+  streamRpcTarget: JonasStreamRpc;
+  subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
+  streamSnapshot: CoreStreamState;
+};
+
 export class StreamProcessor extends DurableObject {
   #processor: SimpleStreamProcessor<ProcessorState, { env: Env }> | undefined;
-  #streamWebSocket: WebSocket | undefined;
-  #appendWaiters = new Map<string, PromiseWithResolvers<StreamEvent>>();
+  #streamRpcTarget: JonasStreamRpc | undefined;
 
   async fetch(request: Request) {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("WebSocket only", { status: 400 });
     }
 
+    const transport = new URL(request.url).searchParams.get("transport") ?? "capnweb";
+    if (transport !== "capnweb") {
+      return new Response("transport must be capnweb", { status: 400 });
+    }
+
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    const transport = new URL(request.url).searchParams.get("transport") ?? "raw-ws";
-
-    if (transport === "capnweb") {
-      server.accept();
-      newWebSocketRpcSession<StreamProcessorRpc>(server, new StreamProcessorRpcTarget(this));
-      return new Response(null, { status: 101, webSocket: client });
-    }
-
-    if (transport !== "raw-ws") {
-      return new Response("transport must be raw-ws or capnweb", { status: 400 });
-    }
-
-    this.ctx.acceptWebSocket(server);
-    this.#streamWebSocket = server;
-    server.send(JSON.stringify({ op: "subscribe", afterOffset: this.#snapshot()?.offset ?? 0 }));
+    server.accept();
+    newWebSocketRpcSession<StreamProcessorRpc>(server, new StreamProcessorRpcTarget(this));
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  initOutboundSubscription(args: StreamProcessorInitOutboundSubscriptionArgs): SubscriptionRequest {
+    const subscriber = args.subscriptionConfiguredEvent.payload.subscriber;
+    if (subscriber.type !== "built-in") {
+      throw new Error("StreamProcessor only supports built-in subscribers");
+    }
+    if (subscriber.transport !== "captainweb-websocket") {
+      throw new Error("StreamProcessor only supports captainweb-websocket subscribers");
+    }
+
+    this.#streamRpcTarget = args.streamRpcTarget;
+    this.#setProcessorSlug(subscriber.processorSlug);
+    return {
+      subscriberRpcTarget: new StreamProcessorSubscriberRpcTarget(this),
+      afterOffset: this.#snapshot()?.offset,
+    };
+  }
+
   initialize(args: { processorSlug: ProcessorSlug }) {
-    this.ctx.storage.kv.put("processorSlug", args.processorSlug);
-    this.#processor = processorForSlug(args.processorSlug);
+    this.#setProcessorSlug(args.processorSlug);
     return { processorSlug: args.processorSlug };
   }
 
@@ -56,21 +73,9 @@ export class StreamProcessor extends DurableObject {
     };
   }
 
-  async webSocketMessage(_webSocket: WebSocket, message: string | ArrayBuffer) {
-    const text = typeof message === "string" ? message : new TextDecoder().decode(message);
-    const frame: unknown = JSON.parse(text);
-
-    if (isAppendAckFrame(frame)) {
-      const waiter = this.#appendWaiters.get(frame.appendKey);
-      if (waiter !== undefined) {
-        this.#appendWaiters.delete(frame.appendKey);
-        waiter.resolve(frame.event);
-      }
-      return;
-    }
-
+  async consumeEvents(args: { events: StreamEvent[] }) {
     const runner = await this.#runner();
-    for (const event of JonasStreamEventsFrame.parse(frame).events) {
+    for (const event of args.events) {
       await runner.processEvent(event);
     }
   }
@@ -87,6 +92,12 @@ export class StreamProcessor extends DurableObject {
     });
   }
 
+  #setProcessorSlug(processorSlug: string) {
+    if (processorSlug !== "echo") throw new Error(`Unknown stream processor slug: ${processorSlug}`);
+    this.ctx.storage.kv.put("processorSlug", processorSlug);
+    this.#processor = processorForSlug(processorSlug);
+  }
+
   #loadProcessor() {
     if (this.#processor !== undefined) return this.#processor;
     const slug = this.ctx.storage.kv.get<ProcessorSlug>("processorSlug");
@@ -100,21 +111,19 @@ export class StreamProcessor extends DurableObject {
   }
 
   #append(event: StreamEventInput) {
-    this.#streamWebSocket?.send(JSON.stringify({ op: "append", event }));
+    const result = this.#readStreamRpcTarget().append({ event });
+    if (isDisposable(result)) result[Symbol.dispose]();
   }
 
   #appendAndWait(event: StreamEventInput) {
-    const appendKey = crypto.randomUUID();
-    const waiter = Promise.withResolvers<StreamEvent>();
-    this.#appendWaiters.set(appendKey, waiter);
-    this.#streamWebSocket?.send(
-      JSON.stringify({
-        op: "append",
-        event,
-        requestAck: { key: appendKey },
-      }),
-    );
-    return waiter.promise;
+    return this.#readStreamRpcTarget().append({ event });
+  }
+
+  #readStreamRpcTarget() {
+    if (this.#streamRpcTarget === undefined) {
+      throw new Error("StreamProcessor has not been attached to a stream");
+    }
+    return this.#streamRpcTarget;
   }
 }
 
@@ -125,20 +134,29 @@ function processorForSlug(
   throw new Error(`Unknown stream processor slug: ${slug}`);
 }
 
-function isAppendAckFrame(value: unknown): value is ReturnType<typeof JonasStreamAckFrame.parse> {
-  try {
-    JonasStreamAckFrame.parse(value);
-    return true;
-  } catch {
-    return false;
-  }
+function isDisposable(value: unknown): value is Disposable {
+  return (
+    ((typeof value === "object" && value !== null) || typeof value === "function") &&
+    Symbol.dispose in value &&
+    typeof value[Symbol.dispose] === "function"
+  );
 }
 
-export type StreamProcessorRpc = Pick<StreamProcessor, "initialize" | "status">;
+export type StreamProcessorRpc = Pick<
+  StreamProcessor,
+  "initOutboundSubscription" | "initialize" | "status"
+>;
 
 export const StreamProcessorRpcTarget = makeRpcTargetClass<StreamProcessorRpc, StreamProcessor>(
   StreamProcessor,
   {
-    exclude: ["fetch", "webSocketMessage"],
+    exclude: ["fetch"],
   },
 );
+
+export const StreamProcessorSubscriberRpcTarget = makeRpcTargetClass<
+  SubscriberRpcTarget,
+  StreamProcessor
+>(StreamProcessor, {
+  exclude: ["fetch"],
+});
