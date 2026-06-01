@@ -100,7 +100,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "events.iterate.com/stream/subscription-configured",
   ],
   emits: [],
-  reduce({ contract, state, event }) {
+  reduce({ state, event }) {
     // All events increment the event count and max offset
     const next = {
       ...state,
@@ -109,26 +109,18 @@ export const coreStreamProcessorContract = defineProcessorContract({
     };
 
     if (event.type === "events.iterate.com/stream/created") {
-      const payload =
-        contract.events["events.iterate.com/stream/created"].payloadSchema.parse(
-          event.payload,
-        );
       return {
         ...next,
-        streamNamespace: payload.streamNamespace,
-        streamPath: payload.streamPath,
+        streamNamespace: event.payload.streamNamespace,
+        streamPath: event.payload.streamPath,
         createdAt: event.createdAt,
       };
     }
 
     if (event.type === "events.iterate.com/stream/woken") {
-      const payload =
-        contract.events["events.iterate.com/stream/woken"].payloadSchema.parse(
-          event.payload,
-        );
       return {
         ...next,
-        incarnationId: payload.incarnationId,
+        incarnationId: event.payload.incarnationId,
       };
     }
 
@@ -136,21 +128,16 @@ export const coreStreamProcessorContract = defineProcessorContract({
       return next;
     }
 
-    const payload =
-      contract.events["events.iterate.com/stream/subscription-configured"].payloadSchema.parse(
-        event.payload,
-      );
     const latestConfiguredEvent = {
       ...event,
       type: "events.iterate.com/stream/subscription-configured" as const,
-      payload,
     };
 
     return {
       ...next,
       subscriptionsByKey: {
         ...next.subscriptionsByKey,
-        [payload.subscriptionKey]: { latestConfiguredEvent },
+        [event.payload.subscriptionKey]: { latestConfiguredEvent },
       },
     };
   },
@@ -169,7 +156,9 @@ export function reduceCoreStreamState(args: {
     coreStreamProcessorContract.reduce?.({
       contract: coreStreamProcessorContract,
       state: args.state,
-      event: args.event,
+      event: args.event as Parameters<
+        NonNullable<typeof coreStreamProcessorContract.reduce>
+      >[0]["event"],
     }) ?? args.state,
   );
 }

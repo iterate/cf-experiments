@@ -178,7 +178,7 @@ export type EventDefinitionForType<
  */
 export type EventFromDefinitionForType<Definition, Type extends string> =
   Definition extends EventDefinition<string, infer PayloadOutput, unknown>
-    ? StreamEvent<Type, PayloadOutput>
+    ? StreamEvent<Type, PayloadOutput> & { payload: PayloadOutput }
     : never;
 
 /**
@@ -209,7 +209,7 @@ export type EventFromTypes<
   Events extends EventCatalog,
   ProcessorDeps extends readonly unknown[],
   Types extends readonly string[],
-> = "*" extends Types[number] ? StreamEvent : EventFromType<Events, ProcessorDeps, Types[number]>;
+> = EventFromType<Events, ProcessorDeps, Exclude<Types[number], "*">>;
 
 export type EventFromType<
   Events extends EventCatalog,
