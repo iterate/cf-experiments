@@ -4,5 +4,5 @@
     "types": ["node", "vitest"]
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts", "worker-configuration.d.ts"],
-  "exclude": ["**/* copy.ts"]
+  "exclude": ["**/* copy.ts", "src/**/*-2.ts", "src/clean/jonas-stream-2.ts"]
 }

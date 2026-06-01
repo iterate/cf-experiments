@@ -24,17 +24,15 @@ export type SubscriptionRequest = {
   afterOffset?: number;
 };
 
-type LiveSubscriber = {
+type CaptainWebSubscriber = {
   direction: "inbound" | "outbound";
   subscriptionKey?: string;
   target: SubscriberRpcTarget;
   disposeTarget: () => void;
-};
-
-type OutboundSession = {
-  subscriptionKey: string;
-  webSocket: WebSocket;
-  rpc: RpcStub<StreamProcessorRpc>;
+  outboundSession?: {
+    webSocket: WebSocket;
+    rpc: RpcStub<StreamProcessorRpc>;
+  };
 };
 
 export class JonasStream extends DurableObject<Env> {
@@ -42,8 +40,7 @@ export class JonasStream extends DurableObject<Env> {
   #streamName: string | undefined;
   #simulatedStorageSyncDelayMs: number | null = null;
   #coreState: CoreStreamState | undefined;
-  #subscribers = new Set<LiveSubscriber>();
-  #outboundSessions = new Map<string, OutboundSession>();
+  #subscribers = new Set<CaptainWebSubscriber>();
 
   async fetch(request: Request) {
     this.#streamName = new URL(request.url).pathname.slice("/jonas/".length) || "default";
@@ -117,8 +114,8 @@ export class JonasStream extends DurableObject<Env> {
         subscribers: [...this.#subscribers].map((subscriber) => ({
           direction: subscriber.direction,
           subscriptionKey: subscriber.subscriptionKey,
+          hasOutboundSession: subscriber.outboundSession !== undefined,
         })),
-        outboundSessions: [...this.#outboundSessions.keys()],
       },
     };
   }
@@ -161,7 +158,7 @@ export class JonasStream extends DurableObject<Env> {
   async #reconcileOutboundSubscriptions() {
     const state = this.#readCoreState();
     for (const [subscriptionKey, subscription] of Object.entries(state.subscriptionsByKey)) {
-      if (this.#outboundSessions.has(subscriptionKey)) continue;
+      if (this.#hasOutboundSubscriber(subscriptionKey)) continue;
       const event = subscription.latestConfiguredEvent;
       if (
         event.payload.subscriber.type !== "built-in" ||
@@ -183,21 +180,21 @@ export class JonasStream extends DurableObject<Env> {
 
       webSocket.accept();
       const rpc = newWebSocketRpcSession<StreamProcessorRpc>(webSocket);
-      this.#outboundSessions.set(subscriptionKey, { subscriptionKey, webSocket, rpc });
-      webSocket.addEventListener("close", () => this.#outboundSessions.delete(subscriptionKey));
-      webSocket.addEventListener("error", () => this.#outboundSessions.delete(subscriptionKey));
 
       const request = await rpc.initOutboundSubscription({
         streamRpcTarget: this.getCapability(),
         subscriptionConfiguredEvent: event,
         streamSnapshot: state,
       });
-      this.#registerSubscriber({
+      const subscriber = this.#registerSubscriber({
         direction: "outbound",
         subscriptionKey,
         target: request.subscriberRpcTarget,
         afterOffset: request.afterOffset,
+        outboundSession: { webSocket, rpc },
       });
+      webSocket.addEventListener("close", () => this.#removeSubscriber(subscriber));
+      webSocket.addEventListener("error", () => this.#removeSubscriber(subscriber));
     }
   }
 
@@ -206,22 +203,25 @@ export class JonasStream extends DurableObject<Env> {
     subscriptionKey?: string;
     target: SubscriberRpcTarget;
     afterOffset?: number;
-  }) {
+    outboundSession?: CaptainWebSubscriber["outboundSession"];
+  }): CaptainWebSubscriber {
     const retainedTarget = retainSubscriberRpcTarget(args.target);
     const subscriber = {
       direction: args.direction,
       subscriptionKey: args.subscriptionKey,
       target: retainedTarget.target,
       disposeTarget: retainedTarget.dispose,
+      outboundSession: args.outboundSession,
     };
     this.#subscribers.add(subscriber);
     void this.#streamStoredEventsToSubscriber(subscriber, args.afterOffset ?? -1).catch((error) => {
       console.error("JonasStream replay failed", error);
       this.#removeSubscriber(subscriber);
     });
+    return subscriber;
   }
 
-  async #streamStoredEventsToSubscriber(subscriber: LiveSubscriber, afterOffset: number) {
+  async #streamStoredEventsToSubscriber(subscriber: CaptainWebSubscriber, afterOffset: number) {
     const maxOffset = this.#readCoreState().maxOffset;
     let batch: StreamEvent[] = [];
 
@@ -245,7 +245,7 @@ export class JonasStream extends DurableObject<Env> {
     }
   }
 
-  #deliverBatch(subscriber: LiveSubscriber, events: StreamEvent[]) {
+  #deliverBatch(subscriber: CaptainWebSubscriber, events: StreamEvent[]) {
     try {
       const result = subscriber.target.consumeEvents({ events });
       if (isDisposable(result)) result[Symbol.dispose]();
@@ -255,9 +255,18 @@ export class JonasStream extends DurableObject<Env> {
     }
   }
 
-  #removeSubscriber(subscriber: LiveSubscriber) {
-    this.#subscribers.delete(subscriber);
+  #removeSubscriber(subscriber: CaptainWebSubscriber) {
+    if (!this.#subscribers.delete(subscriber)) return;
     subscriber.disposeTarget();
+    subscriber.outboundSession?.rpc[Symbol.dispose]();
+    subscriber.outboundSession?.webSocket.close();
+  }
+
+  #hasOutboundSubscriber(subscriptionKey: string) {
+    return [...this.#subscribers].some(
+      (subscriber) =>
+        subscriber.direction === "outbound" && subscriber.subscriptionKey === subscriptionKey,
+    );
   }
 
   #readCoreState() {
