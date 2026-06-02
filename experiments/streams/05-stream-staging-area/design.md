@@ -807,6 +807,10 @@ This layer should share the contract-aware event resolution/parsing used by type
 - Durable Object stream delivery only cares that the capnweb peer provides a
   subscription sink; it does not care whether that peer is a browser, Node script, Worker, or
   Durable Object.
+- In the browser SQLite viewer, CapnWeb connections and subscriptions are deliberately separate:
+  every tab gets its own stream connection for commands, but only one elected tab per stream path
+  should call `subscribe()` and project event batches into the shared SQLocal database. Other tabs
+  render through SQLocal cross-tab reactive queries.
 
 ## Later: metrics and ping
 

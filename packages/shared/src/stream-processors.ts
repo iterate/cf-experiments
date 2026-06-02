@@ -3,7 +3,6 @@ import {
   streamEventCreatedAtIsoSchema,
   streamEventMetadataSchema,
   streamEventOffsetSchema,
-  streamEventPathSchema,
   type StreamEvent,
   type StreamEventInput,
 } from "./event.js";
@@ -649,7 +648,6 @@ export function getEventSchema<
   StreamEvent<Type, z.input<PayloadSchema>>
 > {
   return z.strictObject({
-    streamPath: streamEventPathSchema,
     type: z.literal(args.type),
     payload: args.payloadSchema,
     metadata: streamEventMetadataSchema.optional(),

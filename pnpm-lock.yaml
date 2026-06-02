@@ -266,6 +266,9 @@ importers:
       '@tanstack/react-virtual':
         specifier: ^3.13.26
         version: 3.13.26(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+      broadcast-channel:
+        specifier: ^7.3.0
+        version: 7.3.0
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
@@ -396,6 +399,10 @@ packages:
     engines: {node: '>=6.9.0'}
     peerDependencies:
       '@babel/core': ^7.0.0-0
+
+  '@babel/runtime@7.28.6':
+    resolution: {integrity: sha512-05WQkdpL9COIMz4LjTxGpPNCdlpyimKppYNoJ5Di5EUObifl8t4tuLuUBBZEpoLYOmfvIWrsp9fCl0HoPRVTdA==}
+    engines: {node: '>=6.9.0'}
 
   '@babel/template@7.29.7':
     resolution: {integrity: sha512-puq+Gf35oI24FeN11LkoUQFqv9uwNeWpxXZi/Ji3rRIoKAzKnxRaZ+Gkj0vKS9ZCiTESfng1N9LyOyXvo+m+Gg==}
@@ -1799,6 +1806,9 @@ packages:
   blake3-wasm@2.1.5:
     resolution: {integrity: sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==}
 
+  broadcast-channel@7.3.0:
+    resolution: {integrity: sha512-UHPhLBQKfQ8OmMFMpmPfO5dRakyA1vsfiDGWTYNvChYol65tbuhivPEGgZZiuetorvExdvxaWiBy/ym1Ty08yA==}
+
   browserslist@4.28.2:
     resolution: {integrity: sha512-48xSriZYYg+8qXna9kwqjIVzuQxi+KYWp2+5nCYnYKPTr0LvD89Jqk2Or5ogxz0NUMfIjhh2lIUX/LyX9B4oIg==}
     engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
@@ -2197,6 +2207,10 @@ packages:
     resolution: {integrity: sha512-GYVXHE2KnrzAfsAjl4uP++evGFCrAU1jta4ubEjIG7YWt/64Gqv66a30yKwWczVjA6j3bM4nBwH7Pk1JmDHaxQ==}
     engines: {node: '>=18'}
 
+  oblivious-set@2.0.0:
+    resolution: {integrity: sha512-QOUH5Xrsced9fKXaQTjWoDGKeS/Or7E2jB0FN63N4mkAO4qJdB7WR7e6qWAOHM5nk25FJ8TGjhP7DH4l6vFVLg==}
+    engines: {node: '>=16'}
+
   obug@2.1.1:
     resolution: {integrity: sha512-uTqF9MuPraAQ+IsnPf366RG4cP9RtUi7MLO1N3KEc+wb0a6yKpeL0lmk2IB1jY5KHPAlTc6T/JRdC/YqxHNwkQ==}
 
@@ -2508,6 +2522,9 @@ packages:
   universal-user-agent@7.0.3:
     resolution: {integrity: sha512-TmnEAEAsBJVZM/AADELsK76llnwcf9vMKuPz8JflO1frO8Lchitr0fNaN9d+Ap0BjKtqWqd/J17qeDnXh8CL2A==}
 
+  unload@2.4.1:
+    resolution: {integrity: sha512-IViSAm8Z3sRBYA+9wc0fLQmU9Nrxb16rcDmIiR6Y9LJSZzI7QY5QsDhqPpKOjAn0O9/kfK1TfNEMMAGPTIraPw==}
+
   unplugin@3.0.0:
     resolution: {integrity: sha512-0Mqk3AT2TZCXWKdcoaufeXNukv2mTrEZExeXlHIOZXdqYoHHr4n51pymnwV8x2BOVxwXbK2HLlI7usrqMpycdg==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -2788,6 +2805,8 @@ snapshots:
     dependencies:
       '@babel/core': 7.29.7
       '@babel/helper-plugin-utils': 7.29.7
+
+  '@babel/runtime@7.28.6': {}
 
   '@babel/template@7.29.7':
     dependencies:
@@ -4038,6 +4057,13 @@ snapshots:
 
   blake3-wasm@2.1.5: {}
 
+  broadcast-channel@7.3.0:
+    dependencies:
+      '@babel/runtime': 7.28.6
+      oblivious-set: 2.0.0
+      p-queue: 6.6.2
+      unload: 2.4.1
+
   browserslist@4.28.2:
     dependencies:
       baseline-browser-mapping: 2.10.33
@@ -4399,6 +4425,8 @@ snapshots:
 
   node-releases@2.0.46: {}
 
+  oblivious-set@2.0.0: {}
+
   obug@2.1.1: {}
 
   openapi-types@12.1.3: {}
@@ -4681,6 +4709,8 @@ snapshots:
       pathe: 2.0.3
 
   universal-user-agent@7.0.3: {}
+
+  unload@2.4.1: {}
 
   unplugin@3.0.0:
     dependencies:

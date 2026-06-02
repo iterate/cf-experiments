@@ -4,44 +4,20 @@
 // running. Typecheck-verified always.
 
 import { describe, expect, it } from "vitest";
-import { z } from "zod";
-import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
 import { connectStreamFromNode } from "./client-libraries/stream-node-worker.js";
-import { implementProcessor, withStreamProcessor, type Snapshot } from "./stream-processor.js";
+import { withStreamProcessor, type Snapshot } from "./stream-processor.js";
+// The SAME processor the DO (outbound) and the browser tab (inbound) run.
+import { echo, type EchoState } from "./demo-processor.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
-
-const echoContract = defineProcessorContract({
-  slug: "node.echo",
-  version: "0.1.0",
-  description: "echo",
-  stateSchema: z.object({ seen: z.number().int().min(0).default(0) }),
-  initialState: {},
-  events: {
-    "test.processor.input": { description: "in", payloadSchema: z.unknown() },
-    "test.processor.output": { description: "out", payloadSchema: z.object({ seen: z.number() }) },
-  },
-  consumes: ["test.processor.input"],
-  emits: ["test.processor.output"],
-  reduce({ state, event }) {
-    return event.type === "test.processor.input" ? { seen: state.seen + 1 } : state;
-  },
-});
-
-const echo = implementProcessor(echoContract, () => ({
-  afterAppend({ event, state, append }) {
-    if (event.type !== "test.processor.input") return;
-    append({ type: "test.processor.output", payload: { seen: state.seen } });
-  },
-}));
 
 describe("node-hosted stream processor (e2e)", () => {
   e2eIt("hosts echo in-process over an inbound subscription", async () => {
     const path = `node-echo-${crypto.randomUUID()}`;
     await using connection = await connectStreamFromNode({ path, workerUrl });
 
-    let saved: Snapshot<{ seen: number }> | undefined;
+    let saved: Snapshot<EchoState> | undefined;
     await using _runner = await withStreamProcessor({
       connection,
       subscriptionKey: "node-echo",
@@ -64,4 +40,44 @@ describe("node-hosted stream processor (e2e)", () => {
     expect(outputs.length).toBeGreaterThan(0);
     expect(saved?.state.seen).toBe(1);
   });
+
+  e2eIt("reconnects and resumes from its snapshot without reprocessing", async () => {
+    const path = `node-resume-${crypto.randomUUID()}`;
+    let saved: Snapshot<EchoState> | undefined;
+    const storage = { load: () => saved, save: (s: Snapshot<EchoState>) => void (saved = s) };
+
+    // Session 1: process one input, then drop the connection + runner.
+    {
+      await using connection = await connectStreamFromNode({ path, workerUrl });
+      await using _runner = await withStreamProcessor({
+        connection, subscriptionKey: "resume", processor: echo, deps: undefined, storage,
+      });
+      await connection.rpc.append({ event: { type: "test.processor.input", payload: { path } } });
+      await waitUntil(() => saved?.state.seen === 1, 5_000);
+    }
+    const offsetAfterFirst = saved?.offset ?? -1;
+    expect(saved?.state.seen).toBe(1);
+
+    // Session 2: fresh connection + fresh runner, SAME persisted snapshot. It must
+    // resume (subscribe afterOffset = stored offset), not reprocess the first input.
+    {
+      await using connection = await connectStreamFromNode({ path, workerUrl });
+      await using _runner = await withStreamProcessor({
+        connection, subscriptionKey: "resume", processor: echo, deps: undefined, storage,
+      });
+      await connection.rpc.append({ event: { type: "test.processor.input", payload: { path } } });
+      await waitUntil(() => (saved?.state.seen ?? 0) === 2, 5_000);
+    }
+    expect(saved?.state.seen).toBe(2); // resumed from 1; second input counted exactly once
+    expect(saved?.offset ?? -1).toBeGreaterThan(offsetAfterFirst);
+  });
 });
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("waitUntil timed out");
+}

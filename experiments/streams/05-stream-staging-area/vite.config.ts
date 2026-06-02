@@ -12,7 +12,12 @@ export default defineConfig({
   },
   plugins: [
     sqlocal(),
-    cloudflare({ viteEnvironment: { name: "ssr" } }),
+    cloudflare({
+      inspectorPort: false,
+      remoteBindings: false,
+      tunnel: false,
+      viteEnvironment: { name: "ssr" },
+    }),
     tanstackStart(),
     viteReact(),
   ],

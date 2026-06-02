@@ -84,12 +84,11 @@ export type StreamEventInput<
   offset?: number;
 };
 
-/** Committed stream event. `streamPath` is set on cross-stream processor wire events. */
+/** Committed stream event. The owning stream is clear from context (reduced state). */
 export type StreamEvent<
   Type extends string = string,
   Payload = unknown,
 > = StreamEventInput<Type, Payload> & {
-  streamPath?: string;
   offset: number;
   createdAt: string;
 };
@@ -122,7 +121,6 @@ export const StreamEventInput = z.object({
 });
 
 export const StreamEvent = StreamEventInput.extend({
-  streamPath: streamEventPathSchema.optional(),
   offset: streamEventOffsetSchema,
   createdAt: streamEventCreatedAtSchema,
 });

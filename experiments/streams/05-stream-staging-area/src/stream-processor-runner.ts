@@ -1,15 +1,14 @@
 import { newWorkersRpcResponse, type RpcStub } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
-import { z } from "zod";
 import type { StreamEvent } from "@cf-experiments/shared/event";
-import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import {
   createProcessorRunner,
-  implementProcessor,
   streamPortFromRpc,
   type ProcessorRunner,
 } from "./stream-processor.js";
+// The SAME processor the Node e2e (inbound) and the browser tab (inbound) run.
+import { echo } from "./demo-processor.js";
 import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
 import type {
   StreamCursor,
@@ -19,32 +18,6 @@ import type {
   StreamRpc,
   SubscriptionSink,
 } from "./stream-types.js";
-
-// The built-in "echo" processor, defined with the same model that runs in Node
-// (stream-processor.test.ts) and the browser. The DO is just one host.
-const echoContract = defineProcessorContract({
-  slug: "echo",
-  version: "0.1.0",
-  description: "Echoes input events back as output events.",
-  stateSchema: z.object({ seen: z.number().int().min(0).default(0) }),
-  initialState: {},
-  events: {
-    "test.processor.input": { description: "in", payloadSchema: z.unknown() },
-    "test.processor.output": { description: "out", payloadSchema: z.object({ seen: z.number() }) },
-  },
-  consumes: ["test.processor.input"],
-  emits: ["test.processor.output"],
-  reduce({ state, event }) {
-    return event.type === "test.processor.input" ? { seen: state.seen + 1 } : state;
-  },
-});
-
-const echo = implementProcessor(echoContract, () => ({
-  afterAppend({ event, state, append }) {
-    if (event.type !== "test.processor.input") return;
-    append({ type: "test.processor.output", payload: { seen: state.seen } });
-  },
-}));
 
 export class StreamProcessorRunner extends DurableObject {
   #stream: RpcStub<StreamRpc> | undefined;

@@ -359,6 +359,21 @@ function EventRows({
         </div>
       ) : (
         <>
+          {!scrollState.scrollPosition.isAtTop ? (
+            <div className="stream-page__scroll-affordance stream-page__scroll-affordance--top">
+              <button
+                aria-label="Scroll to top"
+                className="stream-page__scroll-button"
+                type="button"
+                onClick={() => {
+                  dispatchScrollState({ type: "stop-following-end" });
+                  virtualizer.scrollToIndex(0, { align: "start" });
+                }}
+              >
+                ↑
+              </button>
+            </div>
+          ) : null}
           <div
             className="stream-page__virtual-content"
             style={{ height: virtualizer.getTotalSize() }}
@@ -382,21 +397,8 @@ function EventRows({
               }}
             />
           </div>
-          <div className="stream-page__scroll-affordances">
-            {!scrollState.scrollPosition.isAtTop ? (
-              <button
-                aria-label="Scroll to top"
-                className="stream-page__scroll-button"
-                type="button"
-                onClick={() => {
-                  dispatchScrollState({ type: "stop-following-end" });
-                  virtualizer.scrollToIndex(0, { align: "start" });
-                }}
-              >
-                ↑
-              </button>
-            ) : null}
-            {!scrollState.isFollowingEnd && !scrollState.scrollPosition.isAtEnd ? (
+          {!scrollState.isFollowingEnd && !scrollState.scrollPosition.isAtEnd ? (
+            <div className="stream-page__scroll-affordance stream-page__scroll-affordance--bottom">
               <div className="stream-page__bottom-affordance">
                 {scrollState.unreadEventCount > 0 ? (
                   <output className="stream-page__unread-badge" aria-live="polite">
@@ -415,8 +417,8 @@ function EventRows({
                   ↓
                 </button>
               </div>
-            ) : null}
-          </div>
+            </div>
+          ) : null}
         </>
       )}
     </section>
@@ -562,6 +564,12 @@ function SubscriptionTool({
             >
               {snapshot.connectionStatus}
             </output>
+          </dd>
+        </div>
+        <div>
+          <dt>Subscription</dt>
+          <dd>
+            <output className="stream-page__state">{snapshot.subscriptionStatus}</output>
           </dd>
         </div>
         {snapshot.connectionError === undefined ? null : (

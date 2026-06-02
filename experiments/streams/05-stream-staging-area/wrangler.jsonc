@@ -21,6 +21,9 @@
   "limits": {
     "cpu_ms": 300000,
   },
+  "dev": {
+    "enable_containers": false,
+  },
   "durable_objects": {
     "bindings": [
       { "name": "STREAM", "class_name": "Stream" },

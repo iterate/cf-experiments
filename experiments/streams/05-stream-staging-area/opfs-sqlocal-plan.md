@@ -31,9 +31,31 @@ export function createStreamDb(streamPath: string) {
 }
 ```
 
-Use SQLocal's vanilla cross-tab path: `reactive: true`. Do not add a separate
-`BroadcastChannel`; SQLocal already uses browser broadcast channels internally for reactive effects
-between clients on the same database.
+Use SQLocal's vanilla cross-tab read path: `reactive: true`. SQLocal already uses browser
+broadcast channels internally for reactive query effects between clients on the same database.
+That covers UI reads, not stream subscription ownership.
+
+Each browser tab should still have its own CapnWeb stream connection. That connection is the tab's
+command/control channel: it can call `appendBatch()`, `kill()`, debug methods, and future RPC
+methods without going through another tab.
+
+Only one tab per stream path should be subscribed to event delivery. The elected subscription owner
+calls `stream.subscribe(...)`, receives replay/live `processEventBatch({ events })` calls, and writes
+those events into the shared SQLocal database. Other tabs render the same rows through SQLocal
+reactive queries.
+
+Use a small leader-election library for this rather than hand-rolled tab coordination. The
+candidate is [`broadcast-channel`](https://github.com/pubkey/broadcast-channel), specifically
+`createLeaderElection(channel)`, which uses browser primitives such as Web Locks where available and
+falls back for older runtimes. The election channel should be keyed by stream path, for example
+`stream-subscription:${streamPath}`.
+
+This keeps the layering explicit:
+
+- CapnWeb connection: per tab, used for commands.
+- CapnWeb subscription: one elected tab per stream path, used for event delivery.
+- SQLocal database: one file per stream path, used as the cross-tab read model.
+- React UI: all tabs read from SQLocal reactive queries.
 
 Do not enable SQLite WAL mode in the first implementation. Normal server SQLite advice does not
 carry over cleanly to SQLite WASM + OPFS: SQLite's own WASM persistence docs say WAL on OPFS requires
@@ -70,9 +92,10 @@ Use one downloadable SQLite database file per stream. That keeps the schema simp
 artifact meaningful on its own, and avoids per-stream autoincrement/reindexing problems inside a
 shared multi-stream database.
 
-Do **not** implement reconnect optimization, pruning, custom cross-tab coordination, or ingest run history
-in the first pass. Windowed reads are part of the first pass because the UI should not hold the
-entire stream in React memory.
+Do **not** implement reconnect optimization, pruning, or ingest run history in the first pass.
+Windowed reads are part of the first pass because the UI should not hold the entire stream in React
+memory. Cross-tab subscription-owner election is the first cross-tab coordination we should add;
+avoid broader cross-tab command proxying because every tab owns its own CapnWeb connection.
 
 ## Source constraints
 
@@ -96,16 +119,17 @@ entire stream in React memory.
 1. React mounts `/streams/$` for `streamPath`.
 2. Browser DB module initializes SQLocal and runs `CREATE TABLE IF NOT EXISTS`.
 3. Stream store opens CapnWeb with `withStream({ url })`.
-4. Store calls `stream.rpc.subscribe({ subscriptionKey, sink })`.
-5. `sink.processEventBatch({ events })` enqueues the batch and returns immediately.
-6. A single async writer drains batches in order.
-7. Each drained batch inserts rows in one SQLite transaction.
-8. The `reactiveQuery()` subscriptions rerun when `events` changes.
-9. `EventRows` virtualizes the reactive rows exactly like it currently virtualizes `snapshot.events`.
+4. Store participates in leader election for `streamPath`.
+5. The elected tab calls `stream.rpc.subscribe({ subscriptionKey, sink, afterOffset })`.
+6. `sink.processEventBatch({ events })` enqueues the batch and returns immediately.
+7. A single async writer drains batches in order.
+8. Each drained batch inserts rows in one SQLite transaction.
+9. SQLocal cross-tab reactive queries rerun when `events` changes.
+10. `EventRows` virtualizes the reactive rows exactly like it currently virtualizes `snapshot.events`.
 
-The first version should subscribe from the start. That means reload can replay old stream events and
-hit `INSERT OR IGNORE`. This is acceptable for the first proof because it avoids checkpoint plumbing
-while still proving local storage and reactive reads.
+The first version should subscribe from the start. That means the elected subscription tab can
+replay old stream events and hit `INSERT OR IGNORE`. This is acceptable for the first proof because
+it avoids checkpoint plumbing while still proving local storage and reactive reads.
 
 The intended production behavior is still max-offset resume. Once the basic path works, the browser
 processor should read the local maximum contiguous offset from SQLite and subscribe after that
@@ -227,7 +251,11 @@ reduced state and most recent processed offset explicitly.
 ## Lifecycle
 
 - Keep one SQLocal instance per stream path while that stream page is active.
-- Dispose the CapnWeb subscription/session when the route store unmounts.
+- Keep one CapnWeb stream connection per tab while that stream page is active.
+- Dispose the tab's CapnWeb connection when the route store unmounts.
+- Dispose the CapnWeb subscription only in the elected subscription-owner tab.
+- If the subscription-owner tab unmounts or closes, another tab should win election and subscribe
+  from the local SQLite max offset.
 - Let React `useSyncExternalStore` clean up SQLocal reactive-query subscriptions.
 - Add one explicit UI control to clear the current stream's local SQLite database.
 - Add one explicit UI control to download the current stream's SQLite database file.
@@ -239,9 +267,9 @@ reduced state and most recent processed offset explicitly.
 
 - Browser processor state table containing reduced state and most recent processed offset.
 - Reconnecting with `afterOffset` derived from that processor state.
+- Cross-tab subscription-owner election with `broadcast-channel`.
 - More sophisticated offset-window caching for 100k+ rows.
 - TTL/pruning behavior that can make `virtual_index` diverge from stream `offset`.
-- Cross-tab writer coordination.
 - Retention/pruning policy.
 - Duplicate payload comparison.
 - Persisted-storage prompt strategy.

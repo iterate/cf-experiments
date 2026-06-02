@@ -22,14 +22,12 @@ function event(args: {
   type: string;
   payload?: unknown;
   offset: number;
-  streamPath?: string;
   createdAtMs?: number;
   idempotencyKey?: string;
 }): StreamEvent {
   return {
     type: args.type,
     payload: args.payload,
-    streamPath: args.streamPath ?? "/x",
     offset: args.offset,
     createdAt: iso(args.createdAtMs),
     ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
@@ -42,7 +40,7 @@ function memoryStream(args: { onCommit?: (e: StreamEvent) => void; startOffset?:
   const committed: StreamEvent[] = [];
   const stream: StreamPort = {
     append: async (input) => {
-      const e: StreamEvent = { ...input, streamPath: "/x", offset: nextOffset++, createdAt: iso(1) };
+      const e: StreamEvent = { ...input, offset: nextOffset++, createdAt: iso(1) };
       committed.push(e);
       args.onCommit?.(e);
       return e;
@@ -222,7 +220,7 @@ describe("append round-trip metric", () => {
 
     const stream: StreamPort = {
       append: async (input) => {
-        const committed: StreamEvent = { ...input, streamPath: "/x", offset: nextOffset++, createdAt: iso(1) };
+        const committed: StreamEvent = { ...input, offset: nextOffset++, createdAt: iso(1) };
         runner?.processEventBatch({ events: [committed], headOffset: committed.offset }); // fan back
         return committed;
       },
@@ -370,7 +368,7 @@ class CoreStreamSim {
   append(path: string, input: StreamEventInput, createdAtMs = 0): StreamEvent {
     const entry = this.#entry(path);
     this.#impl.beforeAppend?.({ event: input, state: entry.state });
-    const committed: StreamEvent = { ...input, streamPath: path, offset: entry.offset + 1, createdAt: iso(createdAtMs) };
+    const committed: StreamEvent = { ...input, offset: entry.offset + 1, createdAt: iso(createdAtMs) };
     const previousState = entry.state;
     const reduction = runProcessorReduce({ processor: { contract: coreContract }, event: committed, state: previousState });
     entry.offset = committed.offset;

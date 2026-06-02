@@ -306,24 +306,6 @@ body {
   color: #b42318;
 }
 
-.stream-page__scroll-affordances {
-  bottom: 18px;
-  display: grid;
-  gap: 8px;
-  position: sticky;
-  justify-content: end;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.stream-page__bottom-affordance {
-  align-items: center;
-  display: flex;
-  gap: 8px;
-  justify-content: end;
-  pointer-events: none;
-}
-
 .stream-page__unread-badge {
   animation: stream-page-unread-pulse 1.4s ease-in-out infinite;
   background: #fff7ed;
@@ -335,6 +317,32 @@ body {
   padding: 7px 10px;
   pointer-events: auto;
   white-space: nowrap;
+}
+
+.stream-page__scroll-affordance {
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.stream-page__scroll-affordance--top {
+  margin-bottom: -38px;
+  position: sticky;
+  top: 12px;
+}
+
+.stream-page__scroll-affordance--bottom {
+  bottom: 12px;
+  margin-top: -38px;
+  position: sticky;
+}
+
+.stream-page__bottom-affordance {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  pointer-events: none;
 }
 
 .stream-page__scroll-button {

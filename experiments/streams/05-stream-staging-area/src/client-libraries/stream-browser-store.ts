@@ -1,4 +1,5 @@
 import type { RpcPromise } from "capnweb";
+import { BroadcastChannel, createLeaderElection } from "broadcast-channel";
 import { z } from "zod";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
@@ -23,6 +24,7 @@ export type StreamBrowserSnapshot = {
     | "reconnecting"
     | "subscribing"
     | "subscribed";
+  subscriptionStatus: "idle" | "electing" | "leader" | "follower";
   clearVersion: number;
   connectionError: string | undefined;
   databaseInfo: StreamDatabaseInfo | undefined;
@@ -70,12 +72,18 @@ export function createStreamBrowserStore(args: {
 }): StreamBrowserStore {
   let stream: ReturnType<typeof withStream> | undefined;
   let subscriptionHandle: { unsubscribe(): void } | undefined;
+  let leaderChannel: BroadcastChannel<unknown> | undefined;
+  let leaderElector: ReturnType<typeof createLeaderElection> | undefined;
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let databaseInfoTimer: ReturnType<typeof setTimeout> | undefined;
   const listeners = new Set<() => void>();
   let disposed = false;
   const streamDatabase = getStreamBrowserDatabase(args.streamPath);
+  const browserSubscriberStorageKey = "stream-browser-subscriber-id";
+  const browserSubscriberId =
+    localStorage.getItem(browserSubscriberStorageKey) ?? crypto.randomUUID();
+  localStorage.setItem(browserSubscriberStorageKey, browserSubscriberId);
   streamDatabase.setWriteMode(args.sqliteWriteMode);
   let snapshot: StreamBrowserSnapshot = {
     clearVersion: 0,
@@ -83,6 +91,7 @@ export function createStreamBrowserStore(args: {
     connectionError: undefined,
     databaseInfo: undefined,
     recentRowsByVirtualIndex: new Map(),
+    subscriptionStatus: "idle",
   };
 
   function emitSnapshot() {
@@ -121,8 +130,7 @@ export function createStreamBrowserStore(args: {
   });
   const offWriteError = streamDatabase.onWriteError((error) => {
     console.error("Browser stream SQLite write failed", error);
-    subscriptionHandle?.unsubscribe();
-    subscriptionHandle = undefined;
+    stopSubscriptionElection();
     stream?.[Symbol.dispose]();
     stream = undefined;
     reconnectAfter(String(error));
@@ -157,13 +165,14 @@ export function createStreamBrowserStore(args: {
       `/stream/${encodeURIComponent(args.streamPath)}`,
       window.location.href,
     );
-    const subscriptionKey = `browser:${crypto.randomUUID()}`;
+    const subscriptionKey = `browser:${browserSubscriberId}`;
 
     const connection = withStream({
       url: streamUrl,
       onConnectionStatusChange(connectionStatus, connectionError) {
         if (disposed) return;
         if (connectionStatus === "closed" || connectionStatus === "error") {
+          stopSubscriptionElection();
           subscriptionHandle = undefined;
           stream = undefined;
           reconnectAfter(connectionError ?? connectionStatus);
@@ -178,7 +187,13 @@ export function createStreamBrowserStore(args: {
       },
     });
     stream = connection;
+    startSubscriptionElection({ connection, subscriptionKey });
+  }
 
+  function startSubscriptionElection(election: {
+    connection: ReturnType<typeof withStream>;
+    subscriptionKey: string;
+  }) {
     // Host the projector on the shared runner; the runner IS the subscription sink.
     const runner = createProcessorRunner({
       processor: sqliteProjector,
@@ -187,20 +202,45 @@ export function createStreamBrowserStore(args: {
         load: async () => ({ state: {}, offset: await streamDatabase.maxOffset() }),
         save: () => {}, // SQLite is its own checkpoint (MAX(offset))
       },
-      stream: streamPortFromRpc(connection.rpc),
+      stream: streamPortFromRpc(election.connection.rpc),
     });
     const sink = new ProcessorSink((batch) =>
-      runner.processEventBatch({
-        ...batch,
-        events: batch.events.map((event) => ({ ...event, streamPath: args.streamPath })),
-      }),
+      runner.processEventBatch(batch),
     );
 
-    void runner
-      .afterOffset()
+    leaderChannel = new BroadcastChannel(`stream-subscription:${encodeURIComponent(args.streamPath)}`);
+    leaderElector = createLeaderElection(leaderChannel);
+    leaderElector.onduplicate = () => {
+      console.error("Duplicate browser stream subscription leader detected", args.streamPath);
+      stopSubscriptionElection();
+    };
+
+    snapshot = { ...snapshot, subscriptionStatus: "electing" };
+    emitSnapshot();
+
+    const leadershipTimeout = setTimeout(() => {
+      if (!disposed && leaderElector !== undefined && subscriptionHandle === undefined) {
+        snapshot = { ...snapshot, subscriptionStatus: "follower" };
+        emitSnapshot();
+      }
+    }, 250);
+
+    void leaderElector
+      .awaitLeadership()
+      .then(() => {
+        clearTimeout(leadershipTimeout);
+        if (disposed || stream !== election.connection) return undefined;
+        snapshot = { ...snapshot, subscriptionStatus: "leader" };
+        emitSnapshot();
+        return runner.afterOffset();
+      })
       .then((afterOffset) => {
-        if (disposed || stream !== connection) return undefined;
-        return connection.rpc.subscribe({ subscriptionKey, sink, afterOffset });
+        if (afterOffset === undefined || disposed || stream !== election.connection) return undefined;
+        return election.connection.rpc.subscribe({
+          subscriptionKey: election.subscriptionKey,
+          sink,
+          afterOffset,
+        });
       })
       .then((handle) => {
         if (handle === undefined) return;
@@ -213,11 +253,24 @@ export function createStreamBrowserStore(args: {
         emitSnapshot();
       })
       .catch((error: unknown) => {
+        clearTimeout(leadershipTimeout);
         if (disposed) return;
+        stopSubscriptionElection();
         stream?.[Symbol.dispose]();
         stream = undefined;
         reconnectAfter(`subscribe failed: ${String(error)}`);
       });
+  }
+
+  function stopSubscriptionElection() {
+    subscriptionHandle?.unsubscribe();
+    subscriptionHandle = undefined;
+    void leaderElector?.die();
+    void leaderChannel?.close();
+    leaderElector = undefined;
+    leaderChannel = undefined;
+    snapshot = { ...snapshot, subscriptionStatus: "idle" };
+    if (!disposed) emitSnapshot();
   }
 
   function teardown() {
@@ -233,8 +286,7 @@ export function createStreamBrowserStore(args: {
       clearTimeout(databaseInfoTimer);
       databaseInfoTimer = undefined;
     }
-    subscriptionHandle?.unsubscribe();
-    subscriptionHandle = undefined;
+    stopSubscriptionElection();
     stream?.[Symbol.dispose]();
     stream = undefined;
     offInserted();
@@ -249,8 +301,7 @@ export function createStreamBrowserStore(args: {
       return stream.rpc.appendBatch(appendArgs);
     },
     async clearLocalDatabase() {
-      subscriptionHandle?.unsubscribe();
-      subscriptionHandle = undefined;
+      stopSubscriptionElection();
       stream?.[Symbol.dispose]();
       stream = undefined;
       streamDatabase.clearPendingWrites();
