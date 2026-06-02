@@ -2,7 +2,8 @@ import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { describe, expect, it } from "vitest";
 import type { StreamRpc, SubscriptionRpcTarget } from "./stream-types.js";
-import { connectStreamProcessorRunnerFromNode } from "./client.js";
+import { connectStreamProcessorRunnerFromNode } from "./client-libraries/stream-node-worker.js";
+import { withStream } from "./client-libraries/stream-browser.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
@@ -21,6 +22,25 @@ class TestSubscriptionRpcTarget extends RpcTarget implements SubscriptionRpcTarg
 }
 
 describe("stream CaptainWeb protocol", () => {
+  e2eIt("browser client appends events by stream URL", async () => {
+    const path = `stream-browser-client-${crypto.randomUUID()}`;
+    await using stream = await withStream({ url: toStreamWebSocketUrl(path) });
+
+    const appended = await stream.rpc.append({
+      event: {
+        type: "test.stream.browser-client",
+        payload: { path },
+      },
+    });
+
+    expect(appended).toMatchObject({
+      type: "test.stream.browser-client",
+      payload: { path },
+      offset: 2,
+      createdAt: expect.any(String),
+    });
+  });
+
   e2eIt("appends events after the stream-created event over CaptainWeb", async () => {
     const path = `stream-capnweb-append-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);

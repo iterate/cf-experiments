@@ -9,6 +9,7 @@ It keeps only the pieces we want to graduate:
 - the stream processor runner Durable Object
 - CapnWeb-over-WebSocket RPC between streams and subscribers
 - browser, Node.js, and Workers client entry points
+- a tiny TanStack Start React app served by the same Worker
 - end-to-end fixtures for append, replay, outbound processors, and one-way batch delivery
 
 It intentionally does not include the old handwritten WebSocket protocol, benchmark runners,
@@ -18,20 +19,54 @@ ORPC/minimal-stream comparisons, or measurement-specific storage delay knobs.
 
 ```sh
 pnpm --filter @cf-experiments/05-stream-staging-area typecheck
+pnpm --filter @cf-experiments/05-stream-staging-area build
 pnpm --filter @cf-experiments/05-stream-staging-area test
 ```
 
-Run end-to-end tests against a local worker:
+Run the local TanStack Start + Cloudflare dev server:
 
 ```sh
-cd experiments/streams/05-stream-staging-area
-pnpm exec wrangler dev --port 8793
+pnpm --filter @cf-experiments/05-stream-staging-area dev
 ```
 
-In another shell:
+Then run end-to-end tests against it:
 
 ```sh
-WORKER_URL=http://localhost:8793 STREAM_STAGING_E2E=true pnpm --filter @cf-experiments/05-stream-staging-area test -- src/stream-capnweb.test.ts
+WORKER_URL=http://localhost:5173 STREAM_STAGING_E2E=true pnpm --filter @cf-experiments/05-stream-staging-area test -- src/stream-capnweb.test.ts
+```
+
+Use the browser client library with a full stream URL:
+
+```ts
+import { withStream } from "./src/client-libraries/stream-browser.js";
+
+using stream = withStream({ url: "wss://stream-staging-area.iterate-dev-preview.workers.dev/stream/example" });
+const event = await stream.rpc.append({ event: { type: "example", payload: {} } });
+```
+
+CapnWeb's `newWebSocketRpcSession()` returns the RPC stub synchronously and queues sends while
+the browser WebSocket is connecting, so this does not need an async connect step.
+
+The React app serves one stream viewer:
+
+- `/` redirects to `/streams/`
+- `/streams/` shows the root stream with path `/`
+- `/streams/anything/else` shows the stream with path `/anything/else`
+
+The top bar has an editable stream path input, a `Go to stream` button when the input differs
+from the current route, and the current browser CaptainWeb connection status. The body subscribes
+from the start of the stream and renders received events as fixed-width JSON.
+
+Deploy with Wrangler through the TanStack Start Vite build:
+
+```sh
+doppler run --project os --config dev -- pnpm --filter @cf-experiments/05-stream-staging-area run deploy
+```
+
+Run the same end-to-end tests against the deployed worker:
+
+```sh
+WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev STREAM_STAGING_E2E=true pnpm --filter @cf-experiments/05-stream-staging-area test -- src/stream-capnweb.test.ts
 ```
 
 ## Evaluate
@@ -44,4 +79,3 @@ main repo:
 - stream delivery does not await each subscriber's `consumeEvents` result
 - stream state is reduced by the core stream processor contract
 - outbound built-in subscribers are reconciled from `subscription-configured` events
-

@@ -234,10 +234,17 @@ processor runner. Future subscriber types might look like:
 
 ## Instrumentation
 
-We need to be able to track all this information
+This needs a separate design pass. We probably need to be able to track all this information
+eventually, but client-side metrics and ping are not part of the next client-library cut.
+
+The active low-level client requirement is narrower: expose raw WebSocket frames through
+`onWebSocketFrame()` so tests can assert the actual CaptainWeb wire shape without forcing the
+connection to retain frames.
+
+Future instrumentation should cover:
 - in workers analytics engine
 - on-demand from a live durable object via RPC
-- from client libraries (the websocket client needs to emit these metrics)
+- from client libraries
 
 For any stream
 - All active subscription connections with direction (inbound vs outbound), transport (`captainweb-websocket`), status (connected or not)
@@ -413,83 +420,240 @@ TODO
 
 ## Client libraries
 
-### Level 1: Connect to capnweb stream library / useStream disposable from a a node program or browser or workerd
+The client library should be a runtime-portable stream client, not an e2e fixture system. It should
+run from browsers, Node.js tests/scripts, and Cloudflare Workers/Durable Objects. The only
+runtime-specific boundary should be connection setup.
 
-This is the only layer that is probably runtime-specific.
+The API should preserve the interaction shape used by the current OS streams APIs:
 
-What the user has
-- A URL and headers
-- An optional fetch function?
+- append application events
+- read historical events by offset
+- subscribe to live/replayed events as an async iterator
+- wait for matching events in tests and runners
+- optionally narrow event types with a processor contract
 
-What the user wants 
-- A Disposable & RpcStub<StreamRpc>
-- Some helper methods to e.g. measure ping time etc
+It should not inherit OS project/codemode fixture concepts. Those higher-level e2e helpers can wrap
+this library later.
 
-Example usage 
+### Level 1: `connectStream`
+
+`connectStream()` opens a CaptainWeb session to one stream and returns the lowest-level connection
+primitive: the CaptainWeb RPC stub plus raw WebSocket frame observation.
+
+This is the only layer that should know whether the caller is running in Node, a browser, or a
+Cloudflare Worker/Durable Object. In Node and browsers it can open a WebSocket from the URL. In
+Workers, tests, or DO-to-DO cases, callers can provide a `fetch` implementation that performs the
+WebSocket upgrade.
 
 ```ts
-
-await using streamRpcStub = withStream({
+await using connection = await connectStream({
   url,
   headers,
-  fetch? // needed for cloudflare i think
+  fetch, // optional; useful in Cloudflare Workers and tests
 });
 
+const appended = await connection.rpc.append({
+  event: {
+    type: "events.example.com/widget-created",
+    payload: { widgetId },
+  },
+});
 ```
 
-TODO: 
-- is stream disposal async?
-- can we make this runtime agnostic / have a node client and a workers client?
-
-###: Level 2: Subscriber 
-
-Calls initInboundSubscription on the stream rpc stub, which calls initOutboundSubscription on the 
+The connection should not retain frames by default. It should synchronously notify registered frame
+listeners, and test helpers can retain frames when they need assertions.
 
 ```ts
+type StreamConnection = AsyncDisposable & {
+  rpc: RpcStub<StreamRpc>;
+  onWebSocketFrame(listener: (frame: WebSocketFrame) => void): Disposable;
+};
 
-// calls streamRpcStub.subscribe({ startingOffset, processEventBatch }) or similar 
-// processEventBatch then calls onEvent? on the subscription
-// We want the `subscription` fixture to be a bonafide javascript event emitter if that makes sense - open question
-await using subscription = await using withStreamSubscription({
-  streamRpcStub,
-  startingOffset,
-  onEvent?
-})
-
-// it should be possible to do this 
-const event = subscription.waitForEvent({predicate})
-
-
+type WebSocketFrame = {
+  direction: "in" | "out";
+  data: string;
+  byteLength: number;
+  timestamp: number;
+};
 ```
 
-### Level 3: Stream processor runner for _inbound_ subscribers
-
-What the user has
-- A stream processor instance with reduce and afterAppend functions
-- A stream rpc stub
-
-What the user wants
-- set up some initial starting state and offset
-- subscribe to stream and receive events
-- some way to access metrics / ping times
-
+`onWebSocketFrame()` is part of the level-1 requirement because this experiment must be able to
+assert the actual CaptainWeb wire shape. Higher-level tests can wrap it:
 
 ```ts
-
-// this would call withSubscription internally
-await using processorSubscription = withStreamProcessor({
-  streamRpcStub,
-  initialState?,
-  afterOffset?,
-  // not sure here - processor or processor + contract or what? what even _is_ this thing?
-  processor,
-  
-})
+const frames = recordWebSocketFrames(connection);
+// ... run test ...
+expect(frames.outbound()).toEqual([]);
 ```
 
-// Could maybe also allow 
+Disposal should be async: dispose the CaptainWeb session, then close the underlying WebSocket.
+
+### Level 2: subscriptions
+
+`withStreamSubscription()` should call `initInboundSubscription()` on the stream RPC target. The client
+provides a `SubscriptionRpcTarget` with `consumeEvents({ events })`; the Durable Object stores that
+runtime target and starts delivering replay/live batches from `afterOffset + 1`.
+
+The subscription API should use portable JavaScript primitives:
+
+- `AsyncIterable<StreamEvent>` for event consumption
+- `AbortSignal` for cancellation
+- `AsyncDisposable` for connection cleanup
+- `waitForEvent()` as the test/runner convenience
+
+Do not use Node's `EventEmitter` as the primary API because this library must work in browsers and
+Workers without a Node dependency.
+
+```ts
+await using subscription = await withStreamSubscription({
+  connection,
+  afterOffset: appended.offset - 1,
+});
+
+for await (const event of subscription) {
+  // portable across Node, browsers, and Workers
+}
+
+const completed = await subscription.waitForEvent({
+  predicate: (event) => event.type === "events.example.com/widget-completed",
+  timeoutMs: 5_000,
+});
+```
+
+The subscription object should retain received events only as much as is needed for its own iterator
+and waiter queues. Higher-level e2e helpers can add recording/retention for assertions.
+
+Subscription disposal should not close a caller-provided `StreamConnection`. The connection is owned
+by the caller; subscription disposal should stop the iterator/waiters and release local subscription
+runtime state only. One-shot helpers can own the connection explicitly later, for example
+`withConnectedStreamSubscription({ url, ... })`.
+
+Because the connection can stay open after a subscription is disposed, `initInboundSubscription()`
+should return an explicit subscription handle. Disposing the subscription should use that handle to
+unsubscribe on the stream Durable Object so the DO stops delivering events to the callback target
+without requiring the whole CaptainWeb session to close.
+
+```ts
+type StreamSubscription = AsyncDisposable &
+  AsyncIterable<StreamEvent> & {
+    waitForEvent<T extends StreamEvent>(args: {
+      predicate: (event: StreamEvent) => event is T;
+      timeoutMs?: number;
+    }): Promise<T>;
+  };
+```
+
+This helper can also expose app-shaped convenience methods later, but the lowest-level connection
+should remain just `rpc` plus WebSocket frame observation.
+
+### Contract-aware event narrowing
+
+The base stream client should stay transport-shaped and unopinionated. Contract awareness belongs at
+the subscription / processor-runner layer, where raw stream events are consumed.
+
+This matches the current OS stream processor model:
+
+- `ConsumedEvent<Contract>` is inferred from `contract.consumes`
+- `EmittedInput<Contract>` is inferred from `contract.emits`
+- `ProcessorStreamApi<Contract>.subscribe()` still transports raw `StreamEvent`s
+- runners narrow each raw event at consumption time by resolving the event definition from the
+  contract and its processor dependencies, then parsing with the matching payload schema
+
+That means the client library should not have a whole-stream `stream.withContract(contract)` wrapper
+as the primary design. Instead, the subscription helper can optionally accept a processor contract:
+
+```ts
+await using subscription = await withStreamSubscription({
+  connection,
+  afterOffset: "start",
+  contract: widgetProcessorContract,
+});
+
+const completed = await subscription.waitForEvent({
+  type: "events.example.com/widget-completed",
+});
+
+completed.payload.widgetId;
+```
+
+Under the hood, `waitForEvent({ type })` should only return a typed event after it has found the
+matching event type and parsed it through the contract-resolved payload schema. Unknown or
+unconsumed event types should not be silently treated as typed processor events.
+
+The same contract-aware narrowing path should be used by the inbound processor runner:
+
+```ts
+await using runner = await withStreamProcessor({
+  connection,
+  processor: widgetProcessor,
+  afterOffset,
+});
+```
+
+Append typing is useful, but it is a separate concern from subscription narrowing. Processor-facing
+stream APIs and e2e helpers can expose `append({ event: EmittedInput<Contract> })` when they are
+already bound to a processor contract. The low-level `connection.rpc.append()` should keep accepting
+raw `StreamEventInput`.
+
+### Level 3: inbound stream processor runner
+
+An inbound stream processor runner is a client-side convenience built on top of `subscribe()`. It is
+not part of the stream Durable Object protocol.
+
+What the caller has:
+
+- a stream connection
+- a processor contract and implementation
+- optional initial processor state / stored snapshot
+- optional deps for `afterAppend`
+
+What the caller wants:
+
+- catch up from `afterOffset`
+- reduce matching events into state
+- run `afterAppend` for live/relevant events
+- inspect the current processor snapshot
+- stop the runner with async disposal
+
+```ts
+await using runner = await withStreamProcessor({
+  connection,
+  processor: widgetProcessor,
+  initialState,
+  afterOffset,
+});
+
+await runner.waitForSnapshot((snapshot) => snapshot.state.completed > 0);
+```
+
+This layer should share the contract-aware event resolution/parsing used by typed subscriptions.
 
 # Design decisions
-- For inbound subscribers, we should not need to provide any initOutboundSubscription() on our capnweb main object or anything
-- For inbound subscribers, it is the client that initiates ping and everything else 
-- Durable object does not care about inbound capnweb subscribers - it only cares the capnweb peer subscribes
+
+- Use `connectStream()` for the low-level client constructor.
+- `connectStream()` returns a thin connection: `rpc`, `onWebSocketFrame()`, and async disposal.
+- Do not retain WebSocket frames in the core connection. Retention belongs in test/debug helpers.
+- Disposing a subscription created from a caller-provided connection does not close that connection.
+- `initInboundSubscription()` should return an explicit handle/token so subscriptions can be
+  unsubscribed without closing the entire CaptainWeb session.
+- Use `AsyncDisposable` for stream connections and subscriptions.
+- Use `AsyncIterable` plus `waitForEvent()` for subscriptions.
+- Do not use Node `EventEmitter` as the primary subscription API.
+- Keep OS project/codemode fixtures out of the client library; those helpers can wrap this client.
+- For inbound subscribers, the client calls `initInboundSubscription()` and does not need to expose
+  `initOutboundSubscription()` on its own CaptainWeb main object.
+- Durable Object stream delivery only cares that the CaptainWeb peer provides a
+  `SubscriptionRpcTarget`; it does not care whether that peer is a browser, Node script, Worker, or
+  Durable Object.
+
+## Later: metrics and ping
+
+Traffic metrics and automatic ping/RTT measurement need a separate design pass.
+
+Requirements to revisit:
+
+- Application event rates and WebSocket frame rates are distinct metrics.
+- Stream processor runner Durable Objects should be able to write metric samples to Workers
+  Analytics Engine.
+- Default candidates discussed but not accepted yet: emit metric samples every second and run an
+  automatic client-owned ping test every three seconds.

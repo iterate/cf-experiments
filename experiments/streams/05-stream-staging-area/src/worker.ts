@@ -1,10 +1,11 @@
-import { Stream } from "./stream.js";
-import { StreamProcessorRunner } from "./stream-processor-runner.js";
+import handler, { createServerEntry } from "@tanstack/react-start/server-entry";
+import { env } from "cloudflare:workers";
 
-export { Stream, StreamProcessorRunner };
+export { Stream } from "./stream.js";
+export { StreamProcessorRunner } from "./stream-processor-runner.js";
 
-export default {
-  fetch(request, env) {
+export default createServerEntry({
+  fetch(request) {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/stream-processor-runner/")) {
@@ -17,6 +18,6 @@ export default {
       return env.STREAM.getByName(`stream:${path}`).fetch(request);
     }
 
-    return new Response("Use /stream/:path or /stream-processor-runner/:name", { status: 404 });
+    return handler.fetch(request);
   },
-} satisfies ExportedHandler<Env>;
+});
