@@ -19,7 +19,10 @@ export type StreamBrowserClient = Disposable & {
 /** Connects browser JavaScript to one stream URL over capnweb-WebSocket. */
 export function connectStream(args: {
   url: string | URL;
-  onConnectionStatusChange?: (status: StreamBrowserConnectionStatus) => void;
+  onConnectionStatusChange?: (
+    status: StreamBrowserConnectionStatus,
+    error: string | undefined,
+  ) => void;
 }): StreamBrowserClient {
   const url = new URL(args.url);
   if (url.protocol === "http:") url.protocol = "ws:";
@@ -39,10 +42,21 @@ export function connectStream(args: {
     emitFrame(frameListeners, "out", data);
     return send(data);
   }) as WebSocket["send"];
-  args.onConnectionStatusChange?.("connecting");
-  webSocket.addEventListener("open", () => args.onConnectionStatusChange?.("connected"));
-  webSocket.addEventListener("close", () => args.onConnectionStatusChange?.("closed"));
-  webSocket.addEventListener("error", () => args.onConnectionStatusChange?.("error"));
+  args.onConnectionStatusChange?.("connecting", undefined);
+  webSocket.addEventListener("open", () =>
+    args.onConnectionStatusChange?.("connected", undefined),
+  );
+  webSocket.addEventListener("close", (event) =>
+    args.onConnectionStatusChange?.(
+      "closed",
+      event.reason === ""
+        ? `WebSocket closed with code ${event.code}`
+        : `WebSocket closed with code ${event.code}: ${event.reason}`,
+    ),
+  );
+  webSocket.addEventListener("error", () =>
+    args.onConnectionStatusChange?.("error", "WebSocket error"),
+  );
   webSocket.addEventListener("message", (event) => emitFrame(frameListeners, "in", event.data));
 
   const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);

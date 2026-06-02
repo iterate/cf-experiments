@@ -8,7 +8,8 @@ import {
 } from "react";
 import { ClientOnly, Link } from "@tanstack/react-router";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
-import type { SQLocal, SqlTag, StatementInput } from "sqlocal";
+import type { SqlTag } from "sqlocal";
+import { useReactiveQuery } from "sqlocal/react";
 import {
   createStreamBrowserStore,
   type StreamBrowserSnapshot,
@@ -18,6 +19,7 @@ import {
   getStreamBrowserDatabase,
   type StreamBrowserDatabase,
   type StreamDatabaseWriteMode,
+  type StreamEventMeta,
   type StreamEventRow,
 } from "../client-libraries/stream-browser-db.js";
 import "./-stream-page.css";
@@ -61,7 +63,7 @@ function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
       <StreamTopBar streamPath={streamPath} />
       <div className="stream-page__hydrate">
         <div className="stream-page__spinner" aria-hidden="true" />
-        <span>Hydrating stream viewer</span>
+        <span>SSR done, hydrating client</span>
       </div>
     </main>
   );
@@ -82,25 +84,25 @@ function StreamPageWithDatabase({
   streamStore: StreamBrowserStore;
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
-  // SQLocal 0.18's reactive table analyzer currently does not recognize
-  // `SELECT count(*) FROM events` as reading `events`, so keep the schema to
-  // the single requested table and count projected integer keys in React.
-  const countQuery = useMemo(
+  const metaQuery = useMemo(
     () => (sql: SqlTag) => sql`
-      SELECT virtual_index
-      FROM events
-      ORDER BY virtual_index ASC
+      SELECT event_count
+      FROM stream_meta
+      WHERE id = 1
     `,
     [],
   );
-  const countRows = useStreamReactiveQuery<{ virtual_index: number }>(
+  const metaQueryResult = useReactiveQuery<StreamEventMeta>(
     streamDatabase.sqlocal,
-    countQuery,
+    metaQuery,
   );
-  const eventCount = countRows.length;
+  const eventCount = metaQueryResult.data[0]?.event_count ?? 0;
 
   return (
     <StreamPageLayout
+      databaseReady={metaQueryResult.status === "ok"}
+      databaseError={metaQueryResult.error}
+      databaseStatus={metaQueryResult.status}
       eventCount={eventCount}
       snapshot={snapshot}
       sqliteWriteMode={sqliteWriteMode}
@@ -119,14 +121,20 @@ function StreamPageLayout({
   streamDatabase,
   streamStore,
   eventCount,
+  databaseReady,
+  databaseError,
+  databaseStatus,
   onSqliteWriteModeChange,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
   sqliteWriteMode: StreamDatabaseWriteMode;
-  streamDatabase: StreamBrowserDatabase | undefined;
+  streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
+  databaseReady: boolean;
+  databaseError: Error | undefined;
+  databaseStatus: "pending" | "ok" | "error";
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
 
@@ -145,14 +153,20 @@ function StreamPageLayout({
           onSqliteWriteModeChange={onSqliteWriteModeChange}
         />
         <div className="stream-page__main">
-          {streamDatabase === undefined ? (
-            <section className="stream-page__stream" aria-label="Stream events">
-              <pre className="stream-page__empty">[]</pre>
-            </section>
+          {!databaseReady ? (
+            <StreamLoadingPanel
+              message={
+                databaseStatus === "error"
+                  ? `client hydrated, sqlite DB error at ${streamDatabase.databasePath}: ${databaseError?.message ?? "unknown error"}`
+                  : `client hydrated, opening sqlite DB at ${streamDatabase.databasePath}`
+              }
+            />
           ) : (
             <EventRows
               eventCount={eventCount}
-              key={`events:${streamPath}`}
+              key={`events:${streamPath}:${snapshot.clearVersion}`}
+              recentRowsByVirtualIndex={snapshot.recentRowsByVirtualIndex}
+              snapshot={snapshot}
               streamDatabase={streamDatabase}
             />
           )}
@@ -160,6 +174,20 @@ function StreamPageLayout({
         </div>
       </div>
     </main>
+  );
+}
+
+function StreamLoadingPanel({ message }: { message: string }) {
+  return (
+    <section
+      aria-label="Stream events"
+      className="stream-page__stream stream-page__stream--loading"
+    >
+      <div className="stream-page__hydrate">
+        <div className="stream-page__spinner" aria-hidden="true" />
+        <span>{message}</span>
+      </div>
+    </section>
   );
 }
 
@@ -210,9 +238,13 @@ function StreamTopBar({ streamPath }: { streamPath: string }) {
 function EventRows({
   streamDatabase,
   eventCount,
+  recentRowsByVirtualIndex,
+  snapshot,
 }: {
   streamDatabase: StreamBrowserDatabase;
   eventCount: number;
+  recentRowsByVirtualIndex: ReadonlyMap<number, StreamEventRow>;
+  snapshot: StreamBrowserSnapshot;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const scrolledToInitialEnd = useRef(false);
@@ -313,7 +345,18 @@ function EventRows({
       }}
     >
       {eventCount === 0 ? (
-        <pre className="stream-page__empty">[]</pre>
+        <div className="stream-page__stream-placeholder">
+          {snapshot.connectionStatus === "subscribed" ? null : (
+            <div className="stream-page__spinner" aria-hidden="true" />
+          )}
+          <span>
+            {snapshot.connectionError === undefined
+              ? snapshot.connectionStatus === "subscribed"
+                ? "SQLite is ready; no events are stored locally yet"
+                : `SQLite is ready; stream connection is ${snapshot.connectionStatus}`
+              : `SQLite is ready; stream connection is ${snapshot.connectionStatus}: ${snapshot.connectionError}`}
+          </span>
+        </div>
       ) : (
         <>
           <div
@@ -322,6 +365,7 @@ function EventRows({
           >
             <EventRowWindow
               expandedOffsets={expandedOffsets}
+              recentRowsByVirtualIndex={recentRowsByVirtualIndex}
               streamDatabase={streamDatabase}
               virtualItems={virtualItems}
               measureElement={virtualizer.measureElement}
@@ -383,12 +427,14 @@ function EventRowWindow({
   streamDatabase,
   virtualItems,
   expandedOffsets,
+  recentRowsByVirtualIndex,
   measureElement,
   onToggleOffset,
 }: {
   streamDatabase: StreamBrowserDatabase;
   virtualItems: VirtualItem[];
   expandedOffsets: Set<number>;
+  recentRowsByVirtualIndex: ReadonlyMap<number, StreamEventRow>;
   measureElement: (node: Element | null) => void;
   onToggleOffset(offset: number): void;
 }) {
@@ -401,21 +447,20 @@ function EventRowWindow({
     () => (sql: SqlTag) => sql`
       SELECT virtual_index, offset, type, idempotency_key, created_at, raw_json
       FROM events
+      WHERE virtual_index >= ${pageStartIndex + 1}
       ORDER BY virtual_index ASC
       LIMIT ${pageSize}
-      OFFSET ${pageStartIndex}
     `,
     [pageSize, pageStartIndex],
   );
-  const rows = useStreamReactiveQuery<StreamEventRow>(streamDatabase.sqlocal, rowQuery);
-  const rowsByVirtualizerIndex = useMemo(() => {
-    const rowsByVirtualizerIndex = new Map<number, StreamEventRow>();
-    rows.forEach((row, index) => rowsByVirtualizerIndex.set(pageStartIndex + index, row));
-    return rowsByVirtualizerIndex;
-  }, [pageStartIndex, rows]);
+  const rowQueryResult = useReactiveQuery<StreamEventRow>(streamDatabase.sqlocal, rowQuery);
+  const rowsByVirtualizerIndex = new Map<number, StreamEventRow>();
+  rowQueryResult.data.forEach((row) => rowsByVirtualizerIndex.set(row.virtual_index - 1, row));
 
   return virtualItems.map((virtualItem) => {
-    const event = rowsByVirtualizerIndex.get(virtualItem.index);
+    const event =
+      rowsByVirtualizerIndex.get(virtualItem.index) ??
+      recentRowsByVirtualIndex.get(virtualItem.index);
     const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
 
     return (
@@ -450,27 +495,6 @@ function EventRowWindow({
   });
 }
 
-function useStreamReactiveQuery<Result extends Record<string, unknown>>(
-  sqlocal: SQLocal,
-  query: StatementInput<Result>,
-) {
-  const reactiveQuery = useMemo(() => sqlocal.reactiveQuery<Result>(query), [query, sqlocal]);
-  return useSyncExternalStore(
-    (onStoreChange) => {
-      const subscription = reactiveQuery.subscribe(
-        () => onStoreChange(),
-        (error) => {
-          console.error("SQLocal reactive query failed", error);
-          onStoreChange();
-        },
-      );
-      return () => subscription.unsubscribe();
-    },
-    () => reactiveQuery.value,
-    () => [],
-  );
-}
-
 function StreamSidebar({
   streamPath,
   snapshot,
@@ -483,7 +507,7 @@ function StreamSidebar({
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
   sqliteWriteMode: StreamDatabaseWriteMode;
-  streamDatabase: StreamBrowserDatabase | undefined;
+  streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
@@ -513,7 +537,7 @@ function SubscriptionTool({
   eventCount,
 }: {
   snapshot: StreamBrowserSnapshot;
-  streamDatabase: StreamBrowserDatabase | undefined;
+  streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
 }) {
@@ -540,6 +564,16 @@ function SubscriptionTool({
             </output>
           </dd>
         </div>
+        {snapshot.connectionError === undefined ? null : (
+          <div>
+            <dt>Error</dt>
+            <dd>
+              <output className="stream-page__state stream-page__state--error stream-page__state--wrap">
+                {snapshot.connectionError}
+              </output>
+            </dd>
+          </div>
+        )}
         <div>
           <dt>Events</dt>
           <dd>
@@ -571,7 +605,7 @@ function SubscriptionTool({
           </dd>
         </div>
         <div>
-          <dt>DB size</dt>
+          <dt>DB file size</dt>
           <dd>
             <output className="stream-page__state">
               {formatByteSize(snapshot.databaseInfo?.databaseSizeBytes ?? 0)}
@@ -582,10 +616,9 @@ function SubscriptionTool({
       <div className="stream-page__button-row">
         <button
           className="stream-page__button"
-          disabled={streamDatabase === undefined || databaseActionState === "downloading"}
+          disabled={databaseActionState === "downloading"}
           type="button"
           onClick={() => {
-            if (streamDatabase === undefined) return;
             setDatabaseActionState("downloading");
             void streamDatabase.download().then(
               () => setDatabaseActionState("done"),
@@ -597,12 +630,11 @@ function SubscriptionTool({
         </button>
         <button
           className="stream-page__button stream-page__button--secondary"
-          disabled={streamDatabase === undefined || databaseActionState === "clearing"}
+          disabled={databaseActionState === "clearing"}
           type="button"
           onClick={() => {
-            if (streamDatabase === undefined) return;
             setDatabaseActionState("clearing");
-            void streamDatabase.clear().then(
+            void streamStore.clearLocalDatabase().then(
               () => setDatabaseActionState("done"),
               () => setDatabaseActionState("error"),
             );

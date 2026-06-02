@@ -98,6 +98,15 @@ body {
   color: #b42318;
 }
 
+.stream-page__state--wrap {
+  display: block;
+  max-width: 150px;
+  overflow-wrap: anywhere;
+  text-align: right;
+  text-transform: none;
+  white-space: normal;
+}
+
 .stream-page__facts {
   display: grid;
   gap: 8px;
@@ -185,7 +194,11 @@ body {
   position: relative;
 }
 
-.stream-page__empty,
+.stream-page__stream--loading {
+  display: grid;
+  place-items: center;
+}
+
 .stream-page__event-row {
   background: #ffffff;
   border: 1px solid #e1e5eb;
@@ -193,9 +206,14 @@ body {
   margin: 0;
 }
 
-.stream-page__empty {
-  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  padding: 12px;
+.stream-page__stream-placeholder {
+  align-items: center;
+  color: #667085;
+  display: flex;
+  font-size: 13px;
+  gap: 10px;
+  justify-content: center;
+  min-height: 180px;
 }
 
 .stream-page__virtual-content {

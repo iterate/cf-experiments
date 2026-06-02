@@ -5,6 +5,11 @@ import sqlocal from "sqlocal/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  server: {
+    watch: {
+      ignored: ["**/.wrangler/**"],
+    },
+  },
   plugins: [
     sqlocal(),
     cloudflare({ viteEnvironment: { name: "ssr" } }),

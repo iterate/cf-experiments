@@ -10,6 +10,10 @@ export type StreamEventRow = {
   raw_json: string;
 };
 
+export type StreamEventMeta = {
+  event_count: number;
+};
+
 export type StreamDatabaseInfo = DatabaseInfo & {
   crossOriginIsolated: boolean;
 };
@@ -31,6 +35,7 @@ export class StreamBrowserDatabase {
   readonly databasePath: string;
   readonly sqlocal: SQLocal;
   readonly downloadFilename: string;
+  #infoRefresh: Promise<StreamDatabaseInfo> | undefined;
 
   constructor(readonly streamPath: string) {
     this.databasePath = databasePathForStreamPath(streamPath);
@@ -41,7 +46,7 @@ export class StreamBrowserDatabase {
       onInit: (sql) => [
         sql`
           CREATE TABLE IF NOT EXISTS events (
-            virtual_index INTEGER PRIMARY KEY AUTOINCREMENT,
+            virtual_index INTEGER PRIMARY KEY,
             offset INTEGER NOT NULL,
             type TEXT NOT NULL,
             idempotency_key TEXT,
@@ -50,13 +55,107 @@ export class StreamBrowserDatabase {
             UNIQUE (offset)
           )
         `,
+        sql`
+          CREATE TABLE IF NOT EXISTS stream_meta (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            event_count INTEGER NOT NULL DEFAULT 0
+          )
+        `,
+        // SQLocal runs onInit for every tab/worker that opens this OPFS file.
+        // Keep it schema-only; the triggers below maintain this row after that.
+        sql`
+          INSERT INTO stream_meta (id, event_count)
+          VALUES (1, 0)
+          ON CONFLICT(id) DO NOTHING
+        `,
+        sql`
+          CREATE TRIGGER IF NOT EXISTS events_after_insert
+          AFTER INSERT ON events
+          BEGIN
+            UPDATE stream_meta
+            SET event_count = event_count + 1
+            WHERE id = 1;
+          END
+        `,
+        sql`
+          CREATE TRIGGER IF NOT EXISTS events_after_delete
+          AFTER DELETE ON events
+          BEGIN
+            UPDATE stream_meta
+            SET event_count = event_count - 1
+            WHERE id = 1;
+          END
+        `,
       ],
     });
   }
 
-  async insertEventBatch(args: { events: StreamEvent[]; writeMode: StreamDatabaseWriteMode }) {
-    const { events } = args;
+  // --- Coalescing writer: the db-layer batching that lets a per-event processor
+  // afterAppend stay per-event while still writing one SQLite transaction per
+  // delivered batch. `write()` is fire-and-forget; it buffers and flushes on a
+  // microtask, then notifies listeners with the inserted rows (for the UI) or the
+  // error (so the caller can reconnect).
+  #writeMode: StreamDatabaseWriteMode = "batch";
+  #pendingWrites: StreamEvent[] = [];
+  #flushing: Promise<void> | undefined;
+  readonly #insertedListeners = new Set<(rows: StreamEventRow[]) => void>();
+  readonly #writeErrorListeners = new Set<(error: unknown) => void>();
+
+  setWriteMode(writeMode: StreamDatabaseWriteMode) {
+    this.#writeMode = writeMode;
+  }
+
+  onInserted(listener: (rows: StreamEventRow[]) => void) {
+    this.#insertedListeners.add(listener);
+    return () => void this.#insertedListeners.delete(listener);
+  }
+
+  onWriteError(listener: (error: unknown) => void) {
+    this.#writeErrorListeners.add(listener);
+    return () => void this.#writeErrorListeners.delete(listener);
+  }
+
+  write(event: StreamEvent) {
+    this.#pendingWrites.push(event);
+    this.#flushing ??= Promise.resolve().then(() => this.#flushPendingWrites());
+  }
+
+  clearPendingWrites() {
+    this.#pendingWrites = [];
+  }
+
+  async #flushPendingWrites() {
+    this.#flushing = undefined;
+    const events = this.#pendingWrites;
+    this.#pendingWrites = [];
     if (events.length === 0) return;
+    try {
+      const rows = await this.insertEventBatch({ events, writeMode: this.#writeMode });
+      if (rows.length > 0) for (const listener of this.#insertedListeners) listener(rows);
+    } catch (error) {
+      for (const listener of this.#writeErrorListeners) listener(error);
+    }
+  }
+
+  /** Resume cursor: the side-effect target is its own checkpoint. */
+  async maxOffset(): Promise<number> {
+    const [row] = await this.sqlocal.sql<{ max_offset: number | null }>`
+      SELECT MAX(offset) AS max_offset FROM events
+    `;
+    return row?.max_offset ?? -1;
+  }
+
+  async insertEventBatch(args: {
+    events: StreamEvent[];
+    writeMode: StreamDatabaseWriteMode;
+  }): Promise<StreamEventRow[]> {
+    const { events } = args;
+    if (events.length === 0) return [];
+    const [{ event_count: eventCountBefore }] = await this.sqlocal.sql<StreamEventMeta>`
+      SELECT event_count
+      FROM stream_meta
+      WHERE id = 1
+    `;
 
     if (args.writeMode === "row") {
       for (const event of events) {
@@ -67,7 +166,8 @@ export class StreamBrowserDatabase {
             idempotency_key,
             created_at,
             raw_json
-          ) VALUES (
+          )
+          VALUES (
             ${event.offset},
             ${event.type},
             ${event.idempotencyKey ?? null},
@@ -76,7 +176,7 @@ export class StreamBrowserDatabase {
           )
         `;
       }
-      return;
+      return this.#eventsAfterVirtualIndex(eventCountBefore);
     }
 
     await this.sqlocal.transaction(async (tx) => {
@@ -88,7 +188,8 @@ export class StreamBrowserDatabase {
             idempotency_key,
             created_at,
             raw_json
-          ) VALUES (
+          )
+          VALUES (
             ${event.offset},
             ${event.type},
             ${event.idempotencyKey ?? null},
@@ -98,13 +199,33 @@ export class StreamBrowserDatabase {
         `),
       );
     });
+    return this.#eventsAfterVirtualIndex(eventCountBefore);
   }
 
   async info(): Promise<StreamDatabaseInfo> {
-    return {
-      ...(await this.sqlocal.getDatabaseInfo()),
-      crossOriginIsolated: globalThis.crossOriginIsolated,
-    };
+    if (this.#infoRefresh === undefined) {
+      this.#infoRefresh = (async () => {
+        await navigator.storage?.persist?.();
+        try {
+          return {
+            ...(await this.sqlocal.getDatabaseInfo()),
+            crossOriginIsolated: globalThis.crossOriginIsolated,
+          };
+        } finally {
+          this.#infoRefresh = undefined;
+        }
+      })();
+    }
+    return this.#infoRefresh;
+  }
+
+  async #eventsAfterVirtualIndex(virtualIndex: number) {
+    return this.sqlocal.sql<StreamEventRow>`
+      SELECT virtual_index, offset, type, idempotency_key, created_at, raw_json
+      FROM events
+      WHERE virtual_index > ${virtualIndex}
+      ORDER BY virtual_index ASC
+    `;
   }
 
   async download() {
@@ -118,7 +239,12 @@ export class StreamBrowserDatabase {
   }
 
   async clear() {
-    await this.sqlocal.deleteDatabaseFile();
+    this.clearPendingWrites();
+    await this.sqlocal.sql`DELETE FROM events`;
+  }
+
+  async compact() {
+    await this.sqlocal.sql`VACUUM`;
   }
 }
 

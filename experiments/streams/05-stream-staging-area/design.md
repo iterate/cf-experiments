@@ -432,7 +432,7 @@ implementation. We are NOT preserving backwards compatibility with either.
 
 ## Resolved decisions (all 2026-06-02)
 
-Working reference implementation: `src/trials/processor-shape-trial.ts` (compiles).
+Working reference implementation: `src/stream-processor.ts (+ stream-processor.test.ts)` (compiles).
 
 - **Processor = contract + implementation**, two separate objects.
 - **Implementation = `build(deps) -> { afterAppend }`.** `build` is the only place
@@ -441,11 +441,27 @@ Working reference implementation: `src/trials/processor-shape-trial.ts` (compile
   the reduced `state` (the snapshot). This split is what makes both unit-testable.
 - **No `onStart`.** Setup is done in `build`, lazily on first use, or via a
   `processorStarted` *event* the processor consumes.
-- **`afterAppend` is synchronous** (returns void). It receives `event`,
-  `previousState`, `state`, and four capabilities: `append` (fire-and-forget),
-  `appendAndWait` (awaitable), `blockProcessorUntil(() => work)` (backpressure; must be
-  called synchronously), `waitUntil(promise)` (detached). Sync forces an explicit
-  block-vs-detach choice.
+- **`afterAppend` is per-event and synchronous** (a switch statement, returns void).
+  NOT batch-shaped. It receives `event`, `previousState`, `state`, and four
+  capabilities: `append` (fire-and-forget background; the runner keeps it alive via
+  `waitUntil`), `appendAndWait` (awaitable; use inside `blockProcessorUntil`/`waitUntil`),
+  `blockProcessorUntil(() => work)`, `waitUntil(promise)` (detached lifetime).
+- **Two usage patterns, and "when do we persist the processed offset?" is the axis:**
+  - *Default (high-volume / fire-and-forget):* effects fire in the background; the runner
+    advances and persists the offset **optimistically, coalesced once per delivered
+    batch**. A lost effect is fixed by reconcile-forward (the processor notices on a later
+    `afterAppend` by comparing `state`/reality). Side-effect ordering is best-effort;
+    processors must be written reconcile-tolerant.
+  - *Durable job queue (low-volume), opt-in via `blockProcessorUntil`:* its true meaning
+    is "this work is part of what 'processed' means — **do not checkpoint past this event
+    until it completes**." The runner awaits the blocker, persists `{state, offset}`, then
+    continues. Crash before completion => the event is re-delivered and re-processed
+    (at-least-once). Rare, so the serial cost is acceptable.
+- **Bulk-write batching lives in the db layer, not the hook.** Because `afterAppend` no
+  longer blocks by default, the runner rips through a delivered batch synchronously, so a
+  fire-and-forget `db.write(event)` that debounces/coalesces internally yields one batched
+  SQLite transaction per delivered batch — preserving the batch/row write-mode
+  optimization without a batch-shaped hook. (Blocking was what defeated debounce earlier.)
 - **Type narrowing of `afterAppend` args is free** because the implementation is an
   object literal passed through a generic function (`implementProcessor`). Proven that
   class inheritance (method override OR field arrow, generic or concrete base) does NOT
@@ -466,16 +482,12 @@ Working reference implementation: `src/trials/processor-shape-trial.ts` (compile
   `waitUntil`. Proven for the browser: `withStreamProcessor` builds the runner, wraps
   `runner.processEventBatch` in a capnweb `SubscriptionSink`, calls `subscribe()` with
   `runner.afterOffset()`. Same runner code as the DO; only the two ports differ.
-- **Two side-effect hooks: per-event `afterAppend` and per-batch `afterEventBatch`.**
-  `afterAppend` gets the narrowed `ConsumedEvent` (business logic). `afterEventBatch`
-  gets the RAW new events of one delivered batch (bulk IO — e.g. one SQLite
-  transaction), which both preserves the existing browser batch/row write-mode
-  optimization and sidesteps the wildcard-`consumes` typing hole. The browser SQLite
-  projector is `consumes: []` + `afterEventBatch` that writes the batch via
-  `blockProcessorUntil(() => db.insertEventBatch(...))`.
-- **Runner persists the snapshot once per batch** (after side effects), not per event.
-  Batch is the unit of progress; a crash mid-batch re-delivers and re-runs the batch
-  (idempotent via offset dedup + SQLite `INSERT OR IGNORE`).
+- **The browser SQLite projector** is `consumes: ["*"]`, no `reduce`, and an `afterAppend`
+  that does a fire-and-forget `db.write(event)` (the db coalesces into batched
+  transactions). Its resume cursor is the side-effect target itself —
+  `afterOffset = SELECT MAX(offset) FROM events` — so no separate snapshot is needed and a
+  lost write is just re-delivered and re-written via `INSERT OR IGNORE`. Proven through
+  the same `createProcessorRunner` + `withStreamProcessor` as node/DO.
 - **Builtin (inline) processors have a `beforeAppend` gate; subscription processors do
   not.** Three hook tiers:
   - Contract (pure, portable): `reduce` only.
@@ -490,20 +502,51 @@ Working reference implementation: `src/trials/processor-shape-trial.ts` (compile
   would smear admission logic into the pure reducer that ships to browser projections.
   Reference: os `packages/shared/src/streams/circuit-breaker.ts`. `beforeAppend` is sync
   today (matches os); async is a future extension if authorization needs I/O.
+- **The core processor folds stream bookkeeping + child-stream topology + the circuit
+  breaker into ONE inline builtin** (not separate processors), mirroring os core +
+  circuit-breaker.ts:
+  - `beforeAppend` = the breaker gate (reject while `paused`, allowlisting `resumed`/`woken`).
+  - `reduce` = bookkeeping (count, maxOffset) + token-bucket metering (every non-control
+    event spends a token; configured/paused/resumed reset) + `childPaths` (immediate child
+    from a `child-stream-created`) + namespace/path/incarnation.
+  - `afterAppend` = trip the breaker (emit `paused` when tokens went negative) + propagate
+    `child-stream-created` to every ancestor on creation (cross-stream, via a
+    `deps.appendToStream` capability the Stream DO supplies from its namespace binding).
+  Demonstrated AND executed in the trial (`coreContract`/`core` + `CoreStreamSim`):
+  `exampleChildStreamTopology()` => ancestors get `["/a"]`,`["/a/b"]`,`["/a/b/c"]`;
+  `exampleCircuitBreaker()` => trips after the burst budget, later appends rejected. The
+  trial now runs under `tsx`, not just typecheck.
+
+- **`afterAppend` gets the stream's high-water-mark as `head: { offset, createdAt }` —
+  raw facts only, no derived fields.** The stream piggybacks it on each delivery:
+  `processEventBatch({ events, headOffset, headCreatedAt })` (no extra round-trip; the core
+  already tracks `maxOffset`). The processor deduces what it wants from `head` + `event`:
+  offset lag = `head.offset - event.offset`, time lag =
+  `Date.parse(head.createdAt) - Date.parse(event.createdAt)`, caught-up =
+  `event.offset >= head.offset`. Works through replay (a backfill batch carries the real
+  head) and subsumes first-attach suppression (`if (event.offset < head.offset) return;`).
+
+- **Append→delivery round-trip latency is measured on the RECEIVE side, never by
+  awaiting `append()`.** When instrumented, the runner stamps a wall-clock send time into
+  a reserved metadata key (`events.iterate.com/instrument/appended-at-ms`) on each append;
+  when that event is delivered back in `processEventBatch`, latency = `Date.now() -
+  appendedAtMs`. No correlation map, no await — `append` stays fire-and-forget. Exact for
+  the self-loop (same isolate appends and receives); cross-isolate is subject to clock
+  skew. Stamping is opt-in (only when an `onAppendRoundTrip` sink is provided) so normal
+  events stay clean. CF note: `Date.now()` is frozen within a turn and advances on IO, so
+  the append-turn vs deliver-turn correctly capture elapsed wall-clock across the network.
+  Demonstrated + executed in the trial via `exampleAppendRoundTrip` (loopback stream).
 
 ## Open questions
 
 - Where the inbound/outbound subscription handshake + connection wiring lives, and how
   the disposable test fixtures layer (connectStream -> subscription -> runner). This is
   where the original "run a processor in 3 subscription runtimes" goal lives.
-- `progress` (read-only `{ maxOffset, eventCount }`) wiring into `reduce`/`afterAppend`
-  — agreed in principle, not yet in the trial.
 
 ## Deferred (explicitly not now)
 
-- First-attach side-effect suppression: with the catch-up/live split gone, `afterAppend`
-  runs for replayed history too, so a processor attaching to a stream with history
-  re-runs side effects for all of it. Acceptable for now.
+- First-attach side-effect suppression as a runner *policy*: no longer needed as a
+  framework feature — a processor self-services it with `if (event.offset < head.offset) return;`.
 - Gap repair / out-of-order live delivery (the old `consumeLiveProcessorEvent`).
 
 # Future work

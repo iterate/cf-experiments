@@ -1,9 +1,15 @@
 import { newWorkersRpcResponse, type RpcStub } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
+import { z } from "zod";
 import type { StreamEvent } from "@cf-experiments/shared/event";
-import { createSimpleStreamProcessorRunner } from "@cf-experiments/shared/simple-stream-processor";
+import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
-import { echoProcessor } from "./demo-processors/echo-processor.js";
+import {
+  createProcessorRunner,
+  implementProcessor,
+  streamPortFromRpc,
+  type ProcessorRunner,
+} from "./stream-processor.js";
 import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
 import type {
   StreamCursor,
@@ -14,8 +20,35 @@ import type {
   SubscriptionSink,
 } from "./stream-types.js";
 
+// The built-in "echo" processor, defined with the same model that runs in Node
+// (stream-processor.test.ts) and the browser. The DO is just one host.
+const echoContract = defineProcessorContract({
+  slug: "echo",
+  version: "0.1.0",
+  description: "Echoes input events back as output events.",
+  stateSchema: z.object({ seen: z.number().int().min(0).default(0) }),
+  initialState: {},
+  events: {
+    "test.processor.input": { description: "in", payloadSchema: z.unknown() },
+    "test.processor.output": { description: "out", payloadSchema: z.object({ seen: z.number() }) },
+  },
+  consumes: ["test.processor.input"],
+  emits: ["test.processor.output"],
+  reduce({ state, event }) {
+    return event.type === "test.processor.input" ? { seen: state.seen + 1 } : state;
+  },
+});
+
+const echo = implementProcessor(echoContract, () => ({
+  afterAppend({ event, state, append }) {
+    if (event.type !== "test.processor.input") return;
+    append({ type: "test.processor.output", payload: { seen: state.seen } });
+  },
+}));
+
 export class StreamProcessorRunner extends DurableObject {
   #stream: RpcStub<StreamRpc> | undefined;
+  #runner: ProcessorRunner | undefined;
 
   // Stream durable object calls fetch on us to wake us up and establish a capnweb rpc connection
   // whenever an event is appended to a stream that this StreamProcessorRunner is subscribed to,
@@ -47,6 +80,17 @@ export class StreamProcessorRunner extends DurableObject {
     this.#stream?.[Symbol.dispose]();
     this.#stream = args.stream.dup();
     this.ctx.storage.kv.put("processorSlug", subscriber.processorSlug);
+    // Same runner as Node/browser. KV is the storage port; the stream stub is the
+    // stream port. The DO stays the sink and just delegates processEventBatch.
+    this.#runner = createProcessorRunner({
+      processor: echo,
+      deps: undefined,
+      storage: {
+        load: () => this.ctx.storage.kv.get<StreamProcessorRunnerSnapshot>("snapshot"),
+        save: (snapshot) => void this.ctx.storage.kv.put("snapshot", snapshot),
+      },
+      stream: streamPortFromRpc(this.#stream),
+    });
     return {
       sink: new StreamProcessorRunnerRpcTarget(this),
       afterOffset: this.ctx.storage.kv.get<StreamProcessorRunnerSnapshot>("snapshot")?.offset,
@@ -62,32 +106,11 @@ export class StreamProcessorRunner extends DurableObject {
   }
 
   /** Consumes a batch delivered by a stream subscription sink. */
-  async processEventBatch(args: { events: StreamEvent[] }) {
-    if (this.ctx.storage.kv.get<StreamProcessorSlug>("processorSlug") === undefined) {
-      throw new Error("StreamProcessorRunner must be initialized first");
-    }
-    if (this.#stream === undefined) {
+  async processEventBatch(args: { events: StreamEvent[]; headOffset?: number; headCreatedAt?: string }) {
+    if (this.#runner === undefined) {
       throw new Error("StreamProcessorRunner has not been attached to a stream");
     }
-
-    const stream = this.#stream;
-
-    const runner = await createSimpleStreamProcessorRunner({
-      processor: echoProcessor,
-      deps: { env: this.env },
-      append: (event) => {
-        void stream.append({ event }).catch((error) => {
-          console.error("StreamProcessorRunner background append failed", error);
-        });
-      },
-      appendAndWait: (event) => stream.append({ event }),
-      loadSnapshot: () => this.ctx.storage.kv.get<StreamProcessorRunnerSnapshot>("snapshot"),
-      saveSnapshot: (snapshot) => this.ctx.storage.kv.put("snapshot", snapshot),
-    });
-
-    for (const event of args.events) {
-      await runner.processEvent(event);
-    }
+    await this.#runner.processEventBatch(args);
   }
 }
 
