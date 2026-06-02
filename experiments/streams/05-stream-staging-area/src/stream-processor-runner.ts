@@ -6,22 +6,16 @@ import {
   type SimpleStreamProcessor,
   type SimpleStreamProcessorSnapshot,
 } from "@cf-experiments/shared/simple-stream-processor";
-import { makeRpcTargetClass, type RpcMethods } from "@cf-experiments/shared/rpc-target";
+import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import { echoProcessor } from "./demo-processors/echo-processor.js";
 import type {
   CoreStreamState,
   SubscriptionConfiguredEvent,
 } from "./core-stream-processor.js";
-import type { StreamRpc, SubscriptionRpcTarget } from "./stream-types.js";
+import type { StreamRpc } from "./stream-types.js";
 
 export type ProcessorSlug = "echo";
 type ProcessorState = { seen: number };
-
-export type StreamProcessorRunnerInitOutboundSubscriptionArgs = {
-  streamRpcTarget: StreamRpc;
-  subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
-  streamSnapshot: CoreStreamState;
-};
 
 type CapnWebStreamRpcTarget = RpcStub<StreamRpc>;
 
@@ -29,6 +23,7 @@ export class StreamProcessorRunner extends DurableObject {
   #processor: SimpleStreamProcessor<ProcessorState, { env: Env }> | undefined;
   #streamRpcTarget: CapnWebStreamRpcTarget | undefined;
 
+  /** Opens the CaptainWeb RPC API for this stream processor runner. */
   async fetch(request: Request) {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("WebSocket only", { status: 400 });
@@ -41,6 +36,10 @@ export class StreamProcessorRunner extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  /**
+   * Initializes an outbound subscription started by a stream Durable Object.
+   * Returns the last processed offset so the stream can replay exactly the missing events.
+   */
   initOutboundSubscription(args: {
     streamRpcTarget: CapnWebStreamRpcTarget;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
@@ -62,11 +61,7 @@ export class StreamProcessorRunner extends DurableObject {
     };
   }
 
-  initialize(args: { processorSlug: ProcessorSlug }) {
-    this.#setProcessorSlug(args.processorSlug);
-    return { processorSlug: args.processorSlug };
-  }
-
+  /** Returns durable processor state for test fixtures and operator inspection. */
   status() {
     return {
       processorSlug: this.ctx.storage.kv.get<ProcessorSlug>("processorSlug"),
@@ -74,6 +69,7 @@ export class StreamProcessorRunner extends DurableObject {
     };
   }
 
+  /** Consumes a batch delivered by a stream subscription RPC target. */
   async consumeEvents(args: { events: StreamEvent[] }) {
     const runner = await this.#runner();
     for (const event of args.events) {
@@ -89,7 +85,6 @@ export class StreamProcessorRunner extends DurableObject {
       appendAndWait: (event) => this.#appendAndWait(event),
       loadSnapshot: () => this.#snapshot(),
       saveSnapshot: (snapshot) => this.ctx.storage.kv.put("snapshot", snapshot),
-      waitUntil: (promise) => this.ctx.waitUntil(promise),
     });
   }
 
@@ -112,13 +107,11 @@ export class StreamProcessorRunner extends DurableObject {
   }
 
   #append(event: StreamEventInput) {
-    this.ctx.waitUntil(
-      Promise.resolve()
-        .then(() => this.#readStreamRpcTarget().append({ event }))
-        .catch((error) => {
-          console.error("StreamProcessorRunner background append failed", error);
-        }),
-    );
+    void this.#readStreamRpcTarget()
+      .append({ event })
+      .catch((error) => {
+        console.error("StreamProcessorRunner background append failed", error);
+      });
   }
 
   #appendAndWait(event: StreamEventInput) {
@@ -140,22 +133,8 @@ function processorForSlug(
   throw new Error(`Unknown stream processor slug: ${slug}`);
 }
 
-export type StreamProcessorRunnerRpc = SubscriptionRpcTarget &
-  Omit<
-    Pick<
-      RpcMethods<StreamProcessorRunner, "fetch">,
-      "initOutboundSubscription" | "initialize" | "status" | "consumeEvents"
-    >,
-    "initOutboundSubscription" | "consumeEvents"
-  > & {
-    initOutboundSubscription(args: StreamProcessorRunnerInitOutboundSubscriptionArgs): {
-      afterOffset?: number;
-    };
-  };
+export const StreamProcessorRunnerRpcTarget = makeRpcTargetClass(StreamProcessorRunner, {
+  exclude: ["fetch"],
+});
 
-export const StreamProcessorRunnerRpcTarget = makeRpcTargetClass<StreamProcessorRunnerRpc, StreamProcessorRunner>(
-  StreamProcessorRunner,
-  {
-    exclude: ["fetch"],
-  },
-);
+export type StreamProcessorRunnerRpc = InstanceType<typeof StreamProcessorRunnerRpcTarget>;

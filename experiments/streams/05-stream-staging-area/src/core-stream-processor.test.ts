@@ -38,28 +38,11 @@ describe("core stream processor", () => {
         },
       }),
     );
-    state = coreStreamProcessorContract.stateSchema.parse(
-      reduce({
-        contract: coreStreamProcessorContract,
-        state,
-        event: {
-          offset: 2,
-          type: "events.iterate.com/stream/configured",
-          payload: {
-            config: {
-              simulatedStorageSyncDelayMs: 0,
-            },
-          },
-          createdAt: "2026-06-01T12:00:01.000Z",
-        },
-      }),
-    );
-
     expect(state).toMatchObject({
       createdAt: "2026-06-01T12:00:00.000Z",
-      eventCount: 3,
+      eventCount: 2,
       incarnationId: "incarnation-1",
-      maxOffset: 2,
+      maxOffset: 1,
       namespace: "stream",
       path: "test",
       subscriptionsByKey: {},
@@ -145,29 +128,5 @@ describe("core stream processor", () => {
       eventCount: 4,
       maxOffset: 3,
     });
-  });
-
-  it("keeps configuration in core state", () => {
-    let state = coreStreamProcessorContract.stateSchema.parse(
-      coreStreamProcessorContract.initialState,
-    );
-    state = coreStreamProcessorContract.stateSchema.parse(
-      reduce({
-        contract: coreStreamProcessorContract,
-        state,
-        event: {
-          offset: 0,
-          type: "events.iterate.com/stream/configured",
-          payload: {
-            config: {
-              simulatedStorageSyncDelayMs: 25,
-            },
-          },
-          createdAt: "2026-06-01T12:00:00.000Z",
-        },
-      }),
-    );
-
-    expect(state.config.simulatedStorageSyncDelayMs).toBe(25);
   });
 });

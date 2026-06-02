@@ -70,7 +70,7 @@ type AppendDurability =
       checkpointEveryUnconfirmedAppends?: number;
     };
 
-export class Stream extends DurableObject {
+export class LegacyStream extends DurableObject {
   #incarnationId = crypto.randomUUID();
   #settings = defaultSettings();
   #unconfirmedWriteCount = 0;
@@ -371,7 +371,7 @@ export class Stream extends DurableObject {
   async appendBatchDebug(args: {
     events: StreamEventInput[];
     durability?: AppendDurability;
-  }): Promise<{ events: StreamEvent[]; debug: ReturnType<Stream["debug"]> }> {
+  }): Promise<{ events: StreamEvent[]; debug: ReturnType<LegacyStream["debug"]> }> {
     return {
       events: await this.appendBatch(args),
       debug: this.debug(),
@@ -1173,7 +1173,7 @@ function isDisposable(value: unknown): value is Disposable {
 }
 
 export type StreamRpc = Omit<
-  Stream,
+  LegacyStream,
   | keyof DurableObject
   | "getCapability"
   | "fetch"
@@ -1204,7 +1204,7 @@ type BaseStreamRpc = Omit<
   | "subscribeAfterAppendVolatile"
 >;
 
-const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
+const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, LegacyStream>(LegacyStream, {
   /**
    * `streamForSession()` and `releaseSessionSubscribers()` are session-internal.
    * If a client can call `streamForSession()` directly, it can create a stream
@@ -1229,14 +1229,14 @@ const BaseStreamRpcTarget = makeRpcTargetClass<BaseStreamRpc, Stream>(Stream, {
 });
 
 export class StreamRpcTarget extends BaseStreamRpcTarget {
-  #stream: Stream;
+  #stream: LegacyStream;
   #clientMain: RpcStub<AfterAppendClientMain> | undefined;
   #subscribers = new Set<StreamSubscriber>();
   #stringSubscribers = new Set<StringStreamSubscriber>();
   #batchedStringSubscribers = new Set<BatchedStringStreamSubscriber>();
   #afterAppendClientSubscribers = new Set<AfterAppendClientSubscriber>();
 
-  constructor(stream: Stream) {
+  constructor(stream: LegacyStream) {
     super(stream);
     this.#stream = stream;
   }

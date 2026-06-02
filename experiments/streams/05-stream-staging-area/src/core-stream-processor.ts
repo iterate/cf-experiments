@@ -10,9 +10,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
     path: z.string().trim().min(1),
     createdAt: z.string(),
     incarnationId: z.string().trim().min(1),
-    config: z.object({
-      simulatedStorageSyncDelayMs: z.number().int().min(0).default(0).nullable(),
-    }),
     eventCount: z.number().int().min(0),
     maxOffset: z.number().int().min(-1),
     subscriptionsByKey: z.record(
@@ -52,9 +49,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
     path: "uninitialized",
     createdAt: "uninitialized",
     incarnationId: "uninitialized",
-    config: {
-      simulatedStorageSyncDelayMs: 0,
-    },
     eventCount: 0,
     maxOffset: -1,
     subscriptionsByKey: {},
@@ -71,14 +65,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
       description: "Records that a Durable Object incarnation has started running this stream.",
       payloadSchema: z.object({
         incarnationId: z.string().trim().min(1),
-      }),
-    },
-    "events.iterate.com/stream/configured": {
-      description: "Configures stream-level options.",
-      payloadSchema: z.object({
-        config: z.object({
-          simulatedStorageSyncDelayMs: z.number().int().min(0),
-        }),
       }),
     },
     "events.iterate.com/stream/subscription-configured": {
@@ -110,7 +96,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "*",
     "events.iterate.com/stream/created",
     "events.iterate.com/stream/woken",
-    "events.iterate.com/stream/configured",
     "events.iterate.com/stream/subscription-configured",
   ],
   emits: [],
@@ -143,16 +128,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
         return {
           ...next,
           incarnationId: event.payload.incarnationId,
-        };
-
-      // events.iterate.com/stream/configured is used for runtime configuration of the stream
-      case "events.iterate.com/stream/configured":
-        return {
-          ...next,
-          config: {
-            ...next.config,
-            ...event.payload.config,
-          },
         };
 
       // events.iterate.com/stream/subscription-configured is used to configure outbound subscriptions

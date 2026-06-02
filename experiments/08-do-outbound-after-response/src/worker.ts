@@ -1,10 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
 
 type RunRecord =
-  | { phase: "fetching"; via: "inline" | "alarm"; startedAt: number; incarnationId: string }
+  | { phase: "fetching"; via: RunVia; startedAt: number; incarnationId: string }
   | {
       phase: "done";
-      via: "inline" | "alarm";
+      via: RunVia;
       status: number;
       body: string;
       finishedAt: number;
@@ -12,12 +12,13 @@ type RunRecord =
     }
   | {
       phase: "error";
-      via: "inline" | "alarm";
+      via: RunVia;
       error: string;
       finishedAt: number;
       incarnationId: string;
     };
 
+type RunVia = "rpc-inline" | "do-fetch" | "awaited-rpc" | "alarm";
 type PendingAlarmFetch = { runId: string; url: string; via: "alarm" };
 
 /**
@@ -33,9 +34,20 @@ export class OutboundAfterResponseProbe extends DurableObject<Env> {
 
   /** Fire-and-forget fetch; RPC returns before fetch completes. */
   startInline(args: { runId: string; url: string }) {
-    void this.#slowFetch({ runId: args.runId, url: args.url, via: "inline" });
+    void this.#slowFetch({ runId: args.runId, url: args.url, via: "rpc-inline" });
     return {
-      via: "inline" as const,
+      via: "rpc-inline" as const,
+      runId: args.runId,
+      incarnationId: this.#incarnationId,
+      returnedAt: Date.now(),
+    };
+  }
+
+  /** Awaited RPC: caller stays blocked until the outbound fetch finishes or is cancelled. */
+  async doSlowStuff(args: { runId: string; url: string }) {
+    await this.#slowFetch({ runId: args.runId, url: args.url, via: "awaited-rpc" });
+    return {
+      via: "awaited-rpc" as const,
       runId: args.runId,
       incarnationId: this.#incarnationId,
       returnedAt: Date.now(),
@@ -65,11 +77,37 @@ export class OutboundAfterResponseProbe extends DurableObject<Env> {
 
   async getRun(args: { runId: string }) {
     const record = await this.ctx.storage.get<RunRecord>(runKey(args.runId));
-    if (record === undefined) return { phase: "missing" as const };
-    return record;
+    const rootAbortedAt = await this.ctx.storage.get<number>(rootAbortKey(args.runId));
+    if (record === undefined) return { phase: "missing" as const, rootAbortedAt };
+    return { ...record, rootAbortedAt };
   }
 
-  async #slowFetch(args: { runId: string; url: string; via: "inline" | "alarm" }) {
+  async markRootAbort(args: { runId: string }) {
+    await this.ctx.storage.put(rootAbortKey(args.runId), Date.now());
+    return { marked: true };
+  }
+
+  async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname !== "/inline" || request.method !== "POST") {
+      return new Response("POST /inline", { status: 404 });
+    }
+
+    const body = (await request.json()) as { runId?: string; url?: string };
+    if (typeof body.runId !== "string" || typeof body.url !== "string") {
+      return new Response("body needs runId and url", { status: 400 });
+    }
+
+    void this.#slowFetch({ runId: body.runId, url: body.url, via: "do-fetch" });
+    return Response.json({
+      via: "do-fetch" as const,
+      runId: body.runId,
+      incarnationId: this.#incarnationId,
+      returnedAt: Date.now(),
+    });
+  }
+
+  async #slowFetch(args: { runId: string; url: string; via: RunVia }) {
     const key = runKey(args.runId);
     await this.ctx.storage.put(key, {
       phase: "fetching",
@@ -105,12 +143,16 @@ function runKey(runId: string) {
   return `run:${runId}`;
 }
 
+function rootAbortKey(runId: string) {
+  return `root-abort:${runId}`;
+}
+
 export interface Env {
   PROBE: DurableObjectNamespace<OutboundAfterResponseProbe>;
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const name = url.searchParams.get("name");
     if (name === null || name === "") {
@@ -129,6 +171,39 @@ export default {
         return new Response("body needs runId and url", { status: 400 });
       }
       return Response.json(await stub.startInline({ runId: body.runId, url: body.url }));
+    }
+
+    if (url.pathname === "/do-fetch-inline" && request.method === "POST") {
+      return stub.fetch(new Request("https://durable-object/inline", request));
+    }
+
+    if (url.pathname === "/await-rpc" && request.method === "POST") {
+      const body = (await request.json()) as { runId?: string; url?: string };
+      if (typeof body.runId !== "string" || typeof body.url !== "string") {
+        return new Response("body needs runId and url", { status: 400 });
+      }
+      request.signal.addEventListener("abort", () => {
+        ctx.waitUntil(stub.markRootAbort({ runId: body.runId! }));
+      });
+      return Response.json(await stub.doSlowStuff({ runId: body.runId, url: body.url }));
+    }
+
+    if (url.pathname === "/root-fire-and-forget" && request.method === "POST") {
+      const body = (await request.json()) as { runId?: string; url?: string };
+      if (typeof body.runId !== "string" || typeof body.url !== "string") {
+        return new Response("body needs runId and url", { status: 400 });
+      }
+      void stub.startInline({ runId: body.runId, url: body.url });
+      return Response.json({ via: "root-fire-and-forget", runId: body.runId, returnedAt: Date.now() });
+    }
+
+    if (url.pathname === "/root-wait-until" && request.method === "POST") {
+      const body = (await request.json()) as { runId?: string; url?: string };
+      if (typeof body.runId !== "string" || typeof body.url !== "string") {
+        return new Response("body needs runId and url", { status: 400 });
+      }
+      ctx.waitUntil(stub.startInline({ runId: body.runId, url: body.url }));
+      return Response.json({ via: "root-wait-until", runId: body.runId, returnedAt: Date.now() });
     }
 
     if (url.pathname === "/alarm" && request.method === "POST") {
@@ -158,8 +233,12 @@ export default {
         "DO outbound fetch after inbound response ends",
         "",
         "GET  /debug?name=...",
-        "POST /inline?name=...   JSON { runId, url } — void slow fetch, return immediately",
-        "POST /alarm?name=...    JSON { runId, url, delayMs? } — alarm does fetch",
+        "POST /inline?name=...                RPC starts void slow fetch, then root awaits RPC return",
+        "POST /do-fetch-inline?name=...       DO fetch starts void slow fetch and returns immediately",
+        "POST /await-rpc?name=...             root awaits RPC; DO awaits slow outbound fetch",
+        "POST /root-fire-and-forget?name=...  root voids RPC then returns immediately",
+        "POST /root-wait-until?name=...       root ctx.waitUntil(RPC) then returns immediately",
+        "POST /alarm?name=...                 JSON { runId, url, delayMs? } — alarm does fetch",
         "GET  /status?name=...&runId=...",
       ].join("\n"),
       { headers: { "content-type": "text/plain; charset=utf-8" } },

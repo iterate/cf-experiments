@@ -218,7 +218,7 @@ export class BenchmarkRunner extends DurableObject {
     const payloadBytes = args.payloadBytes ?? 256;
     const batchSize = args.batchSize ?? 100;
     const runId = args.runId ?? crypto.randomUUID();
-    const stub = this.env.STREAM.getByName(stream);
+    const stub = this.env.LEGACY_STREAM.getByName(stream);
 
     const startedAt = Date.now();
     let committed = 0;
@@ -270,7 +270,7 @@ export class BenchmarkRunner extends DurableObject {
     const config = normalizeAudioChaosConfig(args);
     const totalEvents = config.publishers * config.framesPerPublisher;
     const audio = makeAudioFixture(config);
-    const stream = this.env.STREAM.getByName(config.stream);
+    const stream = this.env.LEGACY_STREAM.getByName(config.stream);
     if (config.streamKind === "durable") {
       await stream.patchSettings({
         defaultAppendDurabilityMode: config.durability,
@@ -1192,7 +1192,7 @@ async function debugSubscriberCount(env: Env, config: AudioChaosConfig): Promise
   if (config.streamKind === "minimal-ws") {
     return (await env.MINIMAL_STREAM.getByName(config.stream).debug()).subscribers;
   }
-  const debug = await env.STREAM.getByName(config.stream).debug();
+  const debug = await env.LEGACY_STREAM.getByName(config.stream).debug();
   if (config.streamKind === "raw-volatile") return debug.rawVolatileSubscribers;
   if (config.streamKind === "capnweb-after-append") return debug.afterAppendClientSubscribers;
   if (config.streamKind === "json-volatile") return debug.jsonVolatileSubscribers.length;
@@ -1256,7 +1256,7 @@ async function connectStreamRpc(
   stream: string,
   streamKind: StreamKind,
 ): Promise<StreamRpcFixture> {
-  const response = await env.STREAM.getByName(stream).fetch("https://stream.internal/", {
+  const response = await env.LEGACY_STREAM.getByName(stream).fetch("https://stream.internal/", {
     headers: { Upgrade: "websocket" },
   });
   const webSocket = response.webSocket;
@@ -1277,7 +1277,7 @@ async function connectStreamRpc(
 async function connectAfterAppendStream(env: Env, stream: string): Promise<AfterAppendFixture> {
   const inbox = new AfterAppendInbox();
   const clientMain = new AfterAppendClientMainTarget((event) => inbox.push(event));
-  const response = await env.STREAM.getByName(stream).fetch("https://stream.internal/", {
+  const response = await env.LEGACY_STREAM.getByName(stream).fetch("https://stream.internal/", {
     headers: { Upgrade: "websocket" },
   });
   const webSocket = response.webSocket;
@@ -1306,7 +1306,7 @@ async function connectRawStream(
       ? await env.MINIMAL_STREAM.getByName(stream).fetch("https://minimal-stream.internal/", {
           headers: { Upgrade: "websocket" },
         })
-      : await env.STREAM.getByName(stream).fetch(
+      : await env.LEGACY_STREAM.getByName(stream).fetch(
           "https://stream.internal/?transport=raw-volatile",
           {
             headers: { Upgrade: "websocket" },

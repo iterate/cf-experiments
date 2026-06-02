@@ -5,22 +5,21 @@ import {
   type SimpleStreamProcessor,
   type SimpleStreamProcessorSnapshot,
 } from "@cf-experiments/shared/simple-stream-processor";
-import type { JonasStreamRpc } from "./jonas-stream.js";
-import type { StreamProcessorRpc } from "./stream-processor.js";
-import { JonasStreamAckFrame, JonasStreamEventsFrame } from "./jonas-stream-types.js";
+import type { StreamProcessorRunnerRpc } from "./stream-processor.js";
+import { StreamAckFrame, StreamEventsFrame, type StreamRpc } from "./stream-types.js";
 
 const defaultWorkerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 
 type FetchEndpoint = (request: Request) => Promise<Response>;
 type PendingAppend = PromiseWithResolvers<StreamEvent>;
 
-export type JonasStreamMessage = {
+export type StreamMessage = {
   direction: "out" | "in";
   data: string;
 };
 
-export type JonasStreamRawClient = AsyncDisposable & {
-  wsMessages: JonasStreamMessage[];
+export type StreamRawClient = AsyncDisposable & {
+  wsMessages: StreamMessage[];
   append(event: StreamEventInput): void;
   appendAndWaitForResponse(
     event: StreamEventInput,
@@ -29,39 +28,39 @@ export type JonasStreamRawClient = AsyncDisposable & {
   stream(): AsyncIterableIterator<StreamEvent>;
 };
 
-export type JonasStreamCapnwebClient = AsyncDisposable & {
-  capnweb: RpcStub<JonasStreamRpc>;
+export type StreamCapnwebClient = AsyncDisposable & {
+  capnweb: RpcStub<StreamRpc>;
 };
 
-export type StreamProcessorCapnwebClient = AsyncDisposable & {
-  capnweb: RpcStub<StreamProcessorRpc>;
+export type StreamProcessorRunnerCapnwebClient = AsyncDisposable & {
+  capnweb: RpcStub<StreamProcessorRunnerRpc>;
 };
 
-export type JonasStreamFixture = AsyncDisposable & {
-  raw: JonasStreamRawClient;
-  capnweb: RpcStub<JonasStreamRpc>;
+export type StreamFixture = AsyncDisposable & {
+  raw: StreamRawClient;
+  capnweb: RpcStub<StreamRpc>;
   append(args: { event: StreamEventInput }): Promise<StreamEvent>;
   stream(): AsyncIterableIterator<StreamEvent>;
   withProcessor<State, Deps = undefined>(
     processor: SimpleStreamProcessor<State, Deps>,
     options?: { deps?: Deps },
-  ): Promise<JonasStreamProcessorFixture<State>>;
+  ): Promise<StreamProcessorFixture<State>>;
 };
 
-export type JonasStreamProcessorFixture<State> = AsyncDisposable & {
+export type StreamProcessorFixture<State> = AsyncDisposable & {
   snapshot(): SimpleStreamProcessorSnapshot<State>;
   done: Promise<SimpleStreamProcessorSnapshot<State>>;
 };
 
-export type JonasStreamEndpoint = {
+export type StreamEndpoint = {
   path?: string;
   workerUrl?: string;
   url?: string | URL;
   fetch?: FetchEndpoint;
 };
 
-export async function withStreamRaw(endpoint: JonasStreamEndpoint): Promise<JonasStreamRawClient> {
-  const wsMessages: JonasStreamMessage[] = [];
+export async function withStreamRaw(endpoint: StreamEndpoint): Promise<StreamRawClient> {
+  const wsMessages: StreamMessage[] = [];
   const events = messageInbox<StreamEvent>();
   const pendingAppends = new Map<string, PendingAppend>();
   const webSocket = await openWebSocket(endpoint, "raw-ws");
@@ -76,7 +75,7 @@ export async function withStreamRaw(endpoint: JonasStreamEndpoint): Promise<Jona
     wsMessages.push({ direction: "in", data });
     const frame: unknown = JSON.parse(data);
     if (isRecord(frame) && frame.op === "append-ack") {
-      const ack = JonasStreamAckFrame.parse(frame);
+      const ack = StreamAckFrame.parse(frame);
       const pending = pendingAppends.get(ack.appendKey);
       if (pending !== undefined) {
         pendingAppends.delete(ack.appendKey);
@@ -84,7 +83,7 @@ export async function withStreamRaw(endpoint: JonasStreamEndpoint): Promise<Jona
       }
       return;
     }
-    for (const event of JonasStreamEventsFrame.parse(frame).events) {
+    for (const event of StreamEventsFrame.parse(frame).events) {
       events.push(event);
     }
   });
@@ -120,10 +119,10 @@ export async function withStreamRaw(endpoint: JonasStreamEndpoint): Promise<Jona
 }
 
 export async function withStreamCapnweb(
-  endpoint: JonasStreamEndpoint,
-): Promise<JonasStreamCapnwebClient> {
+  endpoint: StreamEndpoint,
+): Promise<StreamCapnwebClient> {
   const webSocket = await openWebSocket(endpoint, "capnweb");
-  const capnweb = newWebSocketRpcSession<JonasStreamRpc>(webSocket);
+  const capnweb = newWebSocketRpcSession<StreamRpc>(webSocket);
 
   return {
     capnweb,
@@ -134,17 +133,17 @@ export async function withStreamCapnweb(
   };
 }
 
-export async function withStreamProcessorCapnweb(
-  endpoint: JonasStreamEndpoint,
-): Promise<StreamProcessorCapnwebClient> {
+export async function withStreamProcessorRunnerCapnweb(
+  endpoint: StreamEndpoint,
+): Promise<StreamProcessorRunnerCapnwebClient> {
   const webSocket = await openWebSocket(
     {
       ...endpoint,
-      url: streamProcessorUrl(endpoint),
+      url: streamProcessorRunnerUrl(endpoint),
     },
     "capnweb",
   );
-  const capnweb = newWebSocketRpcSession<StreamProcessorRpc>(webSocket);
+  const capnweb = newWebSocketRpcSession<StreamProcessorRunnerRpc>(webSocket);
 
   return {
     capnweb,
@@ -155,7 +154,7 @@ export async function withStreamProcessorCapnweb(
   };
 }
 
-export async function withStream(endpoint: JonasStreamEndpoint): Promise<JonasStreamFixture> {
+export async function withStream(endpoint: StreamEndpoint): Promise<StreamFixture> {
   const raw = await withStreamRaw(endpoint);
   const capnwebClient = await withStreamCapnweb(endpoint);
 
@@ -240,13 +239,13 @@ function messageInbox<T>(): AsyncIterableIterator<T> & {
   return inbox;
 }
 
-function send(webSocket: WebSocket, wsMessages: JonasStreamMessage[], frame: unknown) {
+function send(webSocket: WebSocket, wsMessages: StreamMessage[], frame: unknown) {
   const data = JSON.stringify(frame);
   wsMessages.push({ direction: "out", data });
   webSocket.send(data);
 }
 
-async function openWebSocket(endpoint: JonasStreamEndpoint, transport: "raw-ws" | "capnweb") {
+async function openWebSocket(endpoint: StreamEndpoint, transport: "raw-ws" | "capnweb") {
   const url = streamUrl(endpoint, transport);
   if (endpoint.fetch !== undefined) {
     const response = await endpoint.fetch(new Request(url, { headers: { Upgrade: "websocket" } }));
@@ -261,22 +260,22 @@ async function openWebSocket(endpoint: JonasStreamEndpoint, transport: "raw-ws" 
   return webSocket;
 }
 
-function streamUrl(endpoint: JonasStreamEndpoint, transport: "raw-ws" | "capnweb") {
+function streamUrl(endpoint: StreamEndpoint, transport: "raw-ws" | "capnweb") {
   const url =
     endpoint.url === undefined
       ? new URL(endpoint.workerUrl ?? defaultWorkerUrl)
       : new URL(endpoint.url);
-  if (endpoint.url === undefined) url.pathname = `/jonas/${endpoint.path ?? "default"}`;
+  if (endpoint.url === undefined) url.pathname = `/stream/${endpoint.path ?? "default"}`;
   if (transport !== "capnweb") url.searchParams.set("transport", transport);
   return url;
 }
 
-function streamProcessorUrl(endpoint: JonasStreamEndpoint) {
+function streamProcessorRunnerUrl(endpoint: StreamEndpoint) {
   const url =
     endpoint.url === undefined
       ? new URL(endpoint.workerUrl ?? defaultWorkerUrl)
       : new URL(endpoint.url);
-  if (endpoint.url === undefined) url.pathname = `/stream-processor/${endpoint.path ?? "default"}`;
+  if (endpoint.url === undefined) url.pathname = `/stream-processor-runner/${endpoint.path ?? "default"}`;
   return url;
 }
 

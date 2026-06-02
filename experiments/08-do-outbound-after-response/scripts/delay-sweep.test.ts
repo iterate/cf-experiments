@@ -13,7 +13,7 @@ import {
   slowCaptun,
   slowUrl,
   workerUrl,
-} from "./lib/outbound-probe.ts";
+} from "./lib/outbound-probe";
 
 const sweepMs = (process.env.SWEEP_MS ?? "1000,3000,8000,15000,30000,60000,90000,120000")
   .split(",")
@@ -64,5 +64,5 @@ describe(`delay sweep @ ${workerUrl}`, () => {
         ? "Summary: inline and alarm matched on result for all delays"
         : `Summary: diverged at delayMs=${diverged.map((r) => r.delayMs).join(", ")}`,
     );
-  }, 600_000);
+  }, 900_000);
 });

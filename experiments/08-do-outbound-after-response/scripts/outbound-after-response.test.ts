@@ -8,13 +8,16 @@
 import { describe, expect, it } from "vitest";
 import {
   formatOutcome,
+  pollBudgetMs,
+  pollRun,
+  postAlarm,
+  postInline,
   ray,
   runAlarmProbe,
-  runInlineProbe,
   slowCaptun,
   slowUrl,
   workerUrl,
-} from "./lib/outbound-probe.ts";
+} from "./lib/outbound-probe";
 
 const slowMs = Number(process.env.SLOW_MS ?? 8_000);
 
@@ -25,17 +28,19 @@ describe(`DO outbound after response @ ${workerUrl}`, () => {
     const runId = crypto.randomUUID();
     const url = slowUrl(slowOrigin.url, slowMs);
 
-    const { start, outcome } = await runInlineProbe({ name, runId, url });
-    const returnLatencyMs = Date.now() - start.body.returnedAt;
-    console.log(
-      `inline-start cf-ray=${ray(start.response)} returnedIn=${returnLatencyMs}ms ${formatOutcome(outcome)}`,
-    );
+    const httpStart = Date.now();
+    const start = await postInline(name, runId, url);
+    const httpMs = Date.now() - httpStart;
+    console.log(`inline-start cf-ray=${ray(start.response)} httpMs=${httpMs}`);
 
     expect(start.response.status).toBe(200);
-    expect(returnLatencyMs).toBeLessThan(2_000);
+    expect(httpMs).toBeLessThan(2_000);
+
+    const outcome = await pollRun({ name, runId, budgetMs: pollBudgetMs(slowMs) });
+    console.log(formatOutcome(outcome));
     expect(outcome.result).toBe("done");
     if (outcome.result === "done") {
-      expect(outcome.record.via).toBe("inline");
+      expect(outcome.record.via).toBe("rpc-inline");
       expect(outcome.record.status).toBe(200);
       expect(outcome.record.body).toContain(`slow-ok:${slowMs}`);
       expect(outcome.record.incarnationId).toBe(start.body.incarnationId);

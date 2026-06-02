@@ -2,8 +2,8 @@
 
 This document describes the design of the two principal abstractions in our stream processing system:
 
-1. Stream (currently called JonasStream)
-2. StreamProcessor
+1. Stream
+2. StreamProcessorRunner
 
 We'll cover
 - The core data model
@@ -14,24 +14,43 @@ We'll cover
 
 # Taxonomy / Shared vocabulary
 
-Stream: a stream is a sequence of events
+Stream: a durable node that owns an append-only sequence of events.
 
-Event: an event is a single item in a stream
+Event: a single item in a stream.
 
-Subscriber: any program across the network from a stream that consumes events from the stream.
+Subscriber: a node outside the stream that can consume event batches from the stream. A subscriber is
+not a websocket, not a live connection, and not necessarily unique to one stream.
 
-Subscription: the relationship between a stream and a subscriber. Streams and subscribers are nodes;
-subscriptions are edges. `subscriptionKey` identifies this edge within a stream.
+Subscriber spec: the `subscriber` object inside a `subscription-configured` event. It tells the stream
+what kind of subscriber should exist and how to connect to it. The transport is a property of this
+object. For now we only support CaptainWeb-WebSocket (`captainweb-websocket`), but later subscriber
+specs can describe dynamic workers, external URLs, webhooks, etc.
 
-Outbound subscriber: A subscriber that that the stream connects into. Direction is always from the `Stream` durable object's perspective.
+Subscription: the configured edge from a stream node to a subscriber node. `subscriptionKey` identifies
+this edge within one stream. The same subscriber implementation can appear behind many subscriptions.
 
-Inbound subscriber: A subscriber that connects into the stream. Direction is always from the `Stream` durable object's perspective. E.g. a browser tab or stream processor in an e2e test.
+Subscription configuration: the latest `events.iterate.com/stream/subscription-configured` event for a
+given `subscriptionKey`. The core stream processor stores this exact event in stream reduced state.
 
-Subscriber transport: How a subscriber connects to the stream. This is a property of the subscriber configuration, not a separate sibling object. For now we only support CaptainWeb-WebSocket (`captainweb-websocket`) for both inbound and outbound subscriptions. Eventually, we'll support other transports such as outbound webhooks.
+Subscription connection: a live runtime connection used to deliver events for a subscription. It has a
+direction, a transport, an optional `subscriptionKey`, and a `SubscriptionRpcTarget`. It is not
+persisted; it can be recreated from stream reduced state and runtime handshakes.
 
-CaptainWeb subscriber: A subscriber that uses a CaptainWeb-WebSocket connection to consume events from the stream and append to it. Could be inbound or outbound.
+Inbound subscription connection: a subscriber connects into the stream and passes the stream a
+`SubscriptionRpcTarget`. Direction is always from the `Stream` durable object's perspective. Browser
+tabs and vitest-hosted stream processors use this in tests.
 
-Subscriber RpcTarget: The RPC target provided by a subscriber. The stream stores this target in memory for either inbound or outbound subscriptions, and calls methods on it to deliver batches of events to the subscriber.
+Outbound subscription connection: the stream connects out to a subscriber described by a persisted
+subscription configuration. Direction is always from the `Stream` durable object's perspective. Built-in
+stream processors normally use this.
+
+SubscriptionRpcTarget: the RPC capability provided by the subscriber side for one live subscription
+connection. The stream stores this target in memory and calls `consumeEvents({ events })` on it to
+deliver batches.
+
+CaptainWeb session: a live CaptainWeb connection to the stream. A session can become a subscription
+connection if the subscription handshake yields a `SubscriptionRpcTarget`, but debug/control sessions
+can exist without being subscriptions.
 
 Stream snapshot: The current reduced state of the stream that is useful to a subscriber at subscription start. This includes things like when the stream was created, the current event count / max offset, and stream metadata such as event schemas.
 
@@ -43,12 +62,9 @@ Core stream processor: The built-in reducer that belongs to the stream itself. I
 inside the stream durable object after offset allocation. Its reduced state is the stream reduced
 state.
 
-Subscription reconciler: The stream-owned process that compares the stream reduced state with runtime
-connection state and opens any outbound subscriber connections that should exist. For now it only
-needs to add missing outbound connections; unsubscribe / disconnect policy can come later.
-
-CaptainWeb session: A live CaptainWeb connection to the stream. Some sessions are subscriber sessions,
-but debug/control sessions can also exist without being subscribers.
+Subscription reconciler: the stream-owned process that compares stream reduced state with runtime
+subscription connections and opens any outbound connections that should exist. For now it only needs to
+add missing outbound connections; unsubscribe / disconnect policy can come later.
 
 Stream processor: A consumer that uses our library to define a well defined manifest that declares
  - the schemas of events it owns, consumes and emits. 
@@ -57,7 +73,7 @@ Stream processor: A consumer that uses our library to define a well defined mani
  - its reducer function (pure function of the current state and new event - safe to import anywhere)
  - a separate implementation function for side effects (e.g. appending more events)
 
-Stream processor "runner": A program that connects a stream processor to a stream subscription. For example, we might have a nodejs stream processor runner that creates an inbound websocket subscription on a stream and then runs the stream processor against it. In production the main stream processor runner we use is a durable object called StreamProcessorRunner, which streams connect to via an outbound websocket subscription.
+Stream processor runner: A program that connects a stream processor to a subscription connection. For example, we might have a nodejs stream processor runner that creates an inbound subscription connection on a stream and then runs the stream processor against it. In production the main stream processor runner we use is a durable object called StreamProcessorRunner, which streams connect to via an outbound subscription connection.
 
 
 # Requirements
@@ -77,6 +93,56 @@ Each stream contains an append-only log of events with
 
 ## Core stream events
 
+### `events.iterate.com/stream/created`
+
+The first event in every stream. It has offset `0`, records the stream namespace/path, and lets the
+core stream processor reduce `createdAt` from the event timestamp.
+
+```ts
+{
+  offset: 0,
+  type: "events.iterate.com/stream/created",
+  payload: {
+    namespace: "stream",
+    path: "/audio/uploads/123",
+  },
+  createdAt: "2026-06-01T12:00:00.000Z",
+}
+```
+
+### `events.iterate.com/stream/woken`
+
+Appended whenever the stream Durable Object constructor runs. It records the current incarnation so
+debug output can distinguish persisted stream state from the currently running object instance.
+
+```ts
+{
+  offset: 1,
+  type: "events.iterate.com/stream/woken",
+  payload: {
+    incarnationId: "81e7f2f0-8f2d-47e6-a9d9-1df5a4ad33f0",
+  },
+  createdAt: "2026-06-01T12:00:00.001Z",
+}
+```
+
+### `events.iterate.com/stream/configured`
+
+Updates stream-level configuration that belongs in reduced state.
+
+```ts
+{
+  offset: 2,
+  type: "events.iterate.com/stream/configured",
+  payload: {
+    config: {
+      simulatedStorageSyncDelayMs: 25,
+    },
+  },
+  createdAt: "2026-06-01T12:00:00.002Z",
+}
+```
+
 ### `events.iterate.com/stream/subscription-configured`
 
 Configures an outbound subscriber for the stream. The event is part of the stream history, and the
@@ -85,7 +151,7 @@ configure itself from committed stream state.
 
 ```ts
 {
-  offset: 0,
+  offset: 3,
   type: "events.iterate.com/stream/subscription-configured",
   idempotencyKey: "subscription:transcribe-audio",
   payload: {
@@ -96,7 +162,7 @@ configure itself from committed stream state.
       processorSlug: "transcribe-audio",
     },
   },
-  createdAt: "2026-06-01T12:00:00.000Z",
+  createdAt: "2026-06-01T12:00:00.003Z",
 }
 ```
 
@@ -139,12 +205,12 @@ processor runner. Future subscriber types might look like:
 
 ## Subscriptions
 
-- The CaptainWeb API should not care which side initiated a subscriber websocket connection
+- The CaptainWeb API should not care which side initiated a subscription connection.
 - Subscription direction is always named from the stream's perspective: inbound means the subscriber connected into the stream, and outbound means the stream connected out to the subscriber.
 - Event delivery should be framed as batches from day one, even when the batch contains a single event.
-- We should be able to write e2e tests where we run stream processors in our vitest processes via inbound websocket subscription
-- Outbound websocket subscriptions need to survive the calling request context expiring. For example, if the inbound HTTP request that caused a `subscription-configured` append gets closed, the outbound websocket connection to the subscriber should continue to work.
-- Inbound websocket subscriptions need to resume after hibernation
+- We should be able to write e2e tests where we run stream processors in our vitest processes via inbound subscription connections.
+- Outbound subscription connections need to survive the calling request context expiring. For example, if the inbound HTTP request that caused a `subscription-configured` append gets closed, the outbound connection to the subscriber should continue to work.
+- Inbound subscription connections need to resume after hibernation.
 
 ## Stream processor
 - The core API should be runtime-agnostic
@@ -174,7 +240,7 @@ We need to be able to track all this information
 - from client libraries (the websocket client needs to emit these metrics)
 
 For any stream
-- All active subscriptions with direction (inbound vs outbound), transport (`captainweb-websocket`), status (connected or not)
+- All active subscription connections with direction (inbound vs outbound), transport (`captainweb-websocket`), status (connected or not)
 - age
 - number of events
 - storage size
@@ -189,7 +255,7 @@ For any stream processor
 - events per second throughput
 - data in/out rate (bytes per second)
 
-For any stream processor subscription (i.e. the live websocket connection), we need to track
+For any stream processor subscription connection, we need to track
 - ping time to stream
 - direction
 - connection status 
@@ -203,7 +269,7 @@ It should be a short piece of well instrumented high performance code. I
 
 It should only care about:
 - storage/retrieval of events
-- subscription transports (inbound and outbound)
+- subscription connection transports (inbound and outbound)
 - any stream processing that can STOP events from being appended (e.g. circuit breaker, rate limiting, access control, etc)
 
 Everything else should be implemented in separate builtin processors.
@@ -233,8 +299,8 @@ The failure of any one processor should not affect other processors. This means,
   Subscription management is stream-owned core behavior, not a separate user processor.
 
 - The stream has a subscription reconciler that uses the stream reduced state to know which outbound
-  subscriber connections should exist, and uses runtime state to know which CaptainWeb sessions /
-  subscriber RpcTargets are currently connected.
+  subscription connections should exist, and uses runtime state to know which CaptainWeb sessions /
+  `SubscriptionRpcTarget`s are currently connected.
 
 ## CaptainWeb API
 
@@ -242,15 +308,27 @@ The primary way to interact with the stream is via a CaptainWeb API.
 
 The subscription handshake should be symmetrical:
 
-- For inbound subscriptions, the subscriber calls `initInboundSubscription()` on the stream and passes its `subscriberRpcTarget`.
+- For inbound subscriptions, the subscriber calls `initInboundSubscription()` on the stream and passes its `subscriptionRpcTarget`.
 - For outbound subscriptions, the stream calls `initOutboundSubscription()` on the subscriber and passes its stream RPC target, the `subscription-configured` event, and the stream snapshot. The subscriber returns the same request shape used by inbound subscriptions, so the stream can start delivery without another round trip.
-- In both cases, the stream ends up storing a `subscriberRpcTarget` in memory and delivering event batches to it.
+- In both cases, the stream ends up storing a `SubscriptionRpcTarget` in memory and delivering event batches to it.
+
+The subscription connection lifecycle is:
+
+1. The stream reduced state says which durable subscriptions should exist, or an inbound caller asks to
+   subscribe directly.
+2. One side opens a CaptainWeb session.
+3. The initiating side calls the appropriate init method.
+4. The subscriber side provides a `SubscriptionRpcTarget` and optional `afterOffset`.
+5. The stream stores a subscription connection in memory and starts replay/live delivery from
+   `afterOffset + 1`.
+6. When the CaptainWeb session breaks, the stream forgets the runtime connection. The durable
+   subscription configuration remains in stream reduced state.
 
 The subscription request shape is:
 
 ```ts
 {
-  subscriberRpcTarget,
+  subscriptionRpcTarget,
   afterOffset?,
 }
 ```
@@ -261,15 +339,16 @@ to `initInboundSubscription()`. For outbound subscriptions, the subscriber retur
 `initOutboundSubscription()` after looking at the stream snapshot and the `subscription-configured`
 event. The stream then starts replay/live delivery from `afterOffset + 1`.
 
-Not every CaptainWeb session is a subscription. Debug and control clients can open CaptainWeb
-sessions and call RPC methods without providing a subscriber RpcTarget. A CaptainWeb subscriber is a
-session that completes the subscription handshake and gives the stream a subscriber RpcTarget to store
-for event delivery.
+Not every CaptainWeb session is a subscription connection. Debug and control clients can open
+CaptainWeb sessions and call RPC methods without providing a `SubscriptionRpcTarget`. A CaptainWeb
+session becomes a subscription connection only when the handshake gives the stream a
+`SubscriptionRpcTarget` to store for event delivery.
 
 `debug()` should return the stream reduced state plus runtime state, including active CaptainWeb
-sessions, active subscribers, subscription keys, directions, transports, and connection status.
+sessions, active subscription connections, subscription keys, directions, transports, and connection
+status.
 
-The subscriber RpcTarget should expose a batch-shaped delivery method:
+The `SubscriptionRpcTarget` should expose a batch-shaped delivery method:
 
 ```ts
 consumeEvents({ events })
@@ -280,7 +359,7 @@ backpressure, offset tracking, or error reporting.
 
 The most important performance constraint is to avoid back-and-forth network round trips for each
 consumed batch. When the stream durable object delivers a batch, it must call
-`subscriberRpcTarget.consumeEvents({ events })`, not await the returned CaptainWeb thenable, and then
+`subscriptionRpcTarget.consumeEvents({ events })`, not await the returned CaptainWeb thenable, and then
 immediately dispose the ignored result.
 
 The experiment showed why this matters. CaptainWeb returned `ReadableStream` values are encoded as
@@ -291,7 +370,7 @@ in  ["stream",["pipeline",1,["write"],[eventBatch]]]
 out ["resolve",2,["undefined"]]
 ```
 
-The subscriber RpcTarget shape avoids that write/resolve pair when the caller does not observe the
+The `SubscriptionRpcTarget` shape avoids that write/resolve pair when the caller does not observe the
 result. The expected post-init wire shape is one-way event delivery from stream to subscriber:
 
 ```txt
@@ -307,7 +386,7 @@ protocol.
 
 ### CaptainWeb RPC
 
-This is used heavily in e2e tests to call privileged debug APIs like `.kill()` or `.simulateStorageSyncDelay()`
+This is used heavily in e2e tests to call privileged debug APIs like `.kill()`.
 
 ### Workers RPC
 
@@ -326,3 +405,91 @@ TODO
 - Split events across multiple kv sqlite rows to avoid 2mb limit
 - Store older events in R2
 - Different types of subscriptions - including those where the server keeps track of the offset for each consumer
+
+
+
+
+# Next steps scratchpad
+
+## Client libraries
+
+### Level 1: Connect to capnweb stream library / useStream disposable from a a node program or browser or workerd
+
+This is the only layer that is probably runtime-specific.
+
+What the user has
+- A URL and headers
+- An optional fetch function?
+
+What the user wants 
+- A Disposable & RpcStub<StreamRpc>
+- Some helper methods to e.g. measure ping time etc
+
+Example usage 
+
+```ts
+
+await using streamRpcStub = withStream({
+  url,
+  headers,
+  fetch? // needed for cloudflare i think
+});
+
+```
+
+TODO: 
+- is stream disposal async?
+- can we make this runtime agnostic / have a node client and a workers client?
+
+###: Level 2: Subscriber 
+
+Calls initInboundSubscription on the stream rpc stub, which calls initOutboundSubscription on the 
+
+```ts
+
+// calls streamRpcStub.subscribe({ startingOffset, processEventBatch }) or similar 
+// processEventBatch then calls onEvent? on the subscription
+// We want the `subscription` fixture to be a bonafide javascript event emitter if that makes sense - open question
+await using subscription = await using withStreamSubscription({
+  streamRpcStub,
+  startingOffset,
+  onEvent?
+})
+
+// it should be possible to do this 
+const event = subscription.waitForEvent({predicate})
+
+
+```
+
+### Level 3: Stream processor runner for _inbound_ subscribers
+
+What the user has
+- A stream processor instance with reduce and afterAppend functions
+- A stream rpc stub
+
+What the user wants
+- set up some initial starting state and offset
+- subscribe to stream and receive events
+- some way to access metrics / ping times
+
+
+```ts
+
+// this would call withSubscription internally
+await using processorSubscription = withStreamProcessor({
+  streamRpcStub,
+  initialState?,
+  afterOffset?,
+  // not sure here - processor or processor + contract or what? what even _is_ this thing?
+  processor,
+  
+})
+```
+
+// Could maybe also allow 
+
+# Design decisions
+- For inbound subscribers, we should not need to provide any initOutboundSubscription() on our capnweb main object or anything
+- For inbound subscribers, it is the client that initiates ping and everything else 
+- Durable object does not care about inbound capnweb subscribers - it only cares the capnweb peer subscribes

@@ -1,21 +1,17 @@
 import { BenchmarkRunner } from "./benchmark-runner.js";
-import { CleanStreamClientRunner } from "./clean/client-runner.js";
-import { JonasStream } from "./clean/jonas-stream.js";
-import { StreamProcessor } from "./clean/stream-processor.js";
-import { CleanStream } from "./clean/stream.js";
+import { Stream } from "./clean/stream-do.js";
+import { StreamProcessorRunner } from "./clean/stream-processor.js";
 import { MinimalStream } from "./minimal-stream.js";
 import { OrpcDurableStream } from "./orpc-durable-stream.js";
-import { Stream } from "./stream.js";
+import { LegacyStream } from "./stream.js";
 
 export {
   BenchmarkRunner,
-  CleanStream,
-  CleanStreamClientRunner,
-  JonasStream,
   MinimalStream,
   OrpcDurableStream,
+  LegacyStream,
   Stream,
-  StreamProcessor,
+  StreamProcessorRunner,
 };
 
 export default {
@@ -45,37 +41,23 @@ export default {
       return Response.json(result);
     }
 
-    if (url.pathname === "/clean-client-smoke") {
-      const transport = cleanTransportParam(url);
-      const stream = url.searchParams.get("stream") ?? `clean-${crypto.randomUUID()}`;
-      const result = await env.CLEAN_STREAM_CLIENT_RUNNER.getByName(
-        `${stream}:${transport}`,
-      ).runSmoke({ stream, transport });
-      return Response.json(result);
-    }
-
-    if (url.pathname.startsWith("/clean/")) {
-      const name = url.pathname.slice("/clean/".length) || "default";
-      return env.CLEAN_STREAM.getByName(name).fetch(request);
-    }
-
     if (url.pathname.startsWith("/minimal/")) {
       const name = url.pathname.slice("/minimal/".length) || "default";
       return env.MINIMAL_STREAM.getByName(name).fetch(request);
     }
 
-    if (url.pathname.startsWith("/jonas/")) {
-      const name = url.pathname.slice("/jonas/".length) || "default";
-      return env.JONAS_STREAM.getByName(`jonas:${name}`).fetch(request);
+    if (url.pathname.startsWith("/stream/")) {
+      const name = url.pathname.slice("/stream/".length) || "default";
+      return env.STREAM.getByName(`stream:${name}`).fetch(request);
     }
 
-    if (url.pathname.startsWith("/stream-processor/")) {
-      const name = url.pathname.slice("/stream-processor/".length) || "default";
-      return env.STREAM_PROCESSOR.getByName(name).fetch(request);
+    if (url.pathname.startsWith("/stream-processor-runner/")) {
+      const name = url.pathname.slice("/stream-processor-runner/".length) || "default";
+      return env.STREAM_PROCESSOR_RUNNER.getByName(name).fetch(request);
     }
 
     const name = url.pathname.slice(1) || "default";
-    return env.STREAM.getByName(name).fetch(request);
+    return env.LEGACY_STREAM.getByName(name).fetch(request);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -85,14 +67,6 @@ function positiveIntParam(url: URL, name: string) {
   const value = Number(raw);
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
   return value;
-}
-
-function cleanTransportParam(url: URL) {
-  const raw = url.searchParams.get("transport");
-  if (raw === "capnweb" || raw === "capnweb-oneway" || raw === "orpc" || raw === "rawws") {
-    return raw;
-  }
-  throw new Error("transport must be capnweb, capnweb-oneway, orpc, or rawws");
 }
 
 function nonNegativeIntParam(url: URL, name: string) {

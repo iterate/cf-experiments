@@ -7,6 +7,8 @@
     "deploy": "wrangler deploy",
     "test": "vitest run scripts/outbound-after-response.test.ts --reporter=verbose",
     "test:sweep": "vitest run scripts/delay-sweep.test.ts --reporter=verbose",
+    "test:modes": "vitest run scripts/mode-sweep.test.ts --reporter=verbose",
+    "test:await-cancel": "vitest run scripts/await-rpc-cancel.test.ts --reporter=verbose",
     "typecheck": "tsgo --noEmit"
   },
   "devDependencies": {

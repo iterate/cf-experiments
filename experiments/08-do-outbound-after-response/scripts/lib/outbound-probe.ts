@@ -4,16 +4,36 @@ export const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 export const pollSlackMs = Number(process.env.POLL_SLACK_MS ?? 5_000);
 export const alarmDelayMs = Number(process.env.ALARM_DELAY_MS ?? 0);
 
+export type StartMode =
+  | "rpc-inline"
+  | "do-fetch"
+  | "await-rpc"
+  | "root-fire-and-forget"
+  | "root-wait-until"
+  | "alarm";
+
 export type RunDone = {
   phase: "done";
   via: string;
   status: number;
   body: string;
   incarnationId: string;
+  rootAbortedAt?: number;
 };
-export type RunError = { phase: "error"; via: string; error: string; incarnationId: string };
-export type RunFetching = { phase: "fetching"; via: string; incarnationId: string };
-export type RunMissing = { phase: "missing" };
+export type RunError = {
+  phase: "error";
+  via: string;
+  error: string;
+  incarnationId: string;
+  rootAbortedAt?: number;
+};
+export type RunFetching = {
+  phase: "fetching";
+  via: string;
+  incarnationId: string;
+  rootAbortedAt?: number;
+};
+export type RunMissing = { phase: "missing"; rootAbortedAt?: number };
 export type RunSnapshot = RunDone | RunError | RunFetching | RunMissing;
 
 export type ProbeOutcome =
@@ -50,7 +70,20 @@ export function pollBudgetMs(delayMs: number) {
 }
 
 export async function runInlineProbe(args: { name: string; runId: string; url: string }) {
-  const start = await postInline(args.name, args.runId, args.url);
+  return runModeProbe({ mode: "rpc-inline", ...args });
+}
+
+export async function runAlarmProbe(args: { name: string; runId: string; url: string }) {
+  return runModeProbe({ mode: "alarm", ...args });
+}
+
+export async function runModeProbe(args: {
+  mode: StartMode;
+  name: string;
+  runId: string;
+  url: string;
+}) {
+  const start = await startMode(args.mode, args.name, args.runId, args.url);
   const delayMs = delayFromSlowUrl(args.url);
   const outcome = await pollRun({
     name: args.name,
@@ -60,15 +93,13 @@ export async function runInlineProbe(args: { name: string; runId: string; url: s
   return { start, outcome, delayMs };
 }
 
-export async function runAlarmProbe(args: { name: string; runId: string; url: string }) {
-  const start = await postAlarm(args.name, args.runId, args.url);
-  const delayMs = delayFromSlowUrl(args.url);
-  const outcome = await pollRun({
-    name: args.name,
-    runId: args.runId,
-    budgetMs: pollBudgetMs(delayMs),
-  });
-  return { start, outcome, delayMs };
+export async function startMode(mode: StartMode, name: string, runId: string, url: string) {
+  if (mode === "rpc-inline") return postInline(name, runId, url);
+  if (mode === "do-fetch") return postDoFetchInline(name, runId, url);
+  if (mode === "await-rpc") return postAwaitRpc(name, runId, url);
+  if (mode === "root-fire-and-forget") return postRootFireAndForget(name, runId, url);
+  if (mode === "root-wait-until") return postRootWaitUntil(name, runId, url);
+  return postAlarm(name, runId, url);
 }
 
 function delayFromSlowUrl(url: string) {
@@ -77,7 +108,7 @@ function delayFromSlowUrl(url: string) {
   return ms;
 }
 
-async function postInline(name: string, runId: string, url: string) {
+export async function postInline(name: string, runId: string, url: string) {
   const response = await fetch(`${workerUrl}/inline?name=${encodeURIComponent(name)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -92,22 +123,48 @@ async function postInline(name: string, runId: string, url: string) {
   return { response, body };
 }
 
-async function postAlarm(name: string, runId: string, url: string) {
-  const response = await fetch(`${workerUrl}/alarm?name=${encodeURIComponent(name)}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ runId, url, delayMs: alarmDelayMs }),
-  });
-  const body = (await response.json()) as {
-    via: string;
-    runId: string;
-    incarnationId: string;
-    returnedAt: number;
-  };
-  return { response, body };
+export async function postDoFetchInline(name: string, runId: string, url: string) {
+  return postJson("/do-fetch-inline", name, { runId, url });
 }
 
-async function pollRun(args: { name: string; runId: string; budgetMs: number }): Promise<ProbeOutcome> {
+export async function postAwaitRpc(name: string, runId: string, url: string, signal?: AbortSignal) {
+  return postJson("/await-rpc", name, { runId, url }, signal);
+}
+
+export async function postRootFireAndForget(name: string, runId: string, url: string) {
+  return postJson("/root-fire-and-forget", name, { runId, url });
+}
+
+export async function postRootWaitUntil(name: string, runId: string, url: string) {
+  return postJson("/root-wait-until", name, { runId, url });
+}
+
+export async function postAlarm(name: string, runId: string, url: string) {
+  return postJson("/alarm", name, { runId, url, delayMs: alarmDelayMs });
+}
+
+async function postJson(
+  path: string,
+  name: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+) {
+  const response = await fetch(`${workerUrl}${path}?name=${encodeURIComponent(name)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  const responseBody = (await response.json()) as {
+    via: string;
+    runId: string;
+    incarnationId?: string;
+    returnedAt: number;
+  };
+  return { response, body: responseBody };
+}
+
+export async function pollRun(args: { name: string; runId: string; budgetMs: number }): Promise<ProbeOutcome> {
   const started = Date.now();
   let lastSnapshot: RunSnapshot = { phase: "missing" };
 
@@ -131,13 +188,16 @@ async function pollRun(args: { name: string; runId: string; budgetMs: number }):
 }
 
 export function formatOutcome(outcome: ProbeOutcome) {
+  const rootAbort = "record" in outcome
+    ? formatRootAbort(outcome.record.rootAbortedAt)
+    : formatRootAbort(outcome.last.rootAbortedAt);
   if (outcome.result === "done") {
-    return `done status=${outcome.record.status} waited=${outcome.waitedMs}ms`;
+    return `done status=${outcome.record.status} waited=${outcome.waitedMs}ms${rootAbort}`;
   }
   if (outcome.result === "error") {
-    return `error ${outcome.record.error} waited=${outcome.waitedMs}ms`;
+    return `error ${outcome.record.error} waited=${outcome.waitedMs}ms${rootAbort}`;
   }
-  return `timeout last=${JSON.stringify(outcome.last)} waited=${outcome.waitedMs}ms`;
+  return `timeout last=${JSON.stringify(outcome.last)} waited=${outcome.waitedMs}ms${rootAbort}`;
 }
 
 export function ray(response: Response) {
@@ -146,4 +206,8 @@ export function ray(response: Response) {
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatRootAbort(rootAbortedAt: number | undefined) {
+  return rootAbortedAt === undefined ? "" : ` rootAbortedAt=${rootAbortedAt}`;
 }

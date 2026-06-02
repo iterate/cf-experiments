@@ -1,10 +1,9 @@
 {
-  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
   "account_id": "376ef7ed81b0573f93524de763666c15",
-  "name": "08-do-outbound-after-response",
+  "name": "stream-staging-area",
   "main": "src/worker.ts",
   "compatibility_date": "2026-05-01",
-  "compatibility_flags": ["enable_request_signal"],
   "upload_source_maps": true,
   "observability": {
     "enabled": true,
@@ -18,8 +17,16 @@
       "head_sampling_rate": 1,
     },
   },
-  "durable_objects": {
-    "bindings": [{ "name": "PROBE", "class_name": "OutboundAfterResponseProbe" }],
+  "limits": {
+    "cpu_ms": 300000,
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OutboundAfterResponseProbe"] }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "STREAM", "class_name": "Stream" },
+      { "name": "STREAM_PROCESSOR_RUNNER", "class_name": "StreamProcessorRunner" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Stream", "StreamProcessorRunner"] },
+  ],
 }
