@@ -32,27 +32,30 @@ this edge within one stream. The same subscriber implementation can appear behin
 Subscription configuration: the latest `events.iterate.com/stream/subscription-configured` event for a
 given `subscriptionKey`. The core stream processor stores this exact event in stream reduced state.
 
-Subscription connection: a live runtime connection used to deliver events for a subscription. It has a
-direction, a transport, an optional `subscriptionKey`, and a `SubscriptionRpcTarget`. It is not
-persisted; it can be recreated from stream reduced state and runtime handshakes.
+Subscription connection: a live runtime connection used to deliver events for a subscription. It has
+a direction, a transport, an optional `subscriptionKey`, and a subscription sink. It is not persisted;
+it can be recreated from stream reduced state and runtime handshakes.
 
 Inbound subscription connection: a subscriber connects into the stream and passes the stream a
-`SubscriptionRpcTarget`. Direction is always from the `Stream` durable object's perspective. Browser
-tabs and vitest-hosted stream processors use this in tests.
+subscription sink by calling `subscribe()`. Direction is always from the `Stream` durable object's
+perspective. Browser tabs and vitest-hosted stream processors use this in tests.
 
 Outbound subscription connection: the stream connects out to a subscriber described by a persisted
 subscription configuration. Direction is always from the `Stream` durable object's perspective. Built-in
 stream processors normally use this.
 
-SubscriptionRpcTarget: the RPC capability provided by the subscriber side for one live subscription
-connection. The stream stores this target in memory and calls `consumeEvents({ events })` on it to
-deliver batches.
+Subscription sink: the RPC capability provided by the subscriber side for one live subscription
+connection. The stream stores this target in memory and calls `processEventBatch({ events })` on it
+to deliver batches.
 
 CaptainWeb session: a live CaptainWeb connection to the stream. A session can become a subscription
-connection if the subscription handshake yields a `SubscriptionRpcTarget`, but debug/control sessions
+connection if the subscription handshake yields a subscription sink, but debug/control sessions
 can exist without being subscriptions.
 
-Stream snapshot: The current reduced state of the stream that is useful to a subscriber at subscription start. This includes things like when the stream was created, the current event count / max offset, and stream metadata such as event schemas.
+Stream runtime state: The current serializable state of the stream that is useful to a subscriber at
+subscription start or to a UI/test for introspection. This is the union of persisted reduced state and
+interesting runtime state such as connected subscription sinks. It does not include event rows; use
+`getEvent()` / `getEvents()` for events.
 
 Stream reduced state: The stream durable object's persisted projection over its own event log. The
 stream uses this state for core bookkeeping such as created time, max offset / event count, event
@@ -307,7 +310,7 @@ The failure of any one processor should not affect other processors. This means,
 
 - The stream has a subscription reconciler that uses the stream reduced state to know which outbound
   subscription connections should exist, and uses runtime state to know which CaptainWeb sessions /
-  `SubscriptionRpcTarget`s are currently connected.
+  subscription sinks are currently connected.
 
 ## CaptainWeb API
 
@@ -315,17 +318,22 @@ The primary way to interact with the stream is via a CaptainWeb API.
 
 The subscription handshake should be symmetrical:
 
-- For inbound subscriptions, the subscriber calls `initInboundSubscription()` on the stream and passes its `subscriptionRpcTarget`.
-- For outbound subscriptions, the stream calls `initOutboundSubscription()` on the subscriber and passes its stream RPC target, the `subscription-configured` event, and the stream snapshot. The subscriber returns the same request shape used by inbound subscriptions, so the stream can start delivery without another round trip.
-- In both cases, the stream ends up storing a `SubscriptionRpcTarget` in memory and delivering event batches to it.
+- For inbound subscriptions, the subscriber calls `subscribe()` on the stream and passes its
+  subscription sink plus optional `afterOffset`.
+- For outbound subscriptions, the stream calls `requestSubscription()` on the subscriber and passes
+  its stream RPC target, the `subscription-configured` event, and `runtimeState()`. The subscriber
+  returns the same request shape used by inbound subscriptions, so the stream can call `subscribe()`
+  and start delivery.
+- In both cases, the stream ends up storing a subscription sink in memory and delivering event batches
+  to it.
 
 The subscription connection lifecycle is:
 
 1. The stream reduced state says which durable subscriptions should exist, or an inbound caller asks to
    subscribe directly.
 2. One side opens a CaptainWeb session.
-3. The initiating side calls the appropriate init method.
-4. The subscriber side provides a `SubscriptionRpcTarget` and optional `afterOffset`.
+3. The initiating side calls the appropriate request/subscribe method.
+4. The subscriber side provides a subscription sink and optional `afterOffset`.
 5. The stream stores a subscription connection in memory and starts replay/live delivery from
    `afterOffset + 1`.
 6. When the CaptainWeb session breaks, the stream forgets the runtime connection. The durable
@@ -335,38 +343,44 @@ The subscription request shape is:
 
 ```ts
 {
-  subscriptionRpcTarget,
+  sink,
   afterOffset?,
 }
 ```
 
-`afterOffset` is owned by the subscriber and is optional. If omitted, the stream treats it as `-1`,
-meaning "start before the first event". For inbound subscriptions, the subscriber sends it directly
-to `initInboundSubscription()`. For outbound subscriptions, the subscriber returns it from
-`initOutboundSubscription()` after looking at the stream snapshot and the `subscription-configured`
-event. The stream then starts replay/live delivery from `afterOffset + 1`.
+`afterOffset` is owned by the subscriber and is optional. If omitted, the stream treats it as
+`"start"`, meaning "start before the first event". For inbound subscriptions, the subscriber sends it
+directly to `subscribe()`. For outbound subscriptions, the subscriber returns it from
+`requestSubscription()` after looking at `runtimeState()` and the `subscription-configured` event. The
+stream then starts replay/live delivery from `afterOffset + 1`.
 
 Not every CaptainWeb session is a subscription connection. Debug and control clients can open
-CaptainWeb sessions and call RPC methods without providing a `SubscriptionRpcTarget`. A CaptainWeb
-session becomes a subscription connection only when the handshake gives the stream a
-`SubscriptionRpcTarget` to store for event delivery.
+CaptainWeb sessions and call RPC methods without providing a subscription sink. A CaptainWeb session
+becomes a subscription connection only when the handshake gives the stream a subscription sink to
+store for event delivery.
 
-`debug()` should return the stream reduced state plus runtime state, including active CaptainWeb
-sessions, active subscription connections, subscription keys, directions, transports, and connection
-status.
+`runtimeState()` should return the stream reduced state plus serializable runtime state, including
+active CaptainWeb sessions, active subscription connections, subscription keys, directions,
+transports, and connection status. Event rows are not included; callers use `getEvent()` or
+`getEvents()` for event data.
 
-The `SubscriptionRpcTarget` should expose a batch-shaped delivery method:
+The subscription sink should expose a batch-shaped delivery method:
 
 ```ts
-consumeEvents({ events })
+processEventBatch({ events })
 ```
 
-`consumeEvents()` has no meaningful return value. The stream must not use it for acknowledgement,
+`processEventBatch()` has no meaningful return value. The stream must not use it for acknowledgement,
 backpressure, offset tracking, or error reporting.
+
+The subscription protocol should be batch-first. Even if many early tests deliver one event at a
+time, high-throughput streams will eventually need batching to reduce RPC overhead and increase fan
+out performance. Client libraries can expose per-event iterators and `waitForEvent()` conveniences
+on top of the batch callback, but the underlying RPC should remain batch-shaped.
 
 The most important performance constraint is to avoid back-and-forth network round trips for each
 consumed batch. When the stream durable object delivers a batch, it must call
-`subscriptionRpcTarget.consumeEvents({ events })`, not await the returned CaptainWeb thenable, and then
+`subscriptionRpcTarget.processEventBatch({ events })`, not await the returned CaptainWeb thenable, and then
 immediately dispose the ignored result.
 
 The experiment showed why this matters. CaptainWeb returned `ReadableStream` values are encoded as
@@ -377,11 +391,11 @@ in  ["stream",["pipeline",1,["write"],[eventBatch]]]
 out ["resolve",2,["undefined"]]
 ```
 
-The `SubscriptionRpcTarget` shape avoids that write/resolve pair when the caller does not observe the
+The subscription sink shape avoids that write/resolve pair when the caller does not observe the
 result. The expected post-init wire shape is one-way event delivery from stream to subscriber:
 
 ```txt
-in ["push",["pipeline",subscriberId,["consumeEvents"],[{ "events": [event] }]]]
+in ["push",["pipeline",subscriberId,["processEventBatch"],[{ "events": [event] }]]]
 in ["release",resultId,refcount]
 ```
 
@@ -490,9 +504,9 @@ Disposal should be async: dispose the CaptainWeb session, then close the underly
 
 ### Level 2: subscriptions
 
-`withStreamSubscription()` should call `initInboundSubscription()` on the stream RPC target. The client
-provides a `SubscriptionRpcTarget` with `consumeEvents({ events })`; the Durable Object stores that
-runtime target and starts delivering replay/live batches from `afterOffset + 1`.
+`withStreamSubscription()` should wrap the caller's callback/iterator as a subscription sink
+with `processEventBatch({ events })`, then call `subscribe()` on the stream RPC target. The Durable
+Object stores that runtime target and starts delivering replay/live batches from `afterOffset + 1`.
 
 The subscription API should use portable JavaScript primitives:
 
@@ -503,6 +517,24 @@ The subscription API should use portable JavaScript primitives:
 
 Do not use Node's `EventEmitter` as the primary API because this library must work in browsers and
 Workers without a Node dependency.
+
+The underlying protocol is batch-first:
+
+```ts
+subscribe(args: {
+  sink: {
+    processEventBatch(args: { events: StreamEvent[] }): unknown;
+  };
+  afterOffset?: number | "start";
+}): Promise<{
+  unsubscribe(): Promise<void>;
+}>;
+```
+
+`afterOffset` is exclusive. If omitted, it defaults to `"start"`, meaning replay from the first
+available event and then continue live.
+
+The user-facing helper can still provide event-shaped conveniences:
 
 ```ts
 await using subscription = await withStreamSubscription({
@@ -528,10 +560,10 @@ by the caller; subscription disposal should stop the iterator/waiters and releas
 runtime state only. One-shot helpers can own the connection explicitly later, for example
 `withConnectedStreamSubscription({ url, ... })`.
 
-Because the connection can stay open after a subscription is disposed, `initInboundSubscription()`
-should return an explicit subscription handle. Disposing the subscription should use that handle to
-unsubscribe on the stream Durable Object so the DO stops delivering events to the callback target
-without requiring the whole CaptainWeb session to close.
+Because the connection can stay open after a subscription is disposed, `subscribe()` should return
+an explicit subscription handle. Disposing the subscription should use that handle to unsubscribe on
+the stream Durable Object so the DO stops delivering events to the callback target without requiring
+the whole CaptainWeb session to close.
 
 ```ts
 type StreamSubscription = AsyncDisposable &
@@ -634,16 +666,16 @@ This layer should share the contract-aware event resolution/parsing used by type
 - `connectStream()` returns a thin connection: `rpc`, `onWebSocketFrame()`, and async disposal.
 - Do not retain WebSocket frames in the core connection. Retention belongs in test/debug helpers.
 - Disposing a subscription created from a caller-provided connection does not close that connection.
-- `initInboundSubscription()` should return an explicit handle/token so subscriptions can be
-  unsubscribed without closing the entire CaptainWeb session.
+- `subscribe()` should return an explicit handle so subscriptions can be unsubscribed without
+  closing the entire CaptainWeb session.
 - Use `AsyncDisposable` for stream connections and subscriptions.
 - Use `AsyncIterable` plus `waitForEvent()` for subscriptions.
 - Do not use Node `EventEmitter` as the primary subscription API.
 - Keep OS project/codemode fixtures out of the client library; those helpers can wrap this client.
-- For inbound subscribers, the client calls `initInboundSubscription()` and does not need to expose
-  `initOutboundSubscription()` on its own CaptainWeb main object.
+- For inbound subscribers, the client calls `subscribe()` with a `processEventBatch` sink and does
+  not need to expose `requestSubscription()` on its own CaptainWeb main object.
 - Durable Object stream delivery only cares that the CaptainWeb peer provides a
-  `SubscriptionRpcTarget`; it does not care whether that peer is a browser, Node script, Worker, or
+  subscription sink; it does not care whether that peer is a browser, Node script, Worker, or
   Durable Object.
 
 ## Later: metrics and ping

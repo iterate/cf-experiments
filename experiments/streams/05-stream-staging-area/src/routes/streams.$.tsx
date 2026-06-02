@@ -1,11 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { StreamPage } from "./-stream-page.js";
+import { StreamSplatRoute } from "./-stream-splat-route.js";
 
 export const Route = createFileRoute("/streams/$")({
-  component: StreamRoute,
+  component: StreamSplatRoute,
 });
-
-function StreamRoute() {
-  const { _splat } = Route.useParams();
-  return <StreamPage streamPath={`/${_splat}`} />;
-}

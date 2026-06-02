@@ -1,10 +1,5 @@
-import type { ReactNode } from "react";
-import {
-  HeadContent,
-  Outlet,
-  Scripts,
-  createRootRoute,
-} from "@tanstack/react-router";
+import { createRootRoute } from "@tanstack/react-router";
+import { RootComponent } from "./-root-document.js";
 
 export const Route = createRootRoute({
   head: () => ({
@@ -16,25 +11,3 @@ export const Route = createRootRoute({
   }),
   component: RootComponent,
 });
-
-function RootComponent() {
-  return (
-    <RootDocument>
-      <Outlet />
-    </RootDocument>
-  );
-}
-
-function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
-  return (
-    <html>
-      <head>
-        <HeadContent />
-      </head>
-      <body style={{ margin: 0 }}>
-        {children}
-        <Scripts />
-      </body>
-    </html>
-  );
-}
