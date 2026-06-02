@@ -1,6 +1,30 @@
 # High level findings
 
-None yet.
+## sqlite-wasm OPFS hangs when served from Cloudflare Workers assets (works under `vite dev`)
+
+The browser SQLite mirror (SQLocal → `@sqlite.org/sqlite-wasm`, OPFS VFS) works under
+`vite dev` but **the SQLocal worker synchronously freezes on the first SQLite OPFS
+operation when the exact same build is served from Cloudflare Workers static assets**
+(`wrangler deploy`). The page subscribes and the browser-hosted processor receives events
+(`__receivedEventCount > 0`), but `Events` stays 0 and `Storage` stays `pending` forever.
+
+Ruled out (verified on the deployed page via headless Chrome for Testing):
+- COOP `same-origin` + COEP `require-corp` present; `crossOriginIsolated === true`.
+- `SharedArrayBuffer` available in workers; raw OPFS `createSyncAccessHandle` write works
+  in both classic and module workers on deployed.
+- Not asset-404: the runtime uses the hashed `new URL(...)` paths (200); emitting the
+  unhashed `sqlite3-opfs-async-proxy.js`/`sqlite3.wasm` did not help.
+- Not the VFS choice: patching SQLocal from the async-proxy `OpfsDb` to the proxy-free
+  `opfs-sahpool` VFS (`patches/sqlocal@0.18.0.patch`) still freezes on deployed (and the
+  install step does NOT time out — the freeze is in the *synchronous* SQL execution, so an
+  in-worker `setTimeout` guard cannot fire).
+- WASM instantiates (otherwise the worker would error, not freeze).
+
+A deep sqlite-wasm OPFS-SyncAccessHandle ↔ Cloudflare-asset-serving interaction, orthogonal
+to the stream-processor design. Repro: `scripts/browser-inbound-proof.sh` shows the
+processor receiving events on deployed while the stream page UI shows `Events: 0`. Needs a
+minimal isolated repro (sqlite-wasm OPFS on a bare CF Worker asset) before an upstream
+report. NOT yet repeated across sessions — provisional.
 
 # Notes
 

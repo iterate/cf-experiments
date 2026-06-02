@@ -3,6 +3,11 @@ packages:
   - experiments/streams/*
   - packages/*
 
+catalogs:
+  cloudflare:
+    '@cloudflare/workers-types': ^4.20260426.1
+    wrangler: ^4.85.0
+
 minimumReleaseAge: 1440
 
 onlyBuiltDependencies:
@@ -10,7 +15,5 @@ onlyBuiltDependencies:
   - workerd
   - sharp
 
-catalogs:
-  cloudflare:
-    "@cloudflare/workers-types": ^4.20260426.1
-    wrangler: ^4.85.0
+patchedDependencies:
+  sqlocal@0.18.0: patches/sqlocal@0.18.0.patch

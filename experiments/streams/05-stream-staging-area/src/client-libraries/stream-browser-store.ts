@@ -27,6 +27,8 @@ export type StreamBrowserSnapshot = {
   subscriptionStatus: "idle" | "electing" | "leader" | "follower";
   clearVersion: number;
   connectionError: string | undefined;
+  /** Events this tab's hosted processor has received from the stream (in-memory, not SQLite). */
+  receivedEventCount: number;
   databaseInfo: StreamDatabaseInfo | undefined;
   recentRowsByVirtualIndex: ReadonlyMap<number, StreamEventRow>;
 };
@@ -79,6 +81,7 @@ export function createStreamBrowserStore(args: {
   let databaseInfoTimer: ReturnType<typeof setTimeout> | undefined;
   const listeners = new Set<() => void>();
   let disposed = false;
+  let receivedEventCount = 0;
   const streamDatabase = getStreamBrowserDatabase(args.streamPath);
   const browserSubscriberStorageKey = "stream-browser-subscriber-id";
   const browserSubscriberId =
@@ -89,6 +92,7 @@ export function createStreamBrowserStore(args: {
     clearVersion: 0,
     connectionStatus: "connecting",
     connectionError: undefined,
+    receivedEventCount: 0,
     databaseInfo: undefined,
     recentRowsByVirtualIndex: new Map(),
     subscriptionStatus: "idle",
@@ -102,6 +106,11 @@ export function createStreamBrowserStore(args: {
     void streamDatabase.info().then((databaseInfo) => {
       if (disposed) return;
       snapshot = { ...snapshot, databaseInfo };
+      emitSnapshot();
+    }).catch((error: unknown) => {
+      if (disposed) return;
+      const message = String((error as { message?: string } | undefined)?.message ?? error);
+      snapshot = { ...snapshot, connectionError: "local database error: " + message };
       emitSnapshot();
     });
   }
@@ -195,18 +204,22 @@ export function createStreamBrowserStore(args: {
     subscriptionKey: string;
   }) {
     // Host the projector on the shared runner; the runner IS the subscription sink.
+    // The subscription must NOT depend on the projector's storage health: resume
+    // from "start" (offset -1) and rely on INSERT OR IGNORE for idempotency, so a
+    // slow/unavailable local DB can never block receiving events from the stream.
     const runner = createProcessorRunner({
       processor: sqliteProjector,
       deps: { db: streamDatabase },
-      storage: {
-        load: async () => ({ state: {}, offset: await streamDatabase.maxOffset() }),
-        save: () => {}, // SQLite is its own checkpoint (MAX(offset))
-      },
+      storage: { load: () => undefined, save: () => {} },
       stream: streamPortFromRpc(election.connection.rpc),
     });
-    const sink = new ProcessorSink((batch) =>
-      runner.processEventBatch(batch),
-    );
+    const sink = new ProcessorSink((batch) => {
+      receivedEventCount += batch.events.length;
+      (globalThis as unknown as { __receivedEventCount?: number }).__receivedEventCount = receivedEventCount;
+      snapshot = { ...snapshot, receivedEventCount };
+      emitSnapshot();
+      return runner.processEventBatch(batch);
+    });
 
     leaderChannel = new BroadcastChannel(`stream-subscription:${encodeURIComponent(args.streamPath)}`);
     leaderElector = createLeaderElection(leaderChannel);
