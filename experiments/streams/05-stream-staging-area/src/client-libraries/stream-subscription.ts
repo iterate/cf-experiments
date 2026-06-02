@@ -1,11 +1,11 @@
 import { RpcTarget, type RpcStub } from "capnweb";
 import type { StreamEvent } from "@cf-experiments/shared/event";
-import type { StreamCursor, StreamRpc, SubscriptionSink } from "../stream-types.js";
+import type { StreamRpc, SubscriptionSink } from "../stream-types.js";
 
 export async function withStreamSubscription(args: {
   connection: { rpc: RpcStub<StreamRpc> };
   subscriptionKey: string;
-  afterOffset?: StreamCursor;
+  afterOffset?: number;
   processEventBatch?: (events: StreamEvent[]) => void;
 }): Promise<
   AsyncDisposable &

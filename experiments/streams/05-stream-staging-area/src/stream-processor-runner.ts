@@ -11,7 +11,6 @@ import {
 import { echo } from "./demo-processor.js";
 import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
 import type {
-  StreamCursor,
   StreamProcessorRunnerRpc,
   StreamProcessorRunnerSnapshot,
   StreamProcessorSlug,
@@ -38,7 +37,7 @@ export class StreamProcessorRunner extends DurableObject {
     stream: RpcStub<StreamRpc>;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
     streamRuntimeState: { state: CoreStreamState };
-  }): { sink: SubscriptionSink; afterOffset?: StreamCursor } {
+  }): { sink: SubscriptionSink; afterOffset?: number } {
     const subscriber = args.subscriptionConfiguredEvent.payload.subscriber;
     if (subscriber.type !== "built-in") {
       throw new Error("StreamProcessorRunner only supports built-in subscribers");

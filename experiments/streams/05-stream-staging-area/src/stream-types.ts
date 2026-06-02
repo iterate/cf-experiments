@@ -2,9 +2,6 @@ import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event
 import type { RpcStub, RpcTarget } from "capnweb";
 import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
 
-/** A stable event-log boundary. Offsets are 1-based, so `0` means before the first event. */
-export type StreamCursor = number;
-
 /**
  * The subscriber-side capnweb RPC target that receives stream event batches.
  * The stream piggybacks its high-water-mark (`headOffset`/`headCreatedAt`) so the
@@ -24,7 +21,7 @@ export type StreamRpc = {
   appendBatch(args: { events: StreamEventInput[] }): StreamEvent[];
   getEvent(
     args:
-      | { offset: StreamCursor; idempotencyKey?: never }
+      | { offset: number; idempotencyKey?: never }
       | { idempotencyKey: string; offset?: never },
   ): StreamEvent | undefined;
   /**
@@ -32,8 +29,8 @@ export type StreamRpc = {
    * but the first SQLite rewrite keeps the read API offset-only.
    */
   getEvents(args?: {
-    afterOffset?: StreamCursor;
-    beforeOffset?: StreamCursor | null;
+    afterOffset?: number;
+    beforeOffset?: number | null;
     limit?: number;
   }): StreamEvent[];
   /**
@@ -43,7 +40,7 @@ export type StreamRpc = {
   subscribe(args: {
     subscriptionKey: SubscriptionKey;
     sink: RpcStub<SubscriptionSink>;
-    afterOffset?: StreamCursor;
+    afterOffset?: number;
   }): { unsubscribe(): void };
   runtimeState(): {
     state: CoreStreamState;
@@ -61,7 +58,7 @@ export type SubscriptionKey = string;
 export type ConnectionInfo = {
   direction: "inbound" | "outbound";
   startedAt: string;
-  cursor: StreamCursor;
+  cursor: number;
   batchesSent: number;
   eventsSent: number;
   lastDeliveredAt?: string;
@@ -83,6 +80,6 @@ export type StreamProcessorRunnerRpc = SubscriptionSink & {
     stream: RpcStub<StreamRpc>;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
     streamRuntimeState: { state: CoreStreamState };
-  }): { sink: SubscriptionSink; afterOffset?: StreamCursor };
+  }): { sink: SubscriptionSink; afterOffset?: number };
   runtimeState(): StreamProcessorRunnerRuntimeState;
 };

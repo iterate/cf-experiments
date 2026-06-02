@@ -9,7 +9,6 @@ import {
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import { coreStreamProcessorContract, type CoreStreamState } from "./core-stream-processor.js";
 import type {
-  StreamCursor,
   StreamProcessorRunnerRpc,
   StreamRpc,
   SubscriptionSink,
@@ -313,8 +312,8 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
 
   getEvents(
     args: {
-      afterOffset?: StreamCursor;
-      beforeOffset?: StreamCursor | null;
+      afterOffset?: number;
+      beforeOffset?: number | null;
       limit?: number;
     } = {},
   ): StreamEvent[] {
@@ -355,7 +354,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
   subscribe(args: {
     subscriptionKey: string;
     sink: RpcStub<SubscriptionSink>;
-    afterOffset?: StreamCursor;
+    afterOffset?: number;
   }): { unsubscribe(): void } {
     // Type-filtered subscriptions belong here later. For now every subscription
     // observes the stream's full ordered event log after its offset boundary.
@@ -414,7 +413,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     direction: "inbound" | "outbound";
     subscriptionKey: string;
     sink: RpcStub<SubscriptionSink>;
-    afterOffset?: StreamCursor;
+    afterOffset?: number;
     onClose?: () => void;
   }): { unsubscribe(): void } {
     const subscriptionKey = args.subscriptionKey.trim();
@@ -570,7 +569,7 @@ type Connection = {
   readonly direction: "inbound" | "outbound";
   readonly startedAt: string;
   /** Highest offset delivered to the sink; also the pump's resume cursor. */
-  readonly cursor: StreamCursor;
+  readonly cursor: number;
   batchesSent: number;
   eventsSent: number;
   lastDeliveredAt?: string;
