@@ -1,5 +1,4 @@
 import {
-  useCallback,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -87,6 +86,7 @@ function StreamTopBar({ streamPath }: { streamPath: string }) {
 function EventRows({ snapshot }: { snapshot: StreamBrowserSnapshot }) {
   const events = snapshot.events;
   const parentRef = useRef<HTMLDivElement>(null);
+  const scrolledToInitialEnd = useRef(false);
   const previousEventCount = useRef(events.length);
   const [expandedOffsets, setExpandedOffsets] = useState(() => new Set<number>());
   const [isFollowingEnd, setIsFollowingEnd] = useState(true);
@@ -98,66 +98,59 @@ function EventRows({ snapshot }: { snapshot: StreamBrowserSnapshot }) {
   const virtualizer = useVirtualizer({
     count: events.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 220,
+    estimateSize: () => 40,
     getItemKey: (index) => events[index]?.offset ?? index,
     anchorTo: "end",
+    followOnAppend: true,
+    scrollEndThreshold: 4,
     overscan: 8,
+    onChange(instance) {
+      const nextScrollPosition = {
+        isAtTop: (instance.scrollOffset ?? 0) <= 4,
+        isAtEnd: instance.isAtEnd(),
+      };
+      if (nextScrollPosition.isAtEnd) {
+        setIsFollowingEnd((current) => (current ? current : true));
+        setUnreadEventCount((current) => (current === 0 ? current : 0));
+      }
+      setScrollPosition((current) =>
+        current.isAtTop === nextScrollPosition.isAtTop &&
+        current.isAtEnd === nextScrollPosition.isAtEnd
+          ? current
+          : nextScrollPosition,
+      );
+    },
   });
   const virtualItems = virtualizer.getVirtualItems();
-
-  const syncScrollPosition = useCallback(() => {
-    const scrollElement = parentRef.current;
-    if (scrollElement === null || events.length === 0) {
-      setScrollPosition((current) =>
-        current.isAtTop && current.isAtEnd ? current : { isAtTop: true, isAtEnd: true },
-      );
-      return;
-    }
-    const distanceFromEnd =
-      scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight;
-    // Keep this strict: a generous threshold makes small upward scrolls get treated
-    // as "still at bottom", so new events immediately pull the viewport back down.
-    const nextScrollPosition = {
-      isAtTop: scrollElement.scrollTop <= 4,
-      isAtEnd: distanceFromEnd <= 4,
-    };
-    if (nextScrollPosition.isAtEnd) {
-      setIsFollowingEnd((current) => (current ? current : true));
-      setUnreadEventCount((current) => (current === 0 ? current : 0));
-    }
-    setScrollPosition((current) =>
-      current.isAtTop === nextScrollPosition.isAtTop &&
-      current.isAtEnd === nextScrollPosition.isAtEnd
-        ? current
-        : nextScrollPosition,
-    );
-  }, [events.length]);
 
   useLayoutEffect(() => {
     const appendedEventCount = Math.max(0, events.length - previousEventCount.current);
     previousEventCount.current = events.length;
 
-    // The live-end follow mode is user intent. Virtualizer measurements can briefly
-    // lag while many rows append, so button/unread state must not be driven by one
-    // frame where the measured scroll position is temporarily behind the rendered rows.
+    if (!scrolledToInitialEnd.current) {
+      if (events.length === 0) return;
+      scrolledToInitialEnd.current = true;
+      virtualizer.scrollToEnd();
+      setUnreadEventCount((current) => (current === 0 ? current : 0));
+      return;
+    }
+
+    // TanStack Virtual owns the end measurement. This state is just the user's
+    // intent: keep following the live end until they deliberately move away.
     if (isFollowingEnd && events.length > 0) {
       virtualizer.scrollToEnd();
       setUnreadEventCount((current) => (current === 0 ? current : 0));
-    } else if (appendedEventCount > 0) {
+    } else if (appendedEventCount > 0 && !scrollPosition.isAtEnd) {
       setUnreadEventCount((current) => current + appendedEventCount);
     }
-    syncScrollPosition();
-  }, [events.length, isFollowingEnd, syncScrollPosition, virtualizer]);
+  }, [events.length, isFollowingEnd, scrollPosition.isAtEnd, virtualizer]);
 
   return (
     <section
       className="stream-page__stream"
       aria-label="Stream events"
       ref={parentRef}
-      onScroll={syncScrollPosition}
-      onTouchStart={() => {
-        setIsFollowingEnd(false);
-      }}
+      onTouchStart={() => setIsFollowingEnd(false)}
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) setIsFollowingEnd(false);
       }}
@@ -242,7 +235,6 @@ function EventRows({ snapshot }: { snapshot: StreamBrowserSnapshot }) {
                   className="stream-page__scroll-button"
                   type="button"
                   onClick={() => {
-                    // This means "follow the live end", not just "jump there once".
                     setIsFollowingEnd(true);
                     virtualizer.scrollToEnd();
                     setUnreadEventCount(0);
