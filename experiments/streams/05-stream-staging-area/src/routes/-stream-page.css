@@ -58,6 +58,10 @@ body {
   color: #263142;
 }
 
+.stream-page__button--danger {
+  background: #b42318;
+}
+
 .stream-page__button-row {
   display: flex;
   flex-wrap: wrap;

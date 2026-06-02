@@ -3,22 +3,8 @@ import type { SimpleStreamProcessorSnapshot } from "@cf-experiments/shared/simpl
 import type { RpcStub, RpcTarget } from "capnweb";
 import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
 
-/**
- * A stable boundary in a stream's ordered event log.
- *
- * Stream event offsets are zero-based integers. Passing a number names the
- * boundary at that event offset; stream methods decide whether that boundary is
- * used as an exclusive lower bound (`afterOffset`) or exclusive upper bound
- * (`beforeOffset`).
- *
- * `"start"` means the cursor before the first event in the stream. Use it to
- * replay from offset 0.
- *
- * `"end"` means the cursor after the latest event currently visible to the
- * Durable Object when the method resolves the cursor. Use it to skip history
- * and only observe future appends.
- */
-export type StreamCursor = number | "start" | "end";
+/** A stable event-log boundary. Offsets are 1-based, so `0` means before the first event. */
+export type StreamCursor = number;
 
 /** The subscriber-side capnweb RPC target that receives stream event batches. */
 export type SubscriptionSink = RpcTarget & {
@@ -26,17 +12,14 @@ export type SubscriptionSink = RpcTarget & {
 };
 
 export type StreamRpc = {
-  append(args: { event: StreamEventInput; durability?: AppendDurability }): Promise<StreamEvent>;
-  appendBatch(args: {
-    events: StreamEventInput[];
-    durability?: AppendDurability;
-  }): Promise<StreamEvent[]>;
+  append(args: { event: StreamEventInput }): StreamEvent;
+  appendBatch(args: { events: StreamEventInput[] }): StreamEvent[];
   getEvent(
     args: { offset: Offset; idempotencyKey?: never } | { idempotencyKey: string; offset?: never },
   ): StreamEvent | undefined;
   getEvents(args?: {
     afterOffset?: StreamCursor;
-    beforeOffset?: StreamCursor;
+    beforeOffset?: StreamCursor | null;
     limit?: number;
   }): StreamEvent[];
   subscribe(args: {
@@ -50,14 +33,11 @@ export type StreamRpc = {
       liveSubscriptions: Record<SubscriptionKey, Subscription>;
     };
   };
+  kill(): void;
+  reduce(args: { event: StreamEvent; state?: CoreStreamState }): CoreStreamState;
 };
 
 export type SubscriptionKey = string;
-
-export type AppendDurability = {
-  closeOutputGate?: boolean;
-  waitForStorageSync?: boolean;
-};
 
 export type Subscription = {
   direction: "inbound" | "outbound";

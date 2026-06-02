@@ -226,8 +226,7 @@ function EventRows({
         | { type: "stop-following-end" }
         | { type: "clear-unread" }
         | { type: "add-unread"; count: number }
-        | { type: "set-scroll-position"; scrollPosition: { isAtTop: boolean; isAtEnd: boolean } }
-        | { type: "set-query-window"; queryWindow: { startIndex: number; limit: number } },
+        | { type: "set-scroll-position"; scrollPosition: { isAtTop: boolean; isAtEnd: boolean } },
     ) => {
       switch (action.type) {
         case "follow-end":
@@ -246,16 +245,10 @@ function EventRows({
             state.scrollPosition.isAtEnd === action.scrollPosition.isAtEnd
             ? state
             : { ...state, scrollPosition: action.scrollPosition };
-        case "set-query-window":
-          return state.queryWindow.startIndex === action.queryWindow.startIndex &&
-            state.queryWindow.limit === action.queryWindow.limit
-            ? state
-            : { ...state, queryWindow: action.queryWindow };
       }
     },
     {
       isFollowingEnd: true,
-      queryWindow: { startIndex: 0, limit: 80 },
       scrollPosition: { isAtTop: true, isAtEnd: true },
       unreadEventCount: 0,
     },
@@ -270,17 +263,6 @@ function EventRows({
     scrollEndThreshold: 4,
     overscan: 8,
     onChange(instance) {
-      const virtualItems = instance.getVirtualItems();
-      const firstVirtualItem = virtualItems[0];
-      const lastVirtualItem = virtualItems.at(-1);
-      if (firstVirtualItem !== undefined && lastVirtualItem !== undefined) {
-        const nextQueryWindow = {
-          startIndex: firstVirtualItem.index,
-          limit: lastVirtualItem.index - firstVirtualItem.index + 1,
-        };
-        dispatchScrollState({ type: "set-query-window", queryWindow: nextQueryWindow });
-      }
-
       const nextScrollPosition = {
         isAtTop: (instance.scrollOffset ?? 0) <= 4,
         isAtEnd: instance.isAtEnd(),
@@ -340,7 +322,6 @@ function EventRows({
           >
             <EventRowWindow
               expandedOffsets={expandedOffsets}
-              queryWindow={scrollState.queryWindow}
               streamDatabase={streamDatabase}
               virtualItems={virtualItems}
               measureElement={virtualizer.measureElement}
@@ -400,33 +381,41 @@ function EventRows({
 
 function EventRowWindow({
   streamDatabase,
-  queryWindow,
   virtualItems,
   expandedOffsets,
   measureElement,
   onToggleOffset,
 }: {
   streamDatabase: StreamBrowserDatabase;
-  queryWindow: { startIndex: number; limit: number };
   virtualItems: VirtualItem[];
   expandedOffsets: Set<number>;
   measureElement: (node: Element | null) => void;
   onToggleOffset(offset: number): void;
 }) {
+  const firstIndex = virtualItems[0]?.index ?? 0;
+  const lastIndex = virtualItems.at(-1)?.index ?? -1;
+  const pageStartIndex = Math.floor(firstIndex / 1_000) * 1_000;
+  const pageEndIndex = Math.max(lastIndex, pageStartIndex + 999);
+  const pageSize = pageEndIndex - pageStartIndex + 1;
   const rowQuery = useMemo(
     () => (sql: SqlTag) => sql`
       SELECT virtual_index, offset, type, idempotency_key, created_at, raw_json
       FROM events
       ORDER BY virtual_index ASC
-      LIMIT ${queryWindow.limit}
-      OFFSET ${queryWindow.startIndex}
+      LIMIT ${pageSize}
+      OFFSET ${pageStartIndex}
     `,
-    [queryWindow.limit, queryWindow.startIndex],
+    [pageSize, pageStartIndex],
   );
   const rows = useStreamReactiveQuery<StreamEventRow>(streamDatabase.sqlocal, rowQuery);
+  const rowsByVirtualizerIndex = useMemo(() => {
+    const rowsByVirtualizerIndex = new Map<number, StreamEventRow>();
+    rows.forEach((row, index) => rowsByVirtualizerIndex.set(pageStartIndex + index, row));
+    return rowsByVirtualizerIndex;
+  }, [pageStartIndex, rows]);
 
   return virtualItems.map((virtualItem) => {
-    const event = rows[virtualItem.index - queryWindow.startIndex];
+    const event = rowsByVirtualizerIndex.get(virtualItem.index);
     const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
 
     return (
@@ -505,6 +494,7 @@ function StreamSidebar({
         eventCount={eventCount}
         snapshot={snapshot}
         streamDatabase={streamDatabase}
+        streamStore={streamStore}
       />
       <InsertEventsTool
         sqliteWriteMode={sqliteWriteMode}
@@ -519,15 +509,18 @@ function StreamSidebar({
 function SubscriptionTool({
   snapshot,
   streamDatabase,
+  streamStore,
   eventCount,
 }: {
   snapshot: StreamBrowserSnapshot;
   streamDatabase: StreamBrowserDatabase | undefined;
+  streamStore: StreamBrowserStore;
   eventCount: number;
 }) {
   const [databaseActionState, setDatabaseActionState] = useState<
     "idle" | "downloading" | "clearing" | "done" | "error"
   >("idle");
+  const [killActionState, setKillActionState] = useState<"idle" | "killing" | "sent">("idle");
 
   return (
     <section className="stream-page__tool">
@@ -578,10 +571,10 @@ function SubscriptionTool({
           </dd>
         </div>
         <div>
-          <dt>DB bytes</dt>
+          <dt>DB size</dt>
           <dd>
             <output className="stream-page__state">
-              {snapshot.databaseInfo?.databaseSizeBytes ?? 0}
+              {formatByteSize(snapshot.databaseInfo?.databaseSizeBytes ?? 0)}
             </output>
           </dd>
         </div>
@@ -617,18 +610,47 @@ function SubscriptionTool({
         >
           Clear local DB
         </button>
+        <button
+          className="stream-page__button stream-page__button--danger"
+          disabled={killActionState === "killing"}
+          type="button"
+          onClick={() => {
+            setKillActionState("killing");
+            void streamStore.kill().then(
+              () => setKillActionState("sent"),
+              () => setKillActionState("sent"),
+            );
+          }}
+        >
+          Kill stream
+        </button>
       </div>
       <output
         className={
           databaseActionState === "error"
             ? "stream-page__insert-state stream-page__insert-state--error"
-            : "stream-page__insert-state"
+          : "stream-page__insert-state"
         }
       >
-        {databaseActionState}
+        {killActionState === "idle" ? databaseActionState : killActionState}
       </output>
     </section>
   );
+}
+
+function formatByteSize(bytes: number) {
+  const units = ["B", "KB", "MB", "GB"];
+  let size = bytes;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${size.toLocaleString(undefined, {
+    maximumFractionDigits: unitIndex === 0 ? 0 : 1,
+  })} ${units[unitIndex]}`;
 }
 
 function InsertEventsTool({

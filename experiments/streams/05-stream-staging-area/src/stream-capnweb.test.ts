@@ -36,7 +36,7 @@ describe("stream capnweb protocol", () => {
     expect(appended).toMatchObject({
       type: "test.stream.browser-client",
       payload: { path },
-      offset: 2,
+      offset: 3,
       createdAt: expect.any(String),
     });
   });
@@ -55,7 +55,7 @@ describe("stream capnweb protocol", () => {
     expect(appended).toMatchObject({
       type: "test.stream.capnweb-append",
       payload: { path },
-      offset: 2,
+      offset: 3,
       createdAt: expect.any(String),
     });
   });
@@ -95,38 +95,98 @@ describe("stream capnweb protocol", () => {
     expect(batch).toMatchObject([
       {
         type: "test.stream.capnweb-batch-new",
-        offset: 3,
+        offset: 4,
         payload: { n: 1 },
       },
       existing,
       {
         type: "test.stream.capnweb-batch-new",
-        offset: 4,
+        offset: 5,
         payload: { n: 2 },
       },
     ]);
   });
 
-  e2eIt("can append through the public output-gated storage path", async () => {
-    const path = `stream-capnweb-sync-append-${crypto.randomUUID()}`;
+  e2eIt("deduplicates same-batch idempotency keys before writing", async () => {
+    const path = `stream-capnweb-same-batch-idempotency-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
-    const appended = await stream.rpc.append({
+    const batch = await stream.rpc.appendBatch({
+      events: [
+        {
+          type: "test.stream.capnweb-same-batch-idempotency",
+          idempotencyKey: "same-batch",
+          payload: { n: 1 },
+        },
+        {
+          type: "test.stream.capnweb-same-batch-idempotency",
+          idempotencyKey: "same-batch",
+          payload: { n: 2 },
+        },
+      ],
+    });
+
+    expect(batch[1]).toEqual(batch[0]);
+    await expect(
+      stream.rpc.getEvents({ afterOffset: 0 }).then((events) => events.map((event) => event.type)),
+    ).resolves.toEqual([
+      "events.iterate.com/stream/created",
+      "events.iterate.com/stream/woken",
+      "test.stream.capnweb-same-batch-idempotency",
+    ]);
+  });
+
+  e2eIt("uses exclusive numeric cursors", async () => {
+    const path = `stream-capnweb-cursors-${crypto.randomUUID()}`;
+    await using stream = await connectStream(path);
+
+    await stream.rpc.appendBatch({
+      events: [
+        {
+          type: "test.stream.capnweb-cursor",
+          payload: { n: 1 },
+        },
+        {
+          type: "test.stream.capnweb-cursor",
+          payload: { n: 2 },
+        },
+      ],
+    });
+
+    await expect(stream.rpc.getEvents({ afterOffset: 0 })).resolves.toMatchObject([
+      { offset: 1 },
+      { offset: 2 },
+      { offset: 3 },
+      { offset: 4 },
+    ]);
+    await expect(stream.rpc.getEvents({ afterOffset: 1, beforeOffset: 4 })).resolves.toMatchObject([
+      { offset: 2 },
+      { offset: 3 },
+    ]);
+    await expect(stream.rpc.getEvents({ afterOffset: 2 })).resolves.toMatchObject([
+      { offset: 3 },
+      { offset: 4 },
+    ]);
+  });
+
+  e2eIt("exposes the stream reducer as an RPC method", async () => {
+    const path = `stream-capnweb-reduce-${crypto.randomUUID()}`;
+    await using stream = await connectStream(path);
+
+    const state = await stream.rpc.reduce({
       event: {
-        type: "test.stream.capnweb-sync-append",
-        payload: { path },
-      },
-      durability: {
-        closeOutputGate: true,
+        type: "events.iterate.com/stream/configured",
+        offset: 3,
+        createdAt: new Date().toISOString(),
+        payload: {
+          config: {
+            simulatedStorageSyncDelayMs: 25,
+          },
+        },
       },
     });
 
-    expect(appended).toMatchObject({
-      type: "test.stream.capnweb-sync-append",
-      payload: { path },
-      offset: 2,
-      createdAt: expect.any(String),
-    });
+    expect(state.config.simulatedStorageSyncDelayMs).toBe(25);
   });
 
   e2eIt("replays history and then delivers live batches to inbound subscribers", async () => {
@@ -156,7 +216,7 @@ describe("stream capnweb protocol", () => {
       [
         expect.objectContaining({
           type: "events.iterate.com/stream/created",
-          offset: 0,
+          offset: 1,
           payload: {
             namespace: "stream",
             path,
@@ -164,7 +224,7 @@ describe("stream capnweb protocol", () => {
         }),
         expect.objectContaining({
           type: "events.iterate.com/stream/woken",
-          offset: 1,
+          offset: 2,
           payload: {
             incarnationId: expect.any(String),
           },
@@ -217,7 +277,7 @@ describe("stream capnweb protocol", () => {
 
     await waitFor(async () => {
       const status = await processor.rpc.runtimeState();
-      return status.snapshot?.state.seen === 1 && status.snapshot.offset >= 4;
+      return status.snapshot?.state.seen === 1 && status.snapshot.offset >= 5;
     }, 1_000);
   });
 
@@ -229,7 +289,7 @@ describe("stream capnweb protocol", () => {
     await subscriber.rpc.subscribe({
       subscriptionKey: "wire",
       sink,
-      afterOffset: 1,
+      afterOffset: 2,
     });
     const afterSubscribe = subscriber.wsMessages.length;
 
@@ -244,7 +304,7 @@ describe("stream capnweb protocol", () => {
     expect(appended).toMatchObject({
       type: input.type,
       payload: input.payload,
-      offset: 2,
+      offset: 3,
       createdAt: expect.any(String),
     });
     expect(sink.batches).toEqual([[appended]]);
@@ -270,7 +330,7 @@ describe("stream capnweb protocol", () => {
                     {
                       type: input.type,
                       payload: input.payload,
-                      offset: 2,
+                      offset: 3,
                       createdAt: expect.any(String),
                     },
                   ],

@@ -14,7 +14,7 @@ describe("core stream processor", () => {
         contract: coreStreamProcessorContract,
         state,
         event: {
-          offset: 0,
+          offset: 1,
           type: "events.iterate.com/stream/created",
           payload: {
             namespace: "stream",
@@ -29,7 +29,7 @@ describe("core stream processor", () => {
         contract: coreStreamProcessorContract,
         state,
         event: {
-          offset: 1,
+          offset: 2,
           type: "events.iterate.com/stream/woken",
           payload: {
             incarnationId: "incarnation-1",
@@ -43,7 +43,7 @@ describe("core stream processor", () => {
         contract: coreStreamProcessorContract,
         state,
         event: {
-          offset: 2,
+          offset: 3,
           type: "events.iterate.com/stream/configured",
           payload: {
             config: {
@@ -58,7 +58,7 @@ describe("core stream processor", () => {
       createdAt: "2026-06-01T12:00:00.000Z",
       eventCount: 3,
       incarnationId: "incarnation-1",
-      maxOffset: 2,
+      maxOffset: 3,
       namespace: "stream",
       path: "test",
       subscriptionsByKey: {},
@@ -74,7 +74,7 @@ describe("core stream processor", () => {
         contract: coreStreamProcessorContract,
         state,
         event: {
-          offset: 0,
+          offset: 1,
           type: "events.iterate.com/stream/created",
           payload: {
             namespace: "stream",
@@ -89,32 +89,12 @@ describe("core stream processor", () => {
         contract: coreStreamProcessorContract,
         state,
         event: {
-          offset: 1,
+          offset: 2,
           type: "events.iterate.com/stream/woken",
           payload: {
             incarnationId: "incarnation-1",
           },
           createdAt: "2026-06-01T12:00:00.001Z",
-        },
-      }),
-    );
-    state = coreStreamProcessorContract.stateSchema.parse(
-      reduce({
-        contract: coreStreamProcessorContract,
-        state,
-        event: {
-          offset: 2,
-          type: "events.iterate.com/stream/subscription-configured",
-          idempotencyKey: "subscription:echo",
-          payload: {
-            subscriptionKey: "echo",
-            subscriber: {
-              type: "built-in",
-              transport: "capnweb-websocket",
-              processorSlug: "echo",
-            },
-          },
-          createdAt: "2026-06-01T12:00:01.000Z",
         },
       }),
     );
@@ -134,15 +114,35 @@ describe("core stream processor", () => {
               processorSlug: "echo",
             },
           },
+          createdAt: "2026-06-01T12:00:01.000Z",
+        },
+      }),
+    );
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 4,
+          type: "events.iterate.com/stream/subscription-configured",
+          idempotencyKey: "subscription:echo",
+          payload: {
+            subscriptionKey: "echo",
+            subscriber: {
+              type: "built-in",
+              transport: "capnweb-websocket",
+              processorSlug: "echo",
+            },
+          },
           createdAt: "2026-06-01T12:00:02.000Z",
         },
       }),
     );
 
-    expect(state.subscriptionsByKey.echo.latestConfiguredEvent.offset).toBe(3);
+    expect(state.subscriptionsByKey.echo.latestConfiguredEvent.offset).toBe(4);
     expect(state).toMatchObject({
       eventCount: 4,
-      maxOffset: 3,
+      maxOffset: 4,
     });
   });
 
@@ -155,7 +155,7 @@ describe("core stream processor", () => {
         contract: coreStreamProcessorContract,
         state,
         event: {
-          offset: 0,
+          offset: 1,
           type: "events.iterate.com/stream/configured",
           payload: {
             config: {

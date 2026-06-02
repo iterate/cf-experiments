@@ -15,6 +15,7 @@ export type StreamBrowserSnapshot = {
 
 export type StreamBrowserStore = Disposable & {
   appendBatch(args: { events: StreamEventInput[] }): RpcPromise<StreamEvent[]>;
+  kill(): RpcPromise<void>;
   getSnapshot(): StreamBrowserSnapshot;
   getServerSnapshot(): StreamBrowserSnapshot;
   subscribe(listener: () => void): () => void;
@@ -81,6 +82,10 @@ export function createStreamBrowserStore(args: {
       url: streamUrl,
       onConnectionStatusChange(connectionStatus) {
         if (disposed) return;
+        if (connectionStatus === "closed" || connectionStatus === "error") {
+          subscriptionHandle = undefined;
+          stream = undefined;
+        }
         snapshot = {
           ...snapshot,
           connectionStatus,
@@ -116,6 +121,15 @@ export function createStreamBrowserStore(args: {
       connect();
       if (stream === undefined) throw new Error("stream connection is disposed");
       return stream.rpc.appendBatch(appendArgs);
+    },
+    kill() {
+      if (connectTimer !== undefined) {
+        clearTimeout(connectTimer);
+        connectTimer = undefined;
+      }
+      connect();
+      if (stream === undefined) throw new Error("stream connection is disposed");
+      return stream.rpc.kill();
     },
     getSnapshot() {
       return snapshot;

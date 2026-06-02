@@ -1,14 +1,15 @@
 import { newWebSocketRpcSession, newWorkersRpcResponse, type RpcStub } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
 import {
+  StreamEvent as StreamEventSchema,
   StreamEventInput as StreamEventInputSchema,
   type StreamEvent,
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
+import { createDurableObjectClient, defineConfig, sql } from "sqlfu";
 import { coreStreamProcessorContract, type CoreStreamState } from "./core-stream-processor.js";
 import type {
-  AppendDurability,
   StreamCursor,
   StreamProcessorRunnerRpc,
   StreamRpc,
@@ -18,12 +19,77 @@ import type {
 } from "./stream-types.js";
 
 export class Stream extends DurableObject<Env> implements StreamRpc {
+  static db = defineConfig({
+    definitions: sql`
+      create table events (
+        offset integer primary key autoincrement,
+        type text not null,
+        created_at text not null,
+        idempotency_key text unique,
+        raw_json blob not null
+      );
+
+      create index events_type_created_at on events (type, created_at);
+    `,
+    migrations: [
+      {
+        name: "2026-06-02T15.50.00.000Z_create_stream_events",
+        content: sql`
+          create table events (
+            offset integer primary key autoincrement,
+            type text not null,
+            created_at text not null,
+            idempotency_key text unique,
+            raw_json blob not null
+          );
+
+          create index events_type_created_at on events (type, created_at);
+        `,
+      },
+    ],
+    queries: {
+      appendEvents: sql.run<{ parameters: { events_json: any } }>`
+        insert into events (offset, type, created_at, idempotency_key, raw_json)
+        select
+          json_extract(value, '$.offset') as offset,
+          json_extract(value, '$.type') as type,
+          json_extract(value, '$.createdAt') as created_at,
+          json_extract(value, '$.idempotencyKey') as idempotency_key,
+          value as raw_json
+        from json_each(:events_json)
+      `,
+      eventByOffset: sql.nullableOne<{ parameters: { offset: number }; result: { raw_json: ArrayBuffer } }>`
+        select raw_json
+        from events
+        where offset = :offset
+        limit 1
+      `,
+      eventByIdempotencyKey: sql.nullableOne<{ parameters: { idempotency_key: string }; result: { raw_json: ArrayBuffer } }>`
+        select raw_json
+        from events
+        where idempotency_key = :idempotency_key
+        limit 1
+      `,
+      eventsInRange: sql.many<{ parameters: { after_offset: number; before_offset: number | null; limit: number }; result: { raw_json: ArrayBuffer } }>`
+        select raw_json
+        from events
+        where offset > :after_offset
+          and (:before_offset is null or offset < :before_offset)
+        order by offset asc
+        limit :limit
+      `,
+    },
+  });
+
+  db: ReturnType<typeof Stream.db<ReturnType<typeof createDurableObjectClient>>>;
   state: CoreStreamState;
 
   #subscriptions = new Map<string, LiveSubscription>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.db = Stream.db(createDurableObjectClient(ctx.storage));
+    this.db.migrate();
 
     // Hydrate state from KV storage, but layer it over the current core initial state.
     // Local experiments often wake Durable Objects created before the latest reducer field existed.
@@ -34,6 +100,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     this.state = coreStreamProcessorContract.stateSchema.parse({
       ...initialState,
       ...storedState,
+      maxOffset: Math.max(0, storedState?.maxOffset ?? initialState.maxOffset),
       config: {
         ...initialState.config,
         ...storedState?.config,
@@ -62,14 +129,12 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
       payload: { incarnationId: crypto.randomUUID() },
     });
 
-    // Startup should not wait for a persistent storage write before connecting outbound consumers.
-    this.appendBatch({
-      events: startupEvents,
-      durability: { waitForStorageSync: false, closeOutputGate: false },
-    }).then(
-      (events) => console.log("Stream startup events appended", events),
-      (error: unknown) => console.error("Stream startup append failed", error),
-    );
+    try {
+      const events = this.appendBatch({ events: startupEvents });
+      console.log("Stream startup events appended", events);
+    } catch (error: unknown) {
+      console.error("Stream startup append failed", error);
+    }
   }
 
   /** Opens the capnweb RPC API for this stream Durable Object. */
@@ -80,84 +145,89 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
   /**
    * Convenience RPC for appending one event.
    *
-   * Uses `appendBatch()`, so it supports the same durability options.
-   * Cloudflare docs: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#put
+   * Uses `appendBatch()`, so all append ordering and persistence stays in one place.
    */
-  async append(args: { event: StreamEventInput; durability?: AppendDurability }) {
-    const events = await this.appendBatch({
-      events: [args.event],
-      durability: args.durability,
-    });
-    return events[0];
+  append(args: { event: StreamEventInput }): StreamEvent {
+    return this.appendBatch({ events: [args.event] })[0]!;
   }
 
-  /**
-   * Coordinates append phases: beforeAppend, durability-specific persistence, afterAppend.
-   *
-   * `closeOutputGate` uses sync KV writes. Otherwise this uses `storage.put(..., { allowUnconfirmed: true })`.
-   * Set `waitForStorageSync` to await `storage.sync()` before `afterAppend`.
-   * Cloudflare docs: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#sync
-   */
-  async appendBatch(args: {
-    events: StreamEventInput[];
-    durability?: AppendDurability;
-  }): Promise<StreamEvent[]> {
-    const closeOutputGate = args.durability?.closeOutputGate ?? false;
-    const waitForStorageSync = args.durability?.waitForStorageSync ?? true;
-    if (closeOutputGate && !waitForStorageSync) {
-      throw new Error("closeOutputGate requires waitForStorageSync for public appends");
-    }
+  /** Synchronously appends, reduces, persists, then kicks off live delivery. */
+  appendBatch(args: { events: StreamEventInput[] }): StreamEvent[] {
+    let state = this.state;
+    const events: StreamEvent[] = [];
+    const newEvents: StreamEvent[] = [];
+    const idempotencyHitsInBatch = new Map<string, StreamEvent>();
 
-    const batch = this.#beforeAppend({ events: args.events });
-    if (batch.newEvents.length === 0) return batch.events;
+    // 1. Prepare events and reduced state.
+    for (const eventInput of args.events) {
+      const input = StreamEventInputSchema.strict().parse(eventInput);
 
-    if (closeOutputGate) {
-      // This is the normal Durable Object sync KV API: simple and predictable, but it closes
-      // the output gate until the write is durable. The async branch below is deliberately
-      // weird: deployed benchmarks showed `allowUnconfirmed` is useful for high append volume
-      // with a few subscribers and fast read-your-own appends, while sync writes can still win
-      // under heavier fan-out. Keep both until this experiment has a narrower production shape.
-      this.#persistAppendSync(batch);
-    } else {
-      const storageWrite = this.ctx.storage.put(this.#storageWritesForAppend(batch), {
-        allowUnconfirmed: true,
-        noCache: true,
-      });
-      this.state = batch.newState;
-
-      if (this.state.config.simulatedStorageSyncDelayMs !== null) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, this.state.config.simulatedStorageSyncDelayMs ?? 0),
-        );
+      if (input.idempotencyKey !== undefined) {
+        // Same-batch idempotency should behave like already-persisted idempotency.
+        const existing =
+          idempotencyHitsInBatch.get(input.idempotencyKey) ??
+          this.getEvent({ idempotencyKey: input.idempotencyKey });
+        if (existing !== undefined) {
+          if (input.offset !== undefined && input.offset !== existing.offset) {
+            throw new Error(`idempotency hit at offset ${existing.offset}, got ${input.offset}`);
+          }
+          events.push(existing);
+          continue;
+        }
       }
 
-      if (waitForStorageSync) {
-        await storageWrite;
-        await this.ctx.storage.sync();
+      const event = {
+        ...input,
+        offset: state.maxOffset + 1,
+        createdAt: new Date().toISOString(),
+      };
+      if (input.offset !== undefined && input.offset !== event.offset) {
+        throw new Error(`expected offset ${event.offset}, got ${input.offset}`);
+      }
+
+      state = this.reduce({ event, state });
+      events.push(event);
+      newEvents.push(event);
+      if (event.idempotencyKey !== undefined) {
+        idempotencyHitsInBatch.set(event.idempotencyKey, event);
       }
     }
 
-    await this.#afterAppend(batch);
-    return batch.events;
+    if (newEvents.length === 0) return events;
+
+    // 2. Atomically persist new event rows and reduced state.
+    // Durable Object sync KV is backed by the same SQLite storage system as sql.exec.
+    // Keep this section await-free: event rows + reduced state are the atomic append boundary.
+    this.db.appendEvents({ events_json: JSON.stringify(newEvents) });
+    this.ctx.storage.kv.put("state", state);
+    this.state = state;
+
+    // 3. Kick off post-append delivery/reconciliation; append success is already decided.
+    this.#deliverToLiveSubscriptions(newEvents);
+    this.#reconcileOutboundSubscriptions().then(
+      undefined,
+      (error: unknown) => console.error("Stream post-append reconciliation failed", error),
+    );
+
+    return events;
   }
 
   getEvent(
     args: { offset: number; idempotencyKey?: never } | { idempotencyKey: string; offset?: never },
   ): StreamEvent | undefined {
     if (args.idempotencyKey !== undefined) {
-      const existingOffset = this.ctx.storage.kv.get<number>(`idempotency:${args.idempotencyKey}`);
-      if (existingOffset === undefined) return undefined;
-      return this.getEvent({ offset: existingOffset });
+      const row = this.db.eventByIdempotencyKey({ idempotency_key: args.idempotencyKey });
+      return row === null ? undefined : streamEventFromRow(row);
     }
-    const event = this.ctx.storage.kv.get<StreamEvent>(`event:${args.offset}`);
-    if (event === undefined) throw new Error(`No stream event found at offset ${args.offset}.`);
-    return event;
+    const row = this.db.eventByOffset({ offset: args.offset });
+    if (row === null) throw new Error(`No stream event found at offset ${args.offset}.`);
+    return streamEventFromRow(row);
   }
 
   getEvents(
     args: {
       afterOffset?: StreamCursor;
-      beforeOffset?: StreamCursor;
+      beforeOffset?: StreamCursor | null;
       limit?: number;
     } = {},
   ): StreamEvent[] {
@@ -166,27 +236,23 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
       throw new Error("getEvents limit must be a positive integer.");
     }
 
-    const afterOffset = eventOffsetAfterCursor({
-      cursor: args.afterOffset ?? "start",
-      maxOffset: this.state.maxOffset,
-    });
-    const beforeOffset = eventOffsetBeforeCursor({
-      cursor: args.beforeOffset ?? "end",
-      maxOffset: this.state.maxOffset,
-    });
-    const endOffset = Math.min(
-      beforeOffset,
-      eventOffsetBeforeCursor({ cursor: "end", maxOffset: this.state.maxOffset }),
+    return this.db
+      .eventsInRange({
+        after_offset: args.afterOffset ?? 0,
+        before_offset: args.beforeOffset ?? null,
+        limit: limit ?? Number.MAX_SAFE_INTEGER,
+      })
+      .map(streamEventFromRow);
+  }
+
+  reduce(args: { event: StreamEvent; state?: CoreStreamState }): CoreStreamState {
+    return coreStreamProcessorContract.stateSchema.parse(
+      (coreStreamProcessorContract.reduce as any)({
+        contract: coreStreamProcessorContract,
+        state: args.state ?? this.state,
+        event: args.event,
+      }),
     );
-    const events: StreamEvent[] = [];
-
-    for (let offset = afterOffset + 1; offset < endOffset; offset++) {
-      const event = this.ctx.storage.kv.get<StreamEvent>(`event:${offset}`);
-      if (event !== undefined) events.push(event);
-      if (limit !== undefined && events.length === limit) break;
-    }
-
-    return events;
   }
 
   subscribe(args: {
@@ -223,77 +289,15 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     };
   }
 
-  /**
-   * Prepares an append synchronously: idempotency reads, offset allocation, reducer, and return order.
-   */
-  #beforeAppend(args: { events: StreamEventInput[] }): PreparedBatchWrite {
-    const preparedAppend: PreparedBatchWrite = {
-      events: [],
-      newEvents: [],
-      newState: this.state,
-    };
-
-    for (const eventInput of args.events) {
-      const input = StreamEventInputSchema.strict().parse(eventInput);
-
-      if (input.idempotencyKey !== undefined) {
-        const existing = this.getEvent({ idempotencyKey: input.idempotencyKey });
-        if (existing !== undefined) {
-          preparedAppend.events.push(existing);
-          continue;
-        }
-      }
-
-      const offset = preparedAppend.newState.maxOffset + 1;
-      if (input.offset !== undefined && input.offset !== offset) {
-        throw new Error(`expected offset ${offset}, got ${input.offset}`);
-      }
-
-      const event = { ...input, offset, createdAt: new Date().toISOString() };
-      // The core reducer intentionally sees every committed event. TypeScript
-      // cannot model "*" as "any event except the named ones" without breaking
-      // payload narrowing in the reducer's named switch cases.
-      preparedAppend.newState = (coreStreamProcessorContract.reduce as any)({
-        contract: coreStreamProcessorContract,
-        state: preparedAppend.newState,
-        event,
-      });
-      preparedAppend.events.push(event);
-      preparedAppend.newEvents.push(event);
-    }
-
-    return preparedAppend;
+  /** Kills the current Durable Object incarnation so experiments can observe restart behavior. */
+  kill(): void {
+    this.ctx.abort("kill requested");
   }
 
-  /**
-   * Persists with sync KV writes. This output-gated path is for benchmarking experiments.
-   * Cloudflare docs: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/#put
-   */
-  #persistAppendSync(args: PreparedBatchWrite): void {
-    this.state = args.newState;
-    for (const [key, value] of Object.entries(this.#storageWritesForAppend(args))) {
-      this.ctx.storage.kv.put(key, value);
-    }
-  }
-
-  // Returns a record of storage writes for the given append batch.
-  #storageWritesForAppend(batch: PreparedBatchWrite) {
-    const writes: Record<string, unknown> = { state: batch.newState };
-    for (const event of batch.newEvents) writes[`event:${event.offset}`] = event;
-    for (const event of batch.newEvents) {
-      if (event.idempotencyKey !== undefined) {
-        writes[`idempotency:${event.idempotencyKey}`] = event.offset;
-      }
-    }
-    return writes;
-  }
-
-  /** Runs subscriber delivery and outbound reconciliation after new events have been persisted. */
-  async #afterAppend(batch: PreparedBatchWrite): Promise<void> {
+  #deliverToLiveSubscriptions(newEvents: StreamEvent[]): void {
     for (const subscription of this.#subscriptions.values()) {
-      if (subscription.phase === "live") this.#deliverBatch(subscription, batch.newEvents);
+      if (subscription.phase === "live") this.#deliverBatch(subscription, newEvents);
     }
-    await this.#reconcileOutboundSubscriptions();
   }
 
   async #reconcileOutboundSubscriptions() {
@@ -356,17 +360,14 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     const existing = this.#subscriptions.get(subscriptionKey);
     if (existing !== undefined) this.#closeSubscription(existing);
 
-    const afterOffset = args.afterOffset ?? "start";
+    const afterOffset = args.afterOffset ?? 0;
     const subscription: LiveSubscription = {
       direction: args.direction,
       subscriptionKey,
       phase: "catching-up",
       startedAt: new Date().toISOString(),
       afterOffset,
-      lastDeliveredOffset: deliveredOffsetForCursor({
-        cursor: afterOffset,
-        maxOffset: this.state.maxOffset,
-      }),
+      lastDeliveredOffset: afterOffset,
       batchesSent: 0,
       eventsSent: 0,
       sink: args.sink.dup(),
@@ -433,42 +434,8 @@ type LiveSubscription = Subscription & {
   onClose?: () => void;
 };
 
-/** The result of validating a requested append batch before storage writes begin. */
-type PreparedBatchWrite = {
-  /** One output event for each input event, including idempotency hits that will not be written again. */
-  events: StreamEvent[];
-  /** Only events that were newly assigned offsets and need persistence plus delivery. */
-  newEvents: StreamEvent[];
-  /** The reducer state after applying every event in `newEvents`. */
-  newState: CoreStreamState;
-};
-
-/** Resolves a cursor used as an exclusive lower bound into the last skipped event offset. */
-function eventOffsetAfterCursor(args: { cursor: StreamCursor; maxOffset: number }): number {
-  const { cursor, maxOffset } = args;
-  if (cursor === "start") return -1;
-  if (cursor === "end") return maxOffset;
-  if (!Number.isInteger(cursor)) throw new Error("Stream cursor offset must be an integer.");
-  return cursor;
-}
-
-/** Resolves a cursor used as an exclusive upper bound into the first omitted event offset. */
-function eventOffsetBeforeCursor(args: { cursor: StreamCursor; maxOffset: number }): number {
-  const { cursor, maxOffset } = args;
-  if (cursor === "start") return 0;
-  if (cursor === "end") return maxOffset + 1;
-  if (!Number.isInteger(cursor)) throw new Error("Stream cursor offset must be an integer.");
-  return cursor;
-}
-
-/** Resolves a subscription cursor into the last event already considered delivered. */
-function deliveredOffsetForCursor(args: {
-  cursor: StreamCursor;
-  maxOffset: number;
-}): number | undefined {
-  const { cursor, maxOffset } = args;
-  if (cursor === "start") return undefined;
-  if (cursor === "end") return maxOffset;
-  if (!Number.isInteger(cursor)) throw new Error("Stream cursor offset must be an integer.");
-  return cursor;
+function streamEventFromRow(row: { raw_json: string | ArrayBuffer }): StreamEvent {
+  const rawJson =
+    typeof row.raw_json === "string" ? row.raw_json : new TextDecoder().decode(row.raw_json);
+  return StreamEventSchema.parse(JSON.parse(rawJson));
 }

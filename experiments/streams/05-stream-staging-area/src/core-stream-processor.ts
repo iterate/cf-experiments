@@ -14,7 +14,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
       simulatedStorageSyncDelayMs: z.number().int().min(0).default(0).nullable(),
     }),
     eventCount: z.number().int().min(0),
-    maxOffset: z.number().int().min(-1),
+    maxOffset: z.number().int().min(0),
     subscriptionsByKey: z.record(
       z.string(),
       z.object({
@@ -56,7 +56,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
       simulatedStorageSyncDelayMs: 0,
     },
     eventCount: 0,
-    maxOffset: -1,
+    maxOffset: 0,
     subscriptionsByKey: {},
   },
   events: {
@@ -125,9 +125,9 @@ export const coreStreamProcessorContract = defineProcessorContract({
     switch (event.type) {
       // events.iterate.com/stream/created will only ever happen once and is always the first event
       case "events.iterate.com/stream/created":
-        if (event.offset !== 0) {
+        if (event.offset !== 1) {
           throw new Error(
-            "events.iterate.com/stream/created must be the first event and have offset 0",
+            "events.iterate.com/stream/created must be the first event and have offset 1",
           );
         }
         return {
