@@ -13,14 +13,13 @@
   "dependencies": {
     "@cf-experiments/shared": "workspace:*",
     "@cloudflare/vite-plugin": "^1.39.0",
+    "@journeyapps/wa-sqlite": "^1.7.0",
     "@tanstack/react-router": "^1.170.10",
     "@tanstack/react-start": "^1.168.18",
     "@tanstack/react-virtual": "^3.13.26",
-    "broadcast-channel": "^7.3.0",
     "capnweb": "^0.8.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
-    "sqlocal": "^0.18.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

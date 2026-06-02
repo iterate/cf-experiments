@@ -1,5 +1,4 @@
 import type { RpcPromise } from "capnweb";
-import { BroadcastChannel, createLeaderElection } from "broadcast-channel";
 import { z } from "zod";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
@@ -9,11 +8,11 @@ import {
   ProcessorSink,
   streamPortFromRpc,
 } from "../stream-processor.js";
+import { acquireWriterRole, type WriterRole } from "./stream-leader.js";
 import { withStream, type StreamBrowserConnectionStatus } from "./stream-browser.js";
 import {
   getStreamBrowserDatabase,
   type StreamBrowserDatabase,
-  type StreamEventRow,
   type StreamDatabaseInfo,
   type StreamDatabaseWriteMode,
 } from "./stream-browser-db.js";
@@ -30,7 +29,6 @@ export type StreamBrowserSnapshot = {
   /** Events this tab's hosted processor has received from the stream (in-memory, not SQLite). */
   receivedEventCount: number;
   databaseInfo: StreamDatabaseInfo | undefined;
-  recentRowsByVirtualIndex: ReadonlyMap<number, StreamEventRow>;
 };
 
 export type StreamBrowserStore = Disposable & {
@@ -74,8 +72,7 @@ export function createStreamBrowserStore(args: {
 }): StreamBrowserStore {
   let stream: ReturnType<typeof withStream> | undefined;
   let subscriptionHandle: { unsubscribe(): void } | undefined;
-  let leaderChannel: BroadcastChannel<unknown> | undefined;
-  let leaderElector: ReturnType<typeof createLeaderElection> | undefined;
+  let writerRole: WriterRole | undefined;
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let databaseInfoTimer: ReturnType<typeof setTimeout> | undefined;
@@ -94,7 +91,6 @@ export function createStreamBrowserStore(args: {
     connectionError: undefined,
     receivedEventCount: 0,
     databaseInfo: undefined,
-    recentRowsByVirtualIndex: new Map(),
     subscriptionStatus: "idle",
   };
 
@@ -123,26 +119,19 @@ export function createStreamBrowserStore(args: {
     }, 1_000);
   }
 
-  // The projector's SQLite writes land here (for the UI) and surface errors (to reconnect).
-  const offInserted = streamDatabase.onInserted((rows) => {
+  // Each committed write nudges a (debounced) db-size refresh. The rows themselves reach
+  // the UI through reactive queries (db.reactiveQuery), not this store — so there is no
+  // in-memory row cache to maintain here, and writer/reader tabs render identically.
+  const offInserted = streamDatabase.onInserted(() => {
     if (disposed) return;
-    const recentRowsByVirtualIndex = new Map(snapshot.recentRowsByVirtualIndex);
-    for (const row of rows) recentRowsByVirtualIndex.set(row.virtual_index - 1, row);
-    while (recentRowsByVirtualIndex.size > 10_000) {
-      const oldestKey = recentRowsByVirtualIndex.keys().next().value;
-      if (oldestKey === undefined) break;
-      recentRowsByVirtualIndex.delete(oldestKey);
-    }
-    snapshot = { ...snapshot, recentRowsByVirtualIndex };
-    emitSnapshot();
     refreshDatabaseInfoSoon();
   });
   const offWriteError = streamDatabase.onWriteError((error) => {
+    // The subscription is intentionally independent of local SQLite health: a transient
+    // OPFS write hiccup (e.g. cooperative-lock contention with another tab's connection)
+    // must NOT make this tab resign the writer lock, or two tabs would thrash leadership.
+    // Events are still being received; the projector will catch up on the next batch.
     console.error("Browser stream SQLite write failed", error);
-    stopSubscriptionElection();
-    stream?.[Symbol.dispose]();
-    stream = undefined;
-    reconnectAfter(String(error));
   });
 
   function reconnectAfter(connectionError: string) {
@@ -221,27 +210,24 @@ export function createStreamBrowserStore(args: {
       return runner.processEventBatch(batch);
     });
 
-    leaderChannel = new BroadcastChannel(`stream-subscription:${encodeURIComponent(args.streamPath)}`);
-    leaderElector = createLeaderElection(leaderChannel);
-    leaderElector.onduplicate = () => {
-      console.error("Duplicate browser stream subscription leader detected", args.streamPath);
-      stopSubscriptionElection();
-    };
-
+    // Web Locks elect exactly one writer tab. Until this tab wins the lock it is a reader
+    // (it still reads the shared OPFS db reactively, but does NOT subscribe or write). When
+    // it wins, it subscribes and hosts the projector; if it later closes, the lock releases
+    // and another tab takes over automatically.
     snapshot = { ...snapshot, subscriptionStatus: "electing" };
     emitSnapshot();
 
-    const leadershipTimeout = setTimeout(() => {
-      if (!disposed && leaderElector !== undefined && subscriptionHandle === undefined) {
+    const followerTimeout = setTimeout(() => {
+      if (!disposed && subscriptionHandle === undefined) {
         snapshot = { ...snapshot, subscriptionStatus: "follower" };
         emitSnapshot();
       }
     }, 250);
 
-    void leaderElector
-      .awaitLeadership()
+    writerRole = acquireWriterRole(args.streamPath);
+    void writerRole.whenWriter
       .then(() => {
-        clearTimeout(leadershipTimeout);
+        clearTimeout(followerTimeout);
         if (disposed || stream !== election.connection) return undefined;
         snapshot = { ...snapshot, subscriptionStatus: "leader" };
         emitSnapshot();
@@ -266,7 +252,7 @@ export function createStreamBrowserStore(args: {
         emitSnapshot();
       })
       .catch((error: unknown) => {
-        clearTimeout(leadershipTimeout);
+        clearTimeout(followerTimeout);
         if (disposed) return;
         stopSubscriptionElection();
         stream?.[Symbol.dispose]();
@@ -278,10 +264,8 @@ export function createStreamBrowserStore(args: {
   function stopSubscriptionElection() {
     subscriptionHandle?.unsubscribe();
     subscriptionHandle = undefined;
-    void leaderElector?.die();
-    void leaderChannel?.close();
-    leaderElector = undefined;
-    leaderChannel = undefined;
+    writerRole?.release();
+    writerRole = undefined;
     snapshot = { ...snapshot, subscriptionStatus: "idle" };
     if (!disposed) emitSnapshot();
   }
@@ -322,16 +306,11 @@ export function createStreamBrowserStore(args: {
         ...snapshot,
         clearVersion: snapshot.clearVersion + 1,
         databaseInfo: undefined,
-        recentRowsByVirtualIndex: new Map(),
       };
       emitSnapshot();
       await streamDatabase.clear();
       await streamDatabase.compact();
-      snapshot = {
-        ...snapshot,
-        databaseInfo: undefined,
-        recentRowsByVirtualIndex: new Map(),
-      };
+      snapshot = { ...snapshot, databaseInfo: undefined };
       emitSnapshot();
       refreshDatabaseInfo();
       reconnectNow();

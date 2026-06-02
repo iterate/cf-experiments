@@ -1,18 +1,20 @@
 import { cloudflare } from "@cloudflare/vite-plugin";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import viteReact from "@vitejs/plugin-react";
-import sqlocal from "sqlocal/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  // wa-sqlite ships an Emscripten `.mjs` + `.wasm` pair that must NOT go through esbuild's
+  // dep pre-bundling, or the glue/wasm pairing breaks. Exclude it; the dedicated worker
+  // (stream-db.worker.ts) loads the `.wasm` as a hashed asset via a `?url` import, which
+  // Vite resolves correctly in dev and in the production/Cloudflare build alike.
+  //
+  // Note there is deliberately NO COOP/COEP here: OPFSCoopSyncVFS needs no cross-origin
+  // isolation. (Enabling it is what made @sqlite.org/sqlite-wasm auto-install its
+  // async-proxy "opfs" VFS and deadlock in production builds — see log.md.)
+  optimizeDeps: { exclude: ["@journeyapps/wa-sqlite"] },
   plugins: [
-    // coi:false → no COOP/COEP in dev either, so dev matches prod: no SharedArrayBuffer,
-    // so sqlite-wasm never auto-installs its deadlocking async-proxy OPFS VFS. We use the
-    // proxy-free opfs-sahpool VFS (patches/sqlocal@0.18.0.patch), which needs no isolation.
-    sqlocal({ coi: false }),
-    cloudflare({
-      viteEnvironment: { name: "ssr" },
-    }),
+    cloudflare({ viteEnvironment: { name: "ssr" } }),
     tanstackStart(),
     viteReact(),
   ],

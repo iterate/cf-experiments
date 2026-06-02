@@ -18,10 +18,11 @@ export default createServerEntry({
       return env.STREAM.getByName(`stream:${path}`).fetch(request);
     }
 
-    // No COOP/COEP: cross-origin isolation enables SharedArrayBuffer, which makes
-    // sqlite-wasm auto-install its async-proxy OPFS VFS during init — and that proxy
-    // worker deadlocks in production builds (see log.md). The opfs-sahpool VFS we use
-    // (patches/sqlocal@0.18.0.patch) needs neither SAB nor isolation.
+    // No COOP/COEP on purpose: the browser SQLite mirror uses wa-sqlite's OPFSCoopSyncVFS,
+    // which needs no SharedArrayBuffer and no cross-origin isolation. (Isolation is what
+    // made @sqlite.org/sqlite-wasm auto-install its async-proxy OPFS VFS and deadlock in
+    // production builds — see log.md.) Leaving it off also keeps OPFS working the same way
+    // across Chrome, Edge, Safari and mobile Safari.
     return handler.fetch(request);
   },
 });

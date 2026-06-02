@@ -8,8 +8,6 @@ import {
 } from "react";
 import { ClientOnly, Link } from "@tanstack/react-router";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
-import type { SqlTag } from "sqlocal";
-import { useReactiveQuery } from "sqlocal/react";
 import {
   createStreamBrowserStore,
   type StreamBrowserSnapshot,
@@ -19,9 +17,9 @@ import {
   getStreamBrowserDatabase,
   type StreamBrowserDatabase,
   type StreamDatabaseWriteMode,
-  type StreamEventMeta,
   type StreamEventRow,
 } from "../client-libraries/stream-browser-db.js";
+import { useStreamEventCount, useStreamQuery } from "../client-libraries/use-stream-query.js";
 import "./-stream-page.css";
 
 export function StreamPage({ streamPath }: { streamPath: string }) {
@@ -84,26 +82,17 @@ function StreamPageWithDatabase({
   streamStore: StreamBrowserStore;
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
-  const metaQuery = useMemo(
-    () => (sql: SqlTag) => sql`
-      SELECT event_count
-      FROM stream_meta
-      WHERE id = 1
-    `,
-    [],
-  );
-  const metaQueryResult = useReactiveQuery<StreamEventMeta>(
-    streamDatabase.sqlocal,
-    metaQuery,
-  );
-  const eventCount = metaQueryResult.data[0]?.event_count ?? 0;
+  // The live event count drives the virtualizer + tail-follow. It is special-cased in the
+  // db: advanced straight from the writer's change broadcast (no per-append SQL), and it
+  // doubles as the "db ready" signal.
+  const countResult = useStreamEventCount(streamDatabase);
 
   return (
     <StreamPageLayout
-      databaseReady={metaQueryResult.status === "ok"}
-      databaseError={metaQueryResult.error}
-      databaseStatus={metaQueryResult.status}
-      eventCount={eventCount}
+      databaseReady={countResult.status === "ok"}
+      databaseError={countResult.error}
+      databaseStatus={countResult.status}
+      eventCount={countResult.count}
       snapshot={snapshot}
       sqliteWriteMode={sqliteWriteMode}
       streamDatabase={streamDatabase}
@@ -165,7 +154,6 @@ function StreamPageLayout({
             <EventRows
               eventCount={eventCount}
               key={`events:${streamPath}:${snapshot.clearVersion}`}
-              recentRowsByVirtualIndex={snapshot.recentRowsByVirtualIndex}
               snapshot={snapshot}
               streamDatabase={streamDatabase}
             />
@@ -238,12 +226,10 @@ function StreamTopBar({ streamPath }: { streamPath: string }) {
 function EventRows({
   streamDatabase,
   eventCount,
-  recentRowsByVirtualIndex,
   snapshot,
 }: {
   streamDatabase: StreamBrowserDatabase;
   eventCount: number;
-  recentRowsByVirtualIndex: ReadonlyMap<number, StreamEventRow>;
   snapshot: StreamBrowserSnapshot;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
@@ -379,8 +365,8 @@ function EventRows({
             style={{ height: virtualizer.getTotalSize() }}
           >
             <EventRowWindow
+              eventCount={eventCount}
               expandedOffsets={expandedOffsets}
-              recentRowsByVirtualIndex={recentRowsByVirtualIndex}
               streamDatabase={streamDatabase}
               virtualItems={virtualItems}
               measureElement={virtualizer.measureElement}
@@ -429,14 +415,14 @@ function EventRowWindow({
   streamDatabase,
   virtualItems,
   expandedOffsets,
-  recentRowsByVirtualIndex,
+  eventCount,
   measureElement,
   onToggleOffset,
 }: {
   streamDatabase: StreamBrowserDatabase;
   virtualItems: VirtualItem[];
   expandedOffsets: Set<number>;
-  recentRowsByVirtualIndex: ReadonlyMap<number, StreamEventRow>;
+  eventCount: number;
   measureElement: (node: Element | null) => void;
   onToggleOffset(offset: number): void;
 }) {
@@ -445,24 +431,23 @@ function EventRowWindow({
   const pageStartIndex = Math.floor(firstIndex / 1_000) * 1_000;
   const pageEndIndex = Math.max(lastIndex, pageStartIndex + 999);
   const pageSize = pageEndIndex - pageStartIndex + 1;
-  const rowQuery = useMemo(
-    () => (sql: SqlTag) => sql`
-      SELECT virtual_index, offset, type, idempotency_key, created_at, raw_json
-      FROM events
-      WHERE virtual_index >= ${pageStartIndex + 1}
-      ORDER BY virtual_index ASC
-      LIMIT ${pageSize}
-    `,
-    [pageSize, pageStartIndex],
+  // Append-only exploit: a window that already shows the newest rows must re-run when more
+  // arrive ("tail"); a window the user scrolled back to is entirely below any future append,
+  // so its rows can never change ("range") and it never re-runs. Scrolling changes the
+  // params, which re-keys the query and reloads naturally.
+  const followsTail = pageEndIndex >= eventCount - 1;
+  const rowQueryResult = useStreamQuery<StreamEventRow>(
+    streamDatabase,
+    `SELECT virtual_index, offset, type, idempotency_key, created_at, raw_json
+     FROM events WHERE virtual_index >= ? ORDER BY virtual_index ASC LIMIT ?`,
+    [pageStartIndex + 1, pageSize],
+    followsTail ? { type: "tail" } : { type: "range", untilVirtualIndex: pageEndIndex + 1 },
   );
-  const rowQueryResult = useReactiveQuery<StreamEventRow>(streamDatabase.sqlocal, rowQuery);
   const rowsByVirtualizerIndex = new Map<number, StreamEventRow>();
   rowQueryResult.data.forEach((row) => rowsByVirtualizerIndex.set(row.virtual_index - 1, row));
 
   return virtualItems.map((virtualItem) => {
-    const event =
-      rowsByVirtualizerIndex.get(virtualItem.index) ??
-      recentRowsByVirtualIndex.get(virtualItem.index);
+    const event = rowsByVirtualizerIndex.get(virtualItem.index);
     const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
 
     return (
