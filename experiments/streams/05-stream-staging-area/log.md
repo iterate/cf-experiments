@@ -60,6 +60,51 @@ First-party sources:
 
 # Notes
 
+## 2026-06-03
+
+### Migrated the browser SQLite mirror from SQLocal → wa-sqlite OPFSCoopSyncVFS
+
+Replaced SQLocal/`@sqlite.org/sqlite-wasm` (opfs-sahpool, kept working only by removing
+cross-origin isolation) with **wa-sqlite's `OPFSCoopSyncVFS`** (the `@journeyapps/wa-sqlite`
+fork). Why: opfs-sahpool is **single-connection** — only one tab can open the DB — so
+multi-tab reactive reads were impossible. OPFSCoopSyncVFS allows **multiple cooperative
+per-tab connections** against one OPFS file, needs **no SharedArrayBuffer, no async-proxy
+worker, and no COOP/COEP**, and is the VFS PowerSync recommends as the cross-browser
+default (Chrome / Edge / Safari 16.4+ / mobile Safari 16.4+).
+
+Architecture (all in `src/client-libraries/`):
+- `stream-db.worker.ts` — per-tab dedicated worker owning one wa-sqlite connection; generic
+  `exec`/`batch`/`export`. `FileSystemSyncAccessHandle` only exists in a dedicated worker
+  (never main thread / SharedWorker), hence one worker per tab.
+- `stream-leader.ts` — single-writer election via the **Web Locks API**. The lock holder is
+  the writer (subscribes + writes); it auto-releases on tab close for seamless failover.
+- `stream-browser-db.ts` — worker client + an **offset-range-aware reactive query layer**:
+  a query declares the offset range its result depends on; an append announces the range it
+  wrote; only intersecting queries re-run. A fixed historical window is immutable under
+  append-only and never re-runs. The **event count is special-cased** — advanced straight
+  from the writer's cross-tab change broadcast (O(1), zero per-append SQL), since the row
+  count is all TanStack Virtual needs. Cross-tab freshness rides a `BroadcastChannel`.
+- `use-stream-query.ts` — React 19 `useSyncExternalStore` hooks (cached stable snapshot;
+  async re-run triggered in `subscribe`). Not `use()`+Suspense: React docs warn against
+  suspending on a useSyncExternalStore value. oxlint `--deny-warnings` clean.
+- Added a `processor_state(processor_slug, state)` table mirroring the Stream DO's, so the
+  browser can host multiple reducing processors next (same SQLite snapshot shape per runtime).
+
+Verified on the **production build** (`vite preview`) AND **deployed Cloudflare**, headless
+Chrome for Testing: events render and update live; a **second tab that never subscribed
+(`__receivedEventCount === 0`)** reflects the writer's appends reactively via the shared OPFS
+file; 24/24 e2e pass. Multi-tab quirk worth noting: the first cross-tab propagation after an
+append can lag a few seconds while OPFSCoopSyncVFS hands the single `SyncAccessHandle` between
+the two connections (covered by `PRAGMA busy_timeout`); it then converges. NOT yet repeated
+across sessions — provisional.
+
+First-party sources:
+- PowerSync, "Current State of SQLite Persistence on the Web" (May 2026): <https://powersync.com/blog/sqlite-persistence-on-the-web>
+- wa-sqlite (`OPFSCoopSyncVFS`): <https://github.com/rhashimoto/wa-sqlite> ; PowerSync fork: `@journeyapps/wa-sqlite`
+- React `useSyncExternalStore`: <https://react.dev/reference/react/useSyncExternalStore>
+- Web Locks API (MDN): <https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API>
+- OPFS `createSyncAccessHandle` (MDN): <https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle/createSyncAccessHandle>
+
 ## 2026-06-02
 
 ### ~17:00 — Restructured Stream subscription/delivery machinery
