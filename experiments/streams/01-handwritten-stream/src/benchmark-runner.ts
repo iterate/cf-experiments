@@ -8,6 +8,19 @@ import {
   type StreamEvent,
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
+import {
+  runCleanAppendThroughput,
+  runCleanAudioChaos,
+  runCleanAudioPassiveSubscriberOnRunner,
+  runCleanAudioPublisherOnRunner,
+  runCleanAudioSubscriberOnRunner,
+  runCleanEgressContention,
+  runCleanUnconfirmedSweep,
+  type RunCleanAppendThroughputArgs,
+  type RunCleanAudioChaosArgs,
+  type RunCleanEgressContentionArgs,
+  type RunCleanUnconfirmedSweepArgs,
+} from "./clean/benchmark.js";
 import { ORPC_DURABLE_ITERATOR_SIGNING_KEY } from "./orpc-durable-stream.js";
 import type { StreamRpc } from "./stream.js";
 
@@ -264,6 +277,36 @@ export class BenchmarkRunner extends DurableObject {
       runId,
       ...(dispatchMs !== undefined ? { dispatchMs } : {}),
     };
+  }
+
+  runCleanAppendThroughput(args: RunCleanAppendThroughputArgs) {
+    return runCleanAppendThroughput(this.env, args);
+  }
+
+  runCleanEgressContention(args: RunCleanEgressContentionArgs) {
+    return runCleanEgressContention(this.env, args);
+  }
+
+  runCleanAudioChaos(args: RunCleanAudioChaosArgs) {
+    return runCleanAudioChaos(this.env, args);
+  }
+
+  runCleanUnconfirmedSweep(args: RunCleanUnconfirmedSweepArgs) {
+    return runCleanUnconfirmedSweep(this.env, args);
+  }
+
+  runCleanAudioSubscriber(args: Parameters<typeof runCleanAudioSubscriberOnRunner>[1]) {
+    return runCleanAudioSubscriberOnRunner(this.env, args);
+  }
+
+  runCleanAudioPassiveSubscriber(
+    args: Parameters<typeof runCleanAudioPassiveSubscriberOnRunner>[1],
+  ) {
+    return runCleanAudioPassiveSubscriberOnRunner(this.env, args);
+  }
+
+  runCleanAudioPublisher(args: Parameters<typeof runCleanAudioPublisherOnRunner>[1]) {
+    return runCleanAudioPublisherOnRunner(this.env, args);
   }
 
   async runAudioChaos(args: RunAudioChaosArgs): Promise<AudioChaosResult> {

@@ -163,7 +163,7 @@ export class JonasStream extends DurableObject<Env> {
       const event = subscription.latestConfiguredEvent;
       if (
         event.payload.subscriber.type !== "built-in" ||
-        event.payload.subscriber.transport !== "captainweb-websocket"
+        event.payload.subscriber.transport !== "capnweb-websocket"
       ) {
         continue;
       }
@@ -248,7 +248,7 @@ export class JonasStream extends DurableObject<Env> {
       const result = subscriber.target.consumeEvents({ events });
       if (isDisposable(result)) result[Symbol.dispose]();
     } catch (error) {
-      console.error("Error sending CaptainWeb event batch", error);
+      console.error("Error sending capnweb event batch", error);
       this.#removeSubscriber(subscriber);
     }
   }

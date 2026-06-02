@@ -41,6 +41,70 @@ export default {
       return Response.json(result);
     }
 
+    if (url.pathname === "/benchmark/clean/append-throughput") {
+      const runId = url.searchParams.get("run-id") ?? crypto.randomUUID();
+      const result = await env.BENCHMARK_RUNNER.getByName(`${runId}:orchestrator`).runCleanAppendThroughput({
+        runId,
+        stream: url.searchParams.get("stream") ?? undefined,
+        mode: cleanDurabilityParam(url),
+        messages: positiveIntParam(url, "messages"),
+        payloadBytes: positiveIntParam(url, "payload-bytes"),
+        simulatedStorageSyncDelayMs: nonNegativeIntParam(url, "simulated-sync-delay-ms"),
+        pipelined: url.searchParams.get("pipelined") === "true",
+      });
+      return Response.json(result);
+    }
+
+    if (url.pathname === "/benchmark/clean/egress-contention") {
+      const runId = url.searchParams.get("run-id") ?? crypto.randomUUID();
+      const result = await env.BENCHMARK_RUNNER.getByName(`${runId}:orchestrator`).runCleanEgressContention({
+        runId,
+        stream: url.searchParams.get("stream") ?? undefined,
+        durability: cleanDurabilityParam(url),
+        simulatedStorageSyncDelayMs: nonNegativeIntParam(url, "simulated-sync-delay-ms"),
+        samples: positiveIntParam(url, "samples"),
+      });
+      return Response.json(result);
+    }
+
+    if (url.pathname === "/benchmark/clean/audio-chaos") {
+      const runId = url.searchParams.get("run-id") ?? crypto.randomUUID();
+      const result = await env.BENCHMARK_RUNNER.getByName(`${runId}:orchestrator`).runCleanAudioChaos({
+        runId,
+        stream: url.searchParams.get("stream") ?? undefined,
+        durability: cleanDurabilityParam(url),
+        publishers: positiveIntParam(url, "publishers"),
+        subscribers: nonNegativeIntParam(url, "subscribers"),
+        slowSubscribers: nonNegativeIntParam(url, "slow-subscribers"),
+        framesPerPublisher: positiveIntParam(url, "frames-per-publisher"),
+        frameMs: positiveIntParam(url, "frame-ms"),
+        paceMs: nonNegativeIntParam(url, "pace-ms"),
+        sampleRate: positiveIntParam(url, "sample-rate"),
+        channels: positiveIntParam(url, "channels"),
+        bytesPerSample: positiveIntParam(url, "bytes-per-sample"),
+        timeoutMs: positiveIntParam(url, "timeout-ms"),
+        simulatedStorageSyncDelayMs: nonNegativeIntParam(url, "simulated-sync-delay-ms"),
+        measureAppendAck: url.searchParams.get("measure-append-ack") === "true",
+        measureSelfEcho: booleanParam(url, "measure-self-echo"),
+      });
+      return Response.json(result);
+    }
+
+    if (url.pathname === "/benchmark/clean/unconfirmed-sweep") {
+      const runId = url.searchParams.get("run-id") ?? crypto.randomUUID();
+      const result = await env.BENCHMARK_RUNNER.getByName(`${runId}:orchestrator`).runCleanUnconfirmedSweep({
+        runId,
+        simulatedStorageSyncDelayMs: nonNegativeIntParam(url, "simulated-sync-delay-ms"),
+        appendMessages: positiveIntParam(url, "append-messages"),
+        appendPayloadBytes: positiveIntParam(url, "append-payload-bytes"),
+        audioPublishers: positiveIntParam(url, "audio-publishers"),
+        audioSubscribers: positiveIntParam(url, "audio-subscribers"),
+        audioFramesPerPublisher: positiveIntParam(url, "audio-frames-per-publisher"),
+        audioPaceMs: nonNegativeIntParam(url, "audio-pace-ms"),
+      });
+      return Response.json(result);
+    }
+
     if (url.pathname.startsWith("/minimal/")) {
       const name = url.pathname.slice("/minimal/".length) || "default";
       return env.MINIMAL_STREAM.getByName(name).fetch(request);
@@ -112,6 +176,15 @@ function durabilityParam(url: URL) {
   if (raw === null) return undefined;
   if (raw !== "confirmed" && raw !== "best-effort" && raw !== "checkpointed") {
     throw new Error("durability must be confirmed, best-effort, or checkpointed");
+  }
+  return raw;
+}
+
+function cleanDurabilityParam(url: URL) {
+  const raw = url.searchParams.get("durability") ?? url.searchParams.get("mode");
+  if (raw === null) return undefined;
+  if (raw !== "best-effort" && raw !== "confirmed-sync" && raw !== "output-gated") {
+    throw new Error("durability must be best-effort, confirmed-sync, or output-gated");
   }
   return raw;
 }

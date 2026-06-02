@@ -14,7 +14,9 @@
 //                      live also runs afterAppend. No closures over hidden state.
 
 import { z } from "zod";
+import { RpcTarget, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
+import type { StreamRpc, SubscriptionSink } from "../stream-types.js";
 import {
   defineProcessorContract,
   getInitialProcessorState,
@@ -45,19 +47,37 @@ type RunnableContract<Self> = {
   }) => ProcessorState<Self> | null | undefined;
 };
 
-/** Everything afterAppend can touch is an argument -> trivially testable. */
-type AfterAppendArgs<Contract> = {
-  event: ConsumedEvent<Contract>;
-  previousState: ProcessorState<Contract>;
-  state: ProcessorState<Contract>;
+/** The four side-effect capabilities, shared by the per-event and per-batch hooks. */
+type ProcessorCapabilities<Contract> = {
   append(event: EmittedInput<Contract>): void;
   appendAndWait(event: EmittedInput<Contract>): Promise<StreamEvent>;
   blockProcessorUntil(work: () => Promise<unknown>): void;
   waitUntil(promise: Promise<unknown>): void;
 };
 
+/** Per-event hook: narrowed event, for business logic. Everything is an argument. */
+type AfterAppendArgs<Contract> = ProcessorCapabilities<Contract> & {
+  event: ConsumedEvent<Contract>;
+  previousState: ProcessorState<Contract>;
+  state: ProcessorState<Contract>;
+};
+
+/**
+ * Per-batch hook: the RAW new events from ONE delivered batch, for bulk IO such
+ * as a single SQLite transaction. Deliberately not narrowed — a projector wants
+ * every event, and raw delivery also sidesteps the wildcard-`consumes` typing
+ * hole. Async work still goes through `blockProcessorUntil`.
+ */
+type AfterEventBatchArgs<Contract> = ProcessorCapabilities<Contract> & {
+  events: StreamEvent[];
+  state: ProcessorState<Contract>;
+};
+
+// A processor uses per-event `afterAppend` (business logic) and/or per-batch
+// `afterEventBatch` (bulk IO / projection).
 type ProcessorImplementation<Contract> = {
   afterAppend?(args: AfterAppendArgs<Contract>): void;
+  afterEventBatch?(args: AfterEventBatchArgs<Contract>): void;
 };
 
 type Processor<Contract, Deps> = {
@@ -112,35 +132,46 @@ async function createProcessorRunner<Contract extends RunnableContract<Contract>
   // awaited by the stream). Serialize so events apply in offset order.
   let tail = Promise.resolve();
 
-  async function consume(event: StreamEvent) {
-    if (event.offset <= snapshot.offset) return; // idempotent resume / dedup
-    const previousState = snapshot.state;
-    const reduction = runProcessorReduce({ processor: { contract }, event, state: previousState });
-    const state = reduction?.state ?? previousState;
+  // Builds the capability bag, runs the (synchronous) hook, awaits its blockers.
+  async function runWithBlockers(invoke: (capabilities: ProcessorCapabilities<Contract>) => void) {
+    const blockers: Promise<unknown>[] = [];
+    let acceptsBlockers = true;
+    invoke({
+      append: (e) => args.stream.append(e),
+      appendAndWait: (e) => args.stream.appendAndWait(e),
+      blockProcessorUntil: (work) => {
+        if (!acceptsBlockers) throw new Error("blockProcessorUntil must be synchronous");
+        const blocker = work();
+        blockers.push(blocker);
+        args.waitUntil?.(blocker);
+      },
+      waitUntil: (promise) => args.waitUntil?.(promise),
+    });
+    acceptsBlockers = false;
+    await Promise.all(blockers);
+  }
 
-    if (reduction !== undefined) {
-      const blockers: Promise<unknown>[] = [];
-      let acceptsBlockers = true;
-      implementation.afterAppend?.({
-        event: reduction.event,
-        previousState,
-        state,
-        append: (e) => args.stream.append(e),
-        appendAndWait: (e) => args.stream.appendAndWait(e),
-        blockProcessorUntil: (work) => {
-          if (!acceptsBlockers) throw new Error("blockProcessorUntil must be synchronous");
-          const blocker = work();
-          blockers.push(blocker);
-          args.waitUntil?.(blocker);
-        },
-        waitUntil: (promise) => args.waitUntil?.(promise),
-      });
-      acceptsBlockers = false;
-      await Promise.all(blockers);
+  async function handleBatch(events: StreamEvent[]) {
+    const newEvents: StreamEvent[] = [];
+    for (const event of events) {
+      if (event.offset <= snapshot.offset) continue; // idempotent resume / dedup
+      const previousState = snapshot.state;
+      const reduction = runProcessorReduce({ processor: { contract }, event, state: previousState });
+      const state = reduction?.state ?? previousState;
+      if (reduction !== undefined && implementation.afterAppend !== undefined) {
+        await runWithBlockers((capabilities) =>
+          implementation.afterAppend?.({ event: reduction.event, previousState, state, ...capabilities }),
+        );
+      }
+      snapshot = { state, offset: event.offset };
+      newEvents.push(event);
     }
-
-    snapshot = { state, offset: event.offset };
-    await args.storage.save(snapshot);
+    if (newEvents.length > 0 && implementation.afterEventBatch !== undefined) {
+      await runWithBlockers((capabilities) =>
+        implementation.afterEventBatch?.({ events: newEvents, state: snapshot.state, ...capabilities }),
+      );
+    }
+    if (newEvents.length > 0) await args.storage.save(snapshot);
   }
 
   return {
@@ -149,9 +180,7 @@ async function createProcessorRunner<Contract extends RunnableContract<Contract>
     afterOffset: () => snapshot.offset,
     /** The subscription sink. The stream calls this for both replay and live. */
     processEventBatch({ events }: { events: StreamEvent[] }) {
-      tail = tail.then(async () => {
-        for (const event of events) await consume(event);
-      });
+      tail = tail.then(() => handleBatch(events));
       return tail;
     },
   };
@@ -267,4 +296,110 @@ export async function exampleRunnerTest() {
     events: [{ type: "test.processor.input", payload: { path: "/x" }, offset: 2, createdAt: "t" }],
   });
   return { appended, snapshot: runner.snapshot() };
+}
+
+// ===========================================================================
+// Browser proof: the SAME runner hosts a SQLite projector
+// ===========================================================================
+//
+// Identical to node/DO except for the two ports:
+//   - stream port  = the capnweb stream stub (for append + the subscribe call)
+//   - storage port = where the snapshot lives (ephemeral here; real page can
+//                    back it with a SQLite row for true resume)
+// The side effect (afterEventBatch) writes the delivered batch into SQLite in
+// one transaction — preserving the existing batch/row write-mode optimization.
+
+// Matches StreamBrowserDatabase.insertEventBatch, so the real DB satisfies it.
+type SqlitePort = {
+  insertEventBatch(args: { events: StreamEvent[]; writeMode: "batch" | "row" }): Promise<void>;
+};
+
+const sqliteProjectorContract = defineProcessorContract({
+  slug: "browser.sqlite-projector",
+  version: "0.1.0",
+  description: "Projects every stream event into a local SQLite table.",
+  stateSchema: z.object({}),
+  initialState: {},
+  events: {},
+  consumes: [],
+  emits: [],
+});
+
+// No business state, no reduce, no per-event hook: one batched SQLite write per
+// delivered batch. `blockProcessorUntil` preserves order + backpressure.
+const sqliteProjector = implementProcessor(
+  sqliteProjectorContract,
+  (deps: { db: SqlitePort; writeMode: "batch" | "row" }) => ({
+    afterEventBatch({ events, blockProcessorUntil }) {
+      blockProcessorUntil(() => deps.db.insertEventBatch({ events, writeMode: deps.writeMode }));
+    },
+  }),
+);
+
+// The capnweb subscription sink. processEventBatch returns undefined to the
+// stream (no subscriber-originated ack traffic), but kicks the runner.
+class ProcessorSink extends RpcTarget implements SubscriptionSink {
+  readonly #deliver: (args: { events: StreamEvent[] }) => unknown;
+  constructor(deliver: (args: { events: StreamEvent[] }) => unknown) {
+    super();
+    this.#deliver = deliver;
+  }
+  processEventBatch(args: { events: StreamEvent[] }): undefined {
+    void this.#deliver(args);
+  }
+}
+
+function streamPortFromRpc(rpc: RpcStub<StreamRpc>): StreamPort {
+  return {
+    append: (event) =>
+      void rpc.append({ event }).catch((error: unknown) => console.error("append failed", error)),
+    appendAndWait: (event) => rpc.append({ event }),
+  };
+}
+
+/**
+ * Inbound host (browser/node/vitest). Builds the runner, then wires its
+ * processEventBatch as the subscription sink and hands over afterOffset(). This
+ * is the ONLY connection-specific glue; the runner itself is identical to the DO.
+ */
+async function withStreamProcessor<Contract extends RunnableContract<Contract>, Deps>(args: {
+  connection: { rpc: RpcStub<StreamRpc> };
+  subscriptionKey: string;
+  processor: Processor<Contract, Deps>;
+  deps: Deps;
+  storage: ProcessorStorage<ProcessorState<Contract>>;
+}) {
+  const runner = await createProcessorRunner({
+    processor: args.processor,
+    deps: args.deps,
+    storage: args.storage,
+    stream: streamPortFromRpc(args.connection.rpc),
+  });
+  const sink = new ProcessorSink((batch) => runner.processEventBatch(batch));
+  const handle = await args.connection.rpc.subscribe({
+    subscriptionKey: args.subscriptionKey,
+    sink,
+    afterOffset: runner.afterOffset(),
+  });
+  return {
+    runner,
+    async [Symbol.asyncDispose]() {
+      await handle.unsubscribe();
+    },
+  };
+}
+
+// What the refactored browser store becomes: connect, host the projector, done.
+export async function exampleBrowserProjectorWiring(
+  connection: { rpc: RpcStub<StreamRpc> },
+  db: SqlitePort,
+) {
+  await using host = await withStreamProcessor({
+    connection,
+    subscriptionKey: `browser:${"projector"}`,
+    processor: sqliteProjector,
+    deps: { db, writeMode: "batch" },
+    storage: { load: () => undefined, save: () => {} }, // ephemeral; SQLite-backed for real resume
+  });
+  return host.runner.snapshot();
 }

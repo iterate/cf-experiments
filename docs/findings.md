@@ -168,6 +168,47 @@ chunk and not one RPC per frame per subscriber. The latency/cadence tradeoff is 
 decision: a `10-12 ms` batch window was enough to get near raw WebSocket in this workload while
 preserving append acknowledgements around `9-12 ms` p95.
 
+## `allowUnconfirmed` is useful for few-subscriber read-your-own latency, not a blanket stream win
+
+Experiment: `experiments/streams/01-handwritten-stream`
+
+Status: confirmed by deployed `BenchmarkRunner` runs on `2026-06-02` against the clean Stream DO
+(`src/clean/stream-do.ts`, worker version `30732d8c-1a7c-44a3-8a9c-37cd15f80ba7`). The benchmark
+compares:
+
+- `best-effort`: `ctx.storage.put(..., { allowUnconfirmed: true })`, no `storage.sync()`;
+- `confirmed-sync`: the same async write, then `await storageWrite` and `await ctx.storage.sync()`;
+- `output-gated`: normal synchronous `ctx.storage.kv.put(...)`, which uses the SQLite-backed storage
+  facade and closes the Durable Object output gate.
+
+For the production-shaped stream target — high append volume, few subscribers, and fast read-your-own
+append delivery — `allowUnconfirmed` was the best hot path in deployed tests. With 5 audio publishers,
+2 subscribers, 100 frames per publisher, no artificial delay:
+
+```txt
+pace=20ms
+best-effort      143.8/s, self-echo p95  8 ms, all-subscriber p95 167 ms
+confirmed-sync   183.1/s, self-echo p95 32 ms, all-subscriber p95 239 ms
+output-gated     176.4/s, self-echo p95 17 ms, all-subscriber p95 266 ms
+
+pace=0 burst
+best-effort      633.7/s, self-echo p95 87 ms, all-subscriber p95 225 ms
+confirmed-sync   404.2/s, self-echo p95 90 ms, all-subscriber p95 304 ms
+output-gated     384.9/s, self-echo p95 86 ms, all-subscriber p95 389 ms
+```
+
+The same experiment also shows the boundary where `allowUnconfirmed` stops being a clear win. With a
+much heavier 10-publisher / 36-subscriber fan-out, rankings were noisy and sync writes could be
+competitive or better. In addition, the `simulatedStorageSyncDelayMs` probe is **not** a faithful
+storage-replication model: it inserts an awaited timer on the append hot path before subscriber
+delivery, so all modes collapse toward `1 / delay` throughput. Do not use that synthetic delay alone
+to reason about Cloudflare storage latency.
+
+Practical consequence: do not simplify stream storage to synchronous writes only for the few-subscriber
+audio-stream shape. Keep an `allowUnconfirmed` no-sync hot path for fast append/self-echo, and use
+sync writes (or explicit sync waits) when the workload needs durability before delivery or behaves more
+like heavy fan-out than read-your-own audio.
+
 ## `ctx.id.name` is set for `getByName` on RPC and alarm (current compat)
 
 Experiment: `experiments/07-do-ctx-id-name`

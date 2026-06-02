@@ -463,15 +463,41 @@ Working reference implementation: `src/trials/processor-shape-trial.ts` (compile
   stub, and expose `afterOffset() = snapshot.offset` to hand to `subscribe()`.
 - **Runtimes differ only in two ports** (`storage`, `stream` stub) + `waitUntil`. DO:
   KV storage, `ctx.waitUntil`. Node/vitest + browser: in-memory storage, no-op
-  `waitUntil`.
+  `waitUntil`. Proven for the browser: `withStreamProcessor` builds the runner, wraps
+  `runner.processEventBatch` in a capnweb `SubscriptionSink`, calls `subscribe()` with
+  `runner.afterOffset()`. Same runner code as the DO; only the two ports differ.
+- **Two side-effect hooks: per-event `afterAppend` and per-batch `afterEventBatch`.**
+  `afterAppend` gets the narrowed `ConsumedEvent` (business logic). `afterEventBatch`
+  gets the RAW new events of one delivered batch (bulk IO — e.g. one SQLite
+  transaction), which both preserves the existing browser batch/row write-mode
+  optimization and sidesteps the wildcard-`consumes` typing hole. The browser SQLite
+  projector is `consumes: []` + `afterEventBatch` that writes the batch via
+  `blockProcessorUntil(() => db.insertEventBatch(...))`.
+- **Runner persists the snapshot once per batch** (after side effects), not per event.
+  Batch is the unit of progress; a crash mid-batch re-delivers and re-runs the batch
+  (idempotent via offset dedup + SQLite `INSERT OR IGNORE`).
+- **Builtin (inline) processors have a `beforeAppend` gate; subscription processors do
+  not.** Three hook tiers:
+  - Contract (pure, portable): `reduce` only.
+  - Subscription implementation (runner, post-commit): `{ afterAppend }`. Cannot gate —
+    only sees committed events.
+  - Builtin implementation (inline in `Stream`, pre-commit, before offset allocation):
+    `{ beforeAppend?, afterAppend? }`. `beforeAppend` rejects by throwing.
+  This is required for the circuit breaker / future authorization: the canonical
+  rate-limiter needs `reduce` to *succeed* on the event that trips the breaker (token
+  accounting goes negative), `afterAppend` to emit `stream/paused`, and `beforeAppend`
+  to reject the *next* event once `state.paused`. "Reduce throws" cannot express this and
+  would smear admission logic into the pure reducer that ships to browser projections.
+  Reference: os `packages/shared/src/streams/circuit-breaker.ts`. `beforeAppend` is sync
+  today (matches os); async is a future extension if authorization needs I/O.
 
 ## Open questions
 
-- Whether the core stream processor shares this machinery or stays a distinct inline
-  reducer (it runs synchronously before persistence and can block appends — likely
-  separate).
 - Where the inbound/outbound subscription handshake + connection wiring lives, and how
-  the disposable test fixtures layer (connectStream -> subscription -> runner).
+  the disposable test fixtures layer (connectStream -> subscription -> runner). This is
+  where the original "run a processor in 3 subscription runtimes" goal lives.
+- `progress` (read-only `{ maxOffset, eventCount }`) wiring into `reduce`/`afterAppend`
+  — agreed in principle, not yet in the trial.
 
 ## Deferred (explicitly not now)
 

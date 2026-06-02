@@ -1,5 +1,24 @@
 # High level findings
 
+- **Clean Stream DO allowUnconfirmed (deployed, 2026-06-02, version `30732d8c`, 3 repeated sweeps):**
+  - **Append, no sim delay:** `best-effort` **172/s** (ack p95 11 ms) vs `confirmed-sync` 80/s vs
+    `output-gated` 71/s — skipping `sync()` wins clearly when storage is fast.
+  - **Append, +50 ms sim delay:** all modes ~**18/s**, ack p95 ~53–56 ms — sim delay dominates;
+    `allowUnconfirmed` irrelevant at this duty cycle.
+  - **Audio 10×36×50 @ 20 ms, +50 ms sim delay (2 runs):** `best-effort` is **~2× slower** than
+    `confirmed-sync` / `output-gated` (84–109/s vs 150–155/s; ack p95 1.7–2.4 s vs 0.25–0.7 s).
+    Unconfirmed write debt under fan-out hurts badly.
+  - **Audio, no sim delay:** modes closer (122–142/s); `output-gated` best ack p95 (~340 ms).
+  - **Egress `ping()` during 200 ms slow append:** all modes p95 **7–16 ms** — no scenario where
+    `allowUnconfirmed` is the difference; unrelated RPC egress flows in all modes tested.
+- **Clean Stream DO allowUnconfirmed (local Miniflare, 2026-06-02):** Under
+  `/benchmark/clean/unconfirmed-sweep`, `best-effort` (`allowUnconfirmed` + no `sync()`),
+  `confirmed-sync` (`allowUnconfirmed` + `sync()`), and `output-gated` (sync KV) are **indistinguishable**
+  for audio-shaped fan-out (10×36×50 @ 20 ms pace) and for append throughput at 4.8 KB payloads
+  when `simulatedStorageSyncDelayMs=0`. With `--simulated-sync-delay-ms 50`, all three modes still
+  match (~19 appends/s, ~53 ms append-ack p95, ~380 events/s audio). Egress contention (`ping()`
+  during slow append) stays ~2–3 ms p95 for all modes locally. **Deployed confirmation still needed**
+  before copying to `docs/findings.md`.
 - KEY FINDING: capnweb@0.8.0 returned `ReadableStream` chunks are not wire-one-way. The stream is
   encoded as a pipe to a remote `WritableStream`, so every subscriber event chunk produces a server
   write frame and a subscriber-originated write-completion frame:
@@ -33,6 +52,83 @@
   `raw-volatile` was `145 ms` then `146 ms` in the same matrix.
 
 # Notes
+
+## 2026-06-02 — Clean Stream DO allowUnconfirmed benchmark harness
+
+Added `/benchmark/clean/*` routes and `scripts/clean-unconfirmed-benchmark.ts` targeting
+`src/clean/stream-do.ts` (Cap'n Web `initInboundSubscription` fan-out, not legacy returned streams).
+
+Three durability modes compared:
+
+| Mode | Implementation |
+| --- | --- |
+| `best-effort` | `allowUnconfirmed: true`, `waitForStorageSync: false` |
+| `confirmed-sync` | `allowUnconfirmed: true`, `waitForStorageSync: true` |
+| `output-gated` | sync `kv.put`, `closeOutputGate: true` |
+
+Benchmarks (all orchestrated from `BenchmarkRunner` DOs, same pattern as legacy `/benchmark/audio-chaos`):
+
+1. **Append throughput** — serial RPC appends, Grok-sized 4.8 KB payloads, append-ack latency
+2. **Egress contention** — fire `ping()` on a second WebSocket while append waits on
+   `simulatedStorageSyncDelayMs` (default 200 ms in sweep)
+3. **Audio chaos** — 24 kHz PCM16-shaped payloads, multi-publisher/subscriber fan-out
+
+Local Miniflare runs (8796, after stream-path collision fix):
+
+| Scenario | best-effort | confirmed-sync | output-gated |
+| --- | --- | --- | --- |
+| 500×4.8 KB append, no sim delay | 6410/s, ack p95 1 ms | 6667/s, ack p95 1 ms | 8475/s, ack p95 1 ms |
+| 500×4.8 KB append, sim delay 50 ms | 19.3/s, ack p95 53 ms | 19.3/s, ack p95 53 ms | 19.4/s, ack p95 52 ms |
+| Egress ping during slow append | ping p95 3 ms | ping p95 3 ms | ping p95 2 ms |
+| Audio 10×36×50 @ 20 ms, sim delay 50 ms | 380/s, ack p95 54 ms | 372/s, ack p95 62 ms | 389/s, ack p95 52 ms |
+
+**Interpretation (local only):** No measurable `allowUnconfirmed` benefit in Miniflare for throughput
+or audio fan-out. `best-effort` vs `confirmed-sync` differ only by `await storage.sync()` which is
+~free locally. Egress contention probe shows fast `ping()` during slow append for **all** modes —
+Miniflare may not model output-gate blocking the same way as deployed DOs.
+
+## 2026-06-02 — Deployed clean allowUnconfirmed sweep (fresh deploy, 3 runs)
+
+Redeployed after worker delete. Version `30732d8c-1a7c-44a3-8a9c-37cd15f80ba7`, clean v1–v6 migrations.
+
+```bash
+pnpm wrangler deploy
+pnpm benchmark:clean-unconfirmed https://01-handwritten-stream.iterate-dev-preview.workers.dev \
+  --simulated-sync-delay-ms 50 --append-messages 1000 --append-payload-bytes 4800 \
+  --audio-publishers 10 --audio-subscribers 36 --audio-frames-per-publisher 50 --audio-pace-ms 20
+```
+
+### With `--simulated-sync-delay-ms 50` (runs 1 & 2, consistent)
+
+| Scenario | best-effort | confirmed-sync | output-gated |
+| --- | --- | --- | --- |
+| Append 1000×4.8 KB | 18.1–18.9/s, ack 53–55 ms | 18.1–18.8/s, ack 53–56 ms | 17.8–18.3/s, ack 56 ms |
+| Egress ping during slow append | ping p95 7–13 ms | ping p95 8 ms | ping p95 11–16 ms |
+| Audio 10×36×50 | **84–109/s**, ack **1.7–2.4 s** | **150–154/s**, ack **0.56–0.72 s** | **149–156/s**, ack **0.25–0.37 s** |
+
+### Without sim delay (run 3)
+
+| Scenario | best-effort | confirmed-sync | output-gated |
+| --- | --- | --- | --- |
+| Append 1000×4.8 KB | **172/s**, ack **11 ms** | 80/s, ack 14 ms | 71/s, ack 17 ms |
+| Audio 10×36×50 | 142/s, ack 511 ms | 137/s, ack 583 ms | 122/s, ack **339 ms** |
+
+**Conclusion:** `allowUnconfirmed` is not a free win.
+
+- **Pure append, fast storage:** `best-effort` (no `sync()`) is ~**2× faster** than waiting for sync.
+- **Audio fan-out under simulated slow sync:** `best-effort` is ~**2× slower** than `confirmed-sync` /
+  `output-gated` — unconfirmed KV backlog under 360 concurrent subscriber edges dominates.
+- **Egress probe:** no measurable case where only `allowUnconfirmed` saves unrelated RPC latency.
+
+Default for production-shaped audio load: **do not use `waitForStorageSync: false`** unless you accept
+much worse fan-out latency under storage pressure.
+
+```bash
+pnpm benchmark:clean-unconfirmed http://localhost:8787 \
+  --simulated-sync-delay-ms 50 \
+  --append-messages 1000 --append-payload-bytes 4800 \
+  --audio-publishers 10 --audio-subscribers 36 --audio-frames-per-publisher 50 --audio-pace-ms 20
+```
 
 ## 2026-05-27 11:29 UTC+1
 

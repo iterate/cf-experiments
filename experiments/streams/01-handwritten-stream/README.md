@@ -73,6 +73,38 @@ pnpm wrangler dev --port 8788
 WORKER_URL=http://localhost:8788 pnpm vitest run scripts/clean-stream.test.ts
 ```
 
+### Clean Stream DO (`src/clean/stream-do.ts`) — allowUnconfirmed benchmarks
+
+The clean `Stream` DO exposes explicit append durability:
+
+| Mode | `closeOutputGate` | `waitForStorageSync` | Storage API |
+| --- | ---: | ---: | --- |
+| `best-effort` | false | false | `put(..., { allowUnconfirmed: true })` |
+| `confirmed-sync` | false | true | `put(..., { allowUnconfirmed: true })` + `sync()` |
+| `output-gated` | true | true | sync `kv.put` (holds output gate) |
+
+Run the full edge-side sweep (append throughput + egress contention + audio chaos) from
+`BenchmarkRunner` DOs:
+
+```sh
+pnpm wrangler dev --port 8787
+pnpm benchmark:clean-unconfirmed http://localhost:8787 \
+  --append-messages 1000 --append-payload-bytes 4800 \
+  --audio-publishers 10 --audio-subscribers 36 --audio-frames-per-publisher 50 --audio-pace-ms 20
+```
+
+Use `--simulated-sync-delay-ms 50` to inflate `storage.sync()` wait time via stream config (helps
+separate append-ack latency on deployed; miniflare often shows no gap because sync is instant).
+
+Individual routes (POST):
+
+```sh
+curl -sS 'http://localhost:8787/benchmark/clean/append-throughput?mode=best-effort&messages=1000&payload-bytes=4800'
+curl -sS 'http://localhost:8787/benchmark/clean/egress-contention?durability=confirmed-sync&simulated-sync-delay-ms=200'
+curl -sS 'http://localhost:8787/benchmark/clean/audio-chaos?durability=best-effort&publishers=10&subscribers=36&frames-per-publisher=50&pace-ms=20&measure-append-ack=true'
+curl -sS 'http://localhost:8787/benchmark/clean/unconfirmed-sweep?append-messages=1000&audio-publishers=10&audio-subscribers=36'
+```
+
 Run the audio-shaped fan-out benchmark:
 
 ```sh

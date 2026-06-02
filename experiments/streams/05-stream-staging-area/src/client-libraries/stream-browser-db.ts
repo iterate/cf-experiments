@@ -14,6 +14,8 @@ export type StreamDatabaseInfo = DatabaseInfo & {
   crossOriginIsolated: boolean;
 };
 
+export type StreamDatabaseWriteMode = "batch" | "row";
+
 const streamDatabases = new Map<string, StreamBrowserDatabase>();
 
 export function getStreamBrowserDatabase(streamPath: string) {
@@ -52,8 +54,30 @@ export class StreamBrowserDatabase {
     });
   }
 
-  async insertEventBatch(events: StreamEvent[]) {
+  async insertEventBatch(args: { events: StreamEvent[]; writeMode: StreamDatabaseWriteMode }) {
+    const { events } = args;
     if (events.length === 0) return;
+
+    if (args.writeMode === "row") {
+      for (const event of events) {
+        await this.sqlocal.sql`
+          INSERT OR IGNORE INTO events (
+            offset,
+            type,
+            idempotency_key,
+            created_at,
+            raw_json
+          ) VALUES (
+            ${event.offset},
+            ${event.type},
+            ${event.idempotencyKey ?? null},
+            ${event.createdAt},
+            ${JSON.stringify(event, null, 2)}
+          )
+        `;
+      }
+      return;
+    }
 
     await this.sqlocal.transaction(async (tx) => {
       await tx.batch((sql) =>

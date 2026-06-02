@@ -12,13 +12,14 @@ import type { SQLocal, SqlTag, StatementInput } from "sqlocal";
 import {
   createStreamBrowserStore,
   type StreamBrowserSnapshot,
+  type StreamBrowserStore,
 } from "../client-libraries/stream-browser-store.js";
 import {
   getStreamBrowserDatabase,
   type StreamBrowserDatabase,
+  type StreamDatabaseWriteMode,
   type StreamEventRow,
 } from "../client-libraries/stream-browser-db.js";
-import { withStream } from "../client-libraries/stream-browser.js";
 import "./-stream-page.css";
 
 export function StreamPage({ streamPath }: { streamPath: string }) {
@@ -30,9 +31,10 @@ export function StreamPage({ streamPath }: { streamPath: string }) {
 }
 
 function HydratedStreamPage({ streamPath }: { streamPath: string }) {
+  const [sqliteWriteMode, setSqliteWriteMode] = useState<StreamDatabaseWriteMode>("batch");
   const streamStore = useMemo(
-    () => createStreamBrowserStore({ streamPath }),
-    [streamPath],
+    () => createStreamBrowserStore({ sqliteWriteMode, streamPath }),
+    [sqliteWriteMode, streamPath],
   );
   const snapshot = useSyncExternalStore(
     streamStore.subscribe,
@@ -44,8 +46,11 @@ function HydratedStreamPage({ streamPath }: { streamPath: string }) {
   return (
     <StreamPageWithDatabase
       snapshot={snapshot}
+      sqliteWriteMode={sqliteWriteMode}
       streamDatabase={streamDatabase}
+      streamStore={streamStore}
       streamPath={streamPath}
+      onSqliteWriteModeChange={setSqliteWriteMode}
     />
   );
 }
@@ -65,11 +70,17 @@ function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
 function StreamPageWithDatabase({
   streamPath,
   snapshot,
+  sqliteWriteMode,
   streamDatabase,
+  streamStore,
+  onSqliteWriteModeChange,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
+  sqliteWriteMode: StreamDatabaseWriteMode;
   streamDatabase: StreamBrowserDatabase;
+  streamStore: StreamBrowserStore;
+  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
   // SQLocal 0.18's reactive table analyzer currently does not recognize
   // `SELECT count(*) FROM events` as reading `events`, so keep the schema to
@@ -92,8 +103,11 @@ function StreamPageWithDatabase({
     <StreamPageLayout
       eventCount={eventCount}
       snapshot={snapshot}
+      sqliteWriteMode={sqliteWriteMode}
       streamDatabase={streamDatabase}
+      streamStore={streamStore}
       streamPath={streamPath}
+      onSqliteWriteModeChange={onSqliteWriteModeChange}
     />
   );
 }
@@ -101,13 +115,19 @@ function StreamPageWithDatabase({
 function StreamPageLayout({
   streamPath,
   snapshot,
+  sqliteWriteMode,
   streamDatabase,
+  streamStore,
   eventCount,
+  onSqliteWriteModeChange,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
+  sqliteWriteMode: StreamDatabaseWriteMode;
   streamDatabase: StreamBrowserDatabase | undefined;
+  streamStore: StreamBrowserStore;
   eventCount: number;
+  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
 
   return (
@@ -118,8 +138,11 @@ function StreamPageLayout({
           eventCount={eventCount}
           key={`sidebar:${streamPath}`}
           snapshot={snapshot}
+          sqliteWriteMode={sqliteWriteMode}
           streamDatabase={streamDatabase}
+          streamStore={streamStore}
           streamPath={streamPath}
+          onSqliteWriteModeChange={onSqliteWriteModeChange}
         />
         <div className="stream-page__main">
           {streamDatabase === undefined ? (
@@ -133,7 +156,7 @@ function StreamPageLayout({
               streamDatabase={streamDatabase}
             />
           )}
-          <StreamComposer key={`composer:${streamPath}`} streamPath={streamPath} />
+          <StreamComposer key={`composer:${streamPath}`} streamStore={streamStore} />
         </div>
       </div>
     </main>
@@ -462,214 +485,373 @@ function useStreamReactiveQuery<Result extends Record<string, unknown>>(
 function StreamSidebar({
   streamPath,
   snapshot,
+  sqliteWriteMode,
   streamDatabase,
+  streamStore,
   eventCount,
+  onSqliteWriteModeChange,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
+  sqliteWriteMode: StreamDatabaseWriteMode;
   streamDatabase: StreamBrowserDatabase | undefined;
+  streamStore: StreamBrowserStore;
   eventCount: number;
+  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
-  const [insertEventCount, setInsertEventCount] = useState("10");
-  const [periodSeconds, setPeriodSeconds] = useState("5");
-  const [insertState, setInsertState] = useState<"idle" | "inserting" | "done" | "error">("idle");
-  const [databaseActionState, setDatabaseActionState] = useState<
-    "idle" | "downloading" | "clearing" | "done" | "error"
-  >("idle");
-
-  async function insertRandomEvents() {
-    const count = Math.max(0, Math.floor(Number(insertEventCount)));
-    const periodMs = Math.max(0, Number(periodSeconds) * 1_000);
-    if (!Number.isFinite(count) || !Number.isFinite(periodMs) || count === 0) return;
-
-    setInsertState("inserting");
-    const stream = withStream({
-      url: new URL(`/stream/${encodeURIComponent(streamPath)}`, window.location.href),
-    });
-
-    try {
-      if (periodMs === 0 || count === 1) {
-        await stream.rpc.appendBatch({
-          events: Array.from({ length: count }, (_, index) => ({
-            type: "events.iterate.com/debug/random-event",
-            payload: {
-              streamPath,
-              index,
-              count,
-              value: crypto.randomUUID(),
-            },
-          })),
-        });
-        setInsertState("done");
-        return;
-      }
-
-      await Promise.all(
-        Array.from({ length: count }, (_, index) =>
-          new Promise<void>((resolve) => {
-            setTimeout(resolve, (periodMs / (count - 1)) * index);
-          }).then(() =>
-            stream.rpc.append({
-              event: {
-                type: "events.iterate.com/debug/random-event",
-                payload: {
-                  streamPath,
-                  index,
-                  count,
-                  value: crypto.randomUUID(),
-                },
-              },
-            }),
-          ),
-        ),
-      );
-      setInsertState("done");
-    } catch {
-      setInsertState("error");
-    } finally {
-      stream[Symbol.dispose]();
-    }
-  }
-
   return (
     <aside className="stream-page__sidebar">
-      <section className="stream-page__tool">
-        <h2 className="stream-page__tool-title">Subscription</h2>
-        <dl className="stream-page__facts">
-          <div>
-            <dt>Status</dt>
-            <dd>
-              <output
-                className={
-                  snapshot.connectionStatus === "error"
-                    ? "stream-page__state stream-page__state--error"
-                    : "stream-page__state"
-                }
-              >
-                {snapshot.connectionStatus}
-              </output>
-            </dd>
-          </div>
-          <div>
-            <dt>Events</dt>
-            <dd>
-              <output className="stream-page__state">{eventCount}</output>
-            </dd>
-          </div>
-          <div>
-            <dt>OPFS isolated</dt>
-            <dd>
-              <output className="stream-page__state">
-                {String(snapshot.databaseInfo?.crossOriginIsolated ?? false)}
-              </output>
-            </dd>
-          </div>
-          <div>
-            <dt>Storage</dt>
-            <dd>
-              <output className="stream-page__state">
-                {snapshot.databaseInfo?.storageType ?? "pending"}
-              </output>
-            </dd>
-          </div>
-          <div>
-            <dt>Persisted</dt>
-            <dd>
-              <output className="stream-page__state">
-                {String(snapshot.databaseInfo?.persisted ?? false)}
-              </output>
-            </dd>
-          </div>
-          <div>
-            <dt>DB bytes</dt>
-            <dd>
-              <output className="stream-page__state">
-                {snapshot.databaseInfo?.databaseSizeBytes ?? 0}
-              </output>
-            </dd>
-          </div>
-        </dl>
-        <div className="stream-page__button-row">
-          <button
-            className="stream-page__button"
-            disabled={streamDatabase === undefined || databaseActionState === "downloading"}
-            type="button"
-            onClick={() => {
-              if (streamDatabase === undefined) return;
-              setDatabaseActionState("downloading");
-              void streamDatabase.download().then(
-                () => setDatabaseActionState("done"),
-                () => setDatabaseActionState("error"),
-              );
-            }}
-          >
-            Download DB
-          </button>
-          <button
-            className="stream-page__button stream-page__button--secondary"
-            disabled={streamDatabase === undefined || databaseActionState === "clearing"}
-            type="button"
-            onClick={() => {
-              if (streamDatabase === undefined) return;
-              setDatabaseActionState("clearing");
-              void streamDatabase.clear().then(
-                () => setDatabaseActionState("done"),
-                () => setDatabaseActionState("error"),
-              );
-            }}
-          >
-            Clear local DB
-          </button>
-        </div>
-        <output
-          className={
-            databaseActionState === "error"
-              ? "stream-page__insert-state stream-page__insert-state--error"
-              : "stream-page__insert-state"
-          }
-        >
-          {databaseActionState}
-        </output>
-      </section>
-      <section className="stream-page__tool">
-        <h2 className="stream-page__tool-title">Insert events</h2>
-        <label className="stream-page__field">
-          <span>Count</span>
-          <input
-            className="stream-page__input"
-            min="1"
-            step="1"
-            type="number"
-            value={insertEventCount}
-            onChange={(event) => setInsertEventCount(event.currentTarget.value)}
-          />
-        </label>
-        <label className="stream-page__field">
-          <span>Seconds</span>
-          <input
-            className="stream-page__input"
-            min="0"
-            step="0.1"
-            type="number"
-            value={periodSeconds}
-            onChange={(event) => setPeriodSeconds(event.currentTarget.value)}
-          />
-        </label>
-        <button
-          className="stream-page__button"
-          disabled={insertState === "inserting"}
-          type="button"
-          onClick={() => void insertRandomEvents()}
-        >
-          Stream random events
-        </button>
-        <output className="stream-page__insert-state">{insertState}</output>
-      </section>
+      <SubscriptionTool
+        eventCount={eventCount}
+        snapshot={snapshot}
+        streamDatabase={streamDatabase}
+      />
+      <InsertEventsTool
+        sqliteWriteMode={sqliteWriteMode}
+        streamStore={streamStore}
+        streamPath={streamPath}
+        onSqliteWriteModeChange={onSqliteWriteModeChange}
+      />
     </aside>
   );
 }
 
-function StreamComposer({ streamPath }: { streamPath: string }) {
+function SubscriptionTool({
+  snapshot,
+  streamDatabase,
+  eventCount,
+}: {
+  snapshot: StreamBrowserSnapshot;
+  streamDatabase: StreamBrowserDatabase | undefined;
+  eventCount: number;
+}) {
+  const [databaseActionState, setDatabaseActionState] = useState<
+    "idle" | "downloading" | "clearing" | "done" | "error"
+  >("idle");
+
+  return (
+    <section className="stream-page__tool">
+      <h2 className="stream-page__tool-title">Subscription</h2>
+      <dl className="stream-page__facts">
+        <div>
+          <dt>Status</dt>
+          <dd>
+            <output
+              className={
+                snapshot.connectionStatus === "error"
+                  ? "stream-page__state stream-page__state--error"
+                  : "stream-page__state"
+              }
+            >
+              {snapshot.connectionStatus}
+            </output>
+          </dd>
+        </div>
+        <div>
+          <dt>Events</dt>
+          <dd>
+            <output className="stream-page__state">{eventCount}</output>
+          </dd>
+        </div>
+        <div>
+          <dt>OPFS isolated</dt>
+          <dd>
+            <output className="stream-page__state">
+              {String(snapshot.databaseInfo?.crossOriginIsolated ?? false)}
+            </output>
+          </dd>
+        </div>
+        <div>
+          <dt>Storage</dt>
+          <dd>
+            <output className="stream-page__state">
+              {snapshot.databaseInfo?.storageType ?? "pending"}
+            </output>
+          </dd>
+        </div>
+        <div>
+          <dt>Persisted</dt>
+          <dd>
+            <output className="stream-page__state">
+              {String(snapshot.databaseInfo?.persisted ?? false)}
+            </output>
+          </dd>
+        </div>
+        <div>
+          <dt>DB bytes</dt>
+          <dd>
+            <output className="stream-page__state">
+              {snapshot.databaseInfo?.databaseSizeBytes ?? 0}
+            </output>
+          </dd>
+        </div>
+      </dl>
+      <div className="stream-page__button-row">
+        <button
+          className="stream-page__button"
+          disabled={streamDatabase === undefined || databaseActionState === "downloading"}
+          type="button"
+          onClick={() => {
+            if (streamDatabase === undefined) return;
+            setDatabaseActionState("downloading");
+            void streamDatabase.download().then(
+              () => setDatabaseActionState("done"),
+              () => setDatabaseActionState("error"),
+            );
+          }}
+        >
+          Download DB
+        </button>
+        <button
+          className="stream-page__button stream-page__button--secondary"
+          disabled={streamDatabase === undefined || databaseActionState === "clearing"}
+          type="button"
+          onClick={() => {
+            if (streamDatabase === undefined) return;
+            setDatabaseActionState("clearing");
+            void streamDatabase.clear().then(
+              () => setDatabaseActionState("done"),
+              () => setDatabaseActionState("error"),
+            );
+          }}
+        >
+          Clear local DB
+        </button>
+      </div>
+      <output
+        className={
+          databaseActionState === "error"
+            ? "stream-page__insert-state stream-page__insert-state--error"
+            : "stream-page__insert-state"
+        }
+      >
+        {databaseActionState}
+      </output>
+    </section>
+  );
+}
+
+function InsertEventsTool({
+  streamPath,
+  sqliteWriteMode,
+  streamStore,
+  onSqliteWriteModeChange,
+}: {
+  streamPath: string;
+  sqliteWriteMode: StreamDatabaseWriteMode;
+  streamStore: StreamBrowserStore;
+  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
+}) {
+  const [insertState, dispatchInsertState] = useReducer(
+    (
+      state: {
+        insertEventCount: string;
+        insertBatchSize: string;
+        periodSeconds: string;
+        appendResponseMode: "await" | "background" | "dispose";
+        insertState: "idle" | "inserting" | "done" | "error";
+      },
+      action:
+        | { type: "set-insert-event-count"; value: string }
+        | { type: "set-insert-batch-size"; value: string }
+        | { type: "set-period-seconds"; value: string }
+        | { type: "set-append-response-mode"; value: "await" | "background" | "dispose" }
+        | { type: "set-insert-state"; value: "idle" | "inserting" | "done" | "error" },
+    ) => {
+      switch (action.type) {
+        case "set-insert-event-count":
+          return { ...state, insertEventCount: action.value };
+        case "set-insert-batch-size":
+          return { ...state, insertBatchSize: action.value };
+        case "set-period-seconds":
+          return { ...state, periodSeconds: action.value };
+        case "set-append-response-mode":
+          return { ...state, appendResponseMode: action.value };
+        case "set-insert-state":
+          return { ...state, insertState: action.value };
+      }
+    },
+    {
+      insertEventCount: "10",
+      insertBatchSize: "100",
+      periodSeconds: "5",
+      appendResponseMode: "await",
+      insertState: "idle",
+    },
+  );
+
+  async function insertRandomEvents() {
+    const count = Math.max(0, Math.floor(Number(insertState.insertEventCount)));
+    const batchSize = Math.max(1, Math.floor(Number(insertState.insertBatchSize)));
+    const periodMs = Math.max(0, Number(insertState.periodSeconds) * 1_000);
+    if (
+      !Number.isFinite(count) ||
+      !Number.isFinite(batchSize) ||
+      !Number.isFinite(periodMs) ||
+      count === 0
+    ) {
+      return;
+    }
+
+    dispatchInsertState({ type: "set-insert-state", value: "inserting" });
+
+    try {
+      const pendingResponses: Promise<unknown>[] = [];
+      const batchCount = Math.ceil(count / batchSize);
+      const batchDelayMs = batchCount <= 1 ? 0 : periodMs / (batchCount - 1);
+
+      await Promise.all(
+        Array.from({ length: batchCount }, (_, batchIndex) =>
+          new Promise<void>((resolve) => {
+            setTimeout(resolve, batchDelayMs * batchIndex);
+          }).then(() => {
+            const startIndex = batchIndex * batchSize;
+            const result = streamStore.appendBatch({
+              events: Array.from(
+                { length: Math.min(batchSize, count - startIndex) },
+                (_, indexInBatch) => {
+                  const index = startIndex + indexInBatch;
+                  return {
+                    type: "events.iterate.com/debug/random-event",
+                    payload: {
+                      streamPath,
+                      index,
+                      count,
+                      batchIndex,
+                      batchSize,
+                      value: crypto.randomUUID(),
+                    },
+                  };
+                },
+              ),
+            });
+
+            if (insertState.appendResponseMode === "await") {
+              pendingResponses.push(result);
+            } else if (insertState.appendResponseMode === "background") {
+              // CapnWeb RpcPromises are lazy. Calling `.then()` starts the
+              // append without making this form wait for the returned events.
+              void result.then(undefined, (error: unknown) => {
+                console.error("background appendBatch failed", error);
+              });
+            } else if (insertState.appendResponseMode === "dispose") {
+              // CapnWeb says callers should dispose RpcPromises they do not
+              // await. This option tests whether that still lets a write-only
+              // append reach the Durable Object before cancellation wins.
+              result[Symbol.dispose]();
+            }
+          }),
+        ),
+      );
+      if (insertState.appendResponseMode === "await") await Promise.all(pendingResponses);
+      dispatchInsertState({ type: "set-insert-state", value: "done" });
+    } catch {
+      dispatchInsertState({ type: "set-insert-state", value: "error" });
+    }
+  }
+
+  return (
+    <section className="stream-page__tool">
+      <h2 className="stream-page__tool-title">Insert events</h2>
+      <label className="stream-page__field">
+        <span>Count</span>
+        <input
+          className="stream-page__input"
+          min="1"
+          step="1"
+          type="number"
+          value={insertState.insertEventCount}
+          onChange={(event) =>
+            dispatchInsertState({
+              type: "set-insert-event-count",
+              value: event.currentTarget.value,
+            })
+          }
+        />
+      </label>
+      <label className="stream-page__field">
+        <span>Seconds</span>
+        <input
+          className="stream-page__input"
+          min="0"
+          step="0.1"
+          type="number"
+          value={insertState.periodSeconds}
+          onChange={(event) =>
+            dispatchInsertState({
+              type: "set-period-seconds",
+              value: event.currentTarget.value,
+            })
+          }
+        />
+      </label>
+      <label className="stream-page__field">
+        <span>Batch size</span>
+        <input
+          className="stream-page__input"
+          min="1"
+          step="1"
+          type="number"
+          value={insertState.insertBatchSize}
+          onChange={(event) =>
+            dispatchInsertState({
+              type: "set-insert-batch-size",
+              value: event.currentTarget.value,
+            })
+          }
+        />
+      </label>
+      <label className="stream-page__field">
+        <span>appendBatch response</span>
+        <select
+          className="stream-page__input"
+          value={insertState.appendResponseMode}
+          onChange={(event) =>
+            dispatchInsertState({
+              type: "set-append-response-mode",
+              value:
+                event.currentTarget.value === "dispose"
+                  ? "dispose"
+                  : event.currentTarget.value === "background"
+                    ? "background"
+                    : "await",
+            })
+          }
+        >
+          <option value="await">Await</option>
+          <option value="background">Background</option>
+          <option value="dispose">Dispose</option>
+        </select>
+      </label>
+      <label className="stream-page__field">
+        <span>SQLite writes</span>
+        <select
+          className="stream-page__input"
+          value={sqliteWriteMode}
+          onChange={(event) =>
+            onSqliteWriteModeChange(
+              event.currentTarget.value === "row" ? "row" : "batch",
+            )
+          }
+        >
+          <option value="batch">Batch</option>
+          <option value="row">Row at a time</option>
+        </select>
+      </label>
+      <button
+        className="stream-page__button"
+        disabled={insertState.insertState === "inserting"}
+        type="button"
+        onClick={() => void insertRandomEvents()}
+      >
+        Stream random events
+      </button>
+      <output className="stream-page__insert-state">{insertState.insertState}</output>
+    </section>
+  );
+}
+
+function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
   const [composerText, setComposerText] = useState(() =>
     JSON.stringify(
       {
@@ -686,19 +868,14 @@ function StreamComposer({ streamPath }: { streamPath: string }) {
 
   async function appendComposerEvent() {
     setAppendState("appending");
-    const stream = withStream({
-      url: new URL(`/stream/${encodeURIComponent(streamPath)}`, window.location.href),
-    });
 
     try {
-      await stream.rpc.append({
-        event: JSON.parse(composerText),
+      await streamStore.appendBatch({
+        events: [JSON.parse(composerText)],
       });
       setAppendState("done");
     } catch {
       setAppendState("error");
-    } finally {
-      stream[Symbol.dispose]();
     }
   }
 

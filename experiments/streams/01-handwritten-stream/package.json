@@ -6,7 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "vitest run",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsgo --noEmit",
+    "benchmark:clean-unconfirmed": "node scripts/clean-unconfirmed-benchmark.ts"
   },
   "dependencies": {
     "@cf-experiments/shared": "workspace:*",

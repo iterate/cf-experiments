@@ -111,7 +111,7 @@ describe("core stream processor", () => {
             subscriptionKey: "echo",
             subscriber: {
               type: "built-in",
-              transport: "captainweb-websocket",
+              transport: "capnweb-websocket",
               processorSlug: "echo",
             },
           },
@@ -131,7 +131,7 @@ describe("core stream processor", () => {
             subscriptionKey: "echo",
             subscriber: {
               type: "built-in",
-              transport: "captainweb-websocket",
+              transport: "capnweb-websocket",
               processorSlug: "echo",
             },
           },

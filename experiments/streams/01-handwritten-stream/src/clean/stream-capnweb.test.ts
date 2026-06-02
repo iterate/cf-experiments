@@ -20,8 +20,8 @@ class TestSubscriptionRpcTarget extends RpcTarget implements SubscriptionRpcTarg
   }
 }
 
-describe("stream CaptainWeb protocol", () => {
-  e2eIt("appends events after the stream-created event over CaptainWeb", async () => {
+describe("stream capnweb protocol", () => {
+  e2eIt("appends events after the stream-created event over capnweb", async () => {
     const path = `stream-capnweb-append-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
@@ -169,7 +169,7 @@ describe("stream CaptainWeb protocol", () => {
           subscriptionKey,
           subscriber: {
             type: "built-in",
-            transport: "captainweb-websocket",
+            transport: "capnweb-websocket",
             processorSlug: "echo",
           },
         },

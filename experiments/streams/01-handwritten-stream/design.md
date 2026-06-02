@@ -23,7 +23,7 @@ not a websocket, not a live connection, and not necessarily unique to one stream
 
 Subscriber spec: the `subscriber` object inside a `subscription-configured` event. It tells the stream
 what kind of subscriber should exist and how to connect to it. The transport is a property of this
-object. For now we only support CaptainWeb-WebSocket (`captainweb-websocket`), but later subscriber
+object. For now we only support capnweb-WebSocket (`capnweb-websocket`), but later subscriber
 specs can describe dynamic workers, external URLs, webhooks, etc.
 
 Subscription: the configured edge from a stream node to a subscriber node. `subscriptionKey` identifies
@@ -48,7 +48,7 @@ Subscription sink: the RPC capability provided by the subscriber side for one li
 connection. The stream stores this target in memory and calls `processEventBatch({ events })` on it
 to deliver batches.
 
-CaptainWeb session: a live CaptainWeb connection to the stream. A session can become a subscription
+capnweb session: a live capnweb connection to the stream. A session can become a subscription
 connection if the subscription handshake yields a subscription sink, but debug/control sessions
 can exist without being subscriptions.
 
@@ -161,7 +161,7 @@ configure itself from committed stream state.
     subscriptionKey: "transcribe-audio",
     subscriber: {
       type: "built-in",
-      transport: "captainweb-websocket",
+      transport: "capnweb-websocket",
       processorSlug: "transcribe-audio",
     },
   },
@@ -184,7 +184,7 @@ processor runner. Future subscriber types might look like:
     subscriptionKey: "summarize-transcript",
     subscriber: {
       type: "dynamic-worker",
-      transport: "captainweb-websocket",
+      transport: "capnweb-websocket",
       workerName: "customer-summary-worker",
       entrypoint: "TranscriptSummarizer",
     },
@@ -208,7 +208,7 @@ processor runner. Future subscriber types might look like:
 
 ## Subscriptions
 
-- The CaptainWeb API should not care which side initiated a subscription connection.
+- The capnweb API should not care which side initiated a subscription connection.
 - Subscription direction is always named from the stream's perspective: inbound means the subscriber connected into the stream, and outbound means the stream connected out to the subscriber.
 - Event delivery should be framed as batches from day one, even when the batch contains a single event.
 - We should be able to write e2e tests where we run stream processors in our vitest processes via inbound subscription connections.
@@ -241,7 +241,7 @@ This needs a separate design pass. We probably need to be able to track all this
 eventually, but client-side metrics and ping are not part of the next client-library cut.
 
 The active low-level client requirement is narrower: expose raw WebSocket frames through
-`onWebSocketFrame()` so tests can assert the actual CaptainWeb wire shape without forcing the
+`onWebSocketFrame()` so tests can assert the actual capnweb wire shape without forcing the
 connection to retain frames.
 
 Future instrumentation should cover:
@@ -250,7 +250,7 @@ Future instrumentation should cover:
 - from client libraries
 
 For any stream
-- All active subscription connections with direction (inbound vs outbound), transport (`captainweb-websocket`), status (connected or not)
+- All active subscription connections with direction (inbound vs outbound), transport (`capnweb-websocket`), status (connected or not)
 - age
 - number of events
 - storage size
@@ -309,12 +309,12 @@ The failure of any one processor should not affect other processors. This means,
   Subscription management is stream-owned core behavior, not a separate user processor.
 
 - The stream has a subscription reconciler that uses the stream reduced state to know which outbound
-  subscription connections should exist, and uses runtime state to know which CaptainWeb sessions /
+  subscription connections should exist, and uses runtime state to know which capnweb sessions /
   subscription sinks are currently connected.
 
-## CaptainWeb API
+## capnweb API
 
-The primary way to interact with the stream is via a CaptainWeb API. 
+The primary way to interact with the stream is via a capnweb API. 
 
 The subscription handshake should be symmetrical:
 
@@ -331,12 +331,12 @@ The subscription connection lifecycle is:
 
 1. The stream reduced state says which durable subscriptions should exist, or an inbound caller asks to
    subscribe directly.
-2. One side opens a CaptainWeb session.
+2. One side opens a capnweb session.
 3. The initiating side calls the appropriate request/subscribe method.
 4. The subscriber side provides a subscription sink and optional `afterOffset`.
 5. The stream stores a subscription connection in memory and starts replay/live delivery from
    `afterOffset + 1`.
-6. When the CaptainWeb session breaks, the stream forgets the runtime connection. The durable
+6. When the capnweb session breaks, the stream forgets the runtime connection. The durable
    subscription configuration remains in stream reduced state.
 
 The subscription request shape is:
@@ -354,13 +354,13 @@ directly to `subscribe()`. For outbound subscriptions, the subscriber returns it
 `requestSubscription()` after looking at `runtimeState()` and the `subscription-configured` event. The
 stream then starts replay/live delivery from `afterOffset + 1`.
 
-Not every CaptainWeb session is a subscription connection. Debug and control clients can open
-CaptainWeb sessions and call RPC methods without providing a subscription sink. A CaptainWeb session
+Not every capnweb session is a subscription connection. Debug and control clients can open
+capnweb sessions and call RPC methods without providing a subscription sink. A capnweb session
 becomes a subscription connection only when the handshake gives the stream a subscription sink to
 store for event delivery.
 
 `runtimeState()` should return the stream reduced state plus serializable runtime state, including
-active CaptainWeb sessions, active subscription connections, subscription keys, directions,
+active capnweb sessions, active subscription connections, subscription keys, directions,
 transports, and connection status. Event rows are not included; callers use `getEvent()` or
 `getEvents()` for event data.
 
@@ -380,10 +380,10 @@ on top of the batch callback, but the underlying RPC should remain batch-shaped.
 
 The most important performance constraint is to avoid back-and-forth network round trips for each
 consumed batch. When the stream durable object delivers a batch, it must call
-`subscriptionRpcTarget.processEventBatch({ events })`, not await the returned CaptainWeb thenable, and then
+`subscriptionRpcTarget.processEventBatch({ events })`, not await the returned capnweb thenable, and then
 immediately dispose the ignored result.
 
-The experiment showed why this matters. CaptainWeb returned `ReadableStream` values are encoded as
+The experiment showed why this matters. capnweb returned `ReadableStream` values are encoded as
 remote writable stream writes, and each chunk produces return traffic:
 
 ```txt
@@ -399,13 +399,13 @@ in ["push",["pipeline",subscriberId,["processEventBatch"],[{ "events": [event] }
 in ["release",resultId,refcount]
 ```
 
-This is the main reason to keep trying the CaptainWeb API before falling back to a custom WebSocket
+This is the main reason to keep trying the capnweb API before falling back to a custom WebSocket
 protocol.
 
 
 
 
-### CaptainWeb RPC
+### capnweb RPC
 
 This is used heavily in e2e tests to call privileged debug APIs like `.kill()`.
 
@@ -451,8 +451,8 @@ this library later.
 
 ### Level 1: `connectStream`
 
-`connectStream()` opens a CaptainWeb session to one stream and returns the lowest-level connection
-primitive: the CaptainWeb RPC stub plus raw WebSocket frame observation.
+`connectStream()` opens a capnweb session to one stream and returns the lowest-level connection
+primitive: the capnweb RPC stub plus raw WebSocket frame observation.
 
 This is the only layer that should know whether the caller is running in Node, a browser, or a
 Cloudflare Worker/Durable Object. In Node and browsers it can open a WebSocket from the URL. In
@@ -492,7 +492,7 @@ type WebSocketFrame = {
 ```
 
 `onWebSocketFrame()` is part of the level-1 requirement because this experiment must be able to
-assert the actual CaptainWeb wire shape. Higher-level tests can wrap it:
+assert the actual capnweb wire shape. Higher-level tests can wrap it:
 
 ```ts
 const frames = recordWebSocketFrames(connection);
@@ -500,7 +500,7 @@ const frames = recordWebSocketFrames(connection);
 expect(frames.outbound()).toEqual([]);
 ```
 
-Disposal should be async: dispose the CaptainWeb session, then close the underlying WebSocket.
+Disposal should be async: dispose the capnweb session, then close the underlying WebSocket.
 
 ### Level 2: subscriptions
 
@@ -563,7 +563,7 @@ runtime state only. One-shot helpers can own the connection explicitly later, fo
 Because the connection can stay open after a subscription is disposed, `subscribe()` should return
 an explicit subscription handle. Disposing the subscription should use that handle to unsubscribe on
 the stream Durable Object so the DO stops delivering events to the callback target without requiring
-the whole CaptainWeb session to close.
+the whole capnweb session to close.
 
 ```ts
 type StreamSubscription = AsyncDisposable &
@@ -667,14 +667,14 @@ This layer should share the contract-aware event resolution/parsing used by type
 - Do not retain WebSocket frames in the core connection. Retention belongs in test/debug helpers.
 - Disposing a subscription created from a caller-provided connection does not close that connection.
 - `subscribe()` should return an explicit handle so subscriptions can be unsubscribed without
-  closing the entire CaptainWeb session.
+  closing the entire capnweb session.
 - Use `AsyncDisposable` for stream connections and subscriptions.
 - Use `AsyncIterable` plus `waitForEvent()` for subscriptions.
 - Do not use Node `EventEmitter` as the primary subscription API.
 - Keep OS project/codemode fixtures out of the client library; those helpers can wrap this client.
 - For inbound subscribers, the client calls `subscribe()` with a `processEventBatch` sink and does
-  not need to expose `requestSubscription()` on its own CaptainWeb main object.
-- Durable Object stream delivery only cares that the CaptainWeb peer provides a
+  not need to expose `requestSubscription()` on its own capnweb main object.
+- Durable Object stream delivery only cares that the capnweb peer provides a
   subscription sink; it does not care whether that peer is a browser, Node script, Worker, or
   Durable Object.
 

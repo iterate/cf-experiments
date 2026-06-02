@@ -26,12 +26,12 @@ export const coreStreamProcessorContract = defineProcessorContract({
             subscriber: z.discriminatedUnion("type", [
               z.object({
                 type: z.literal("built-in"),
-                transport: z.literal("captainweb-websocket"),
+                transport: z.literal("capnweb-websocket"),
                 processorSlug: z.string().trim().min(1),
               }),
               z.object({
                 type: z.literal("dynamic-worker"),
-                transport: z.literal("captainweb-websocket"),
+                transport: z.literal("capnweb-websocket"),
                 workerName: z.string().trim().min(1),
                 entrypoint: z.string().trim().min(1),
               }),
@@ -88,12 +88,12 @@ export const coreStreamProcessorContract = defineProcessorContract({
         subscriber: z.discriminatedUnion("type", [
           z.object({
             type: z.literal("built-in"),
-            transport: z.literal("captainweb-websocket"),
+            transport: z.literal("capnweb-websocket"),
             processorSlug: z.string().trim().min(1),
           }),
           z.object({
             type: z.literal("dynamic-worker"),
-            transport: z.literal("captainweb-websocket"),
+            transport: z.literal("capnweb-websocket"),
             workerName: z.string().trim().min(1),
             entrypoint: z.string().trim().min(1),
           }),

@@ -8,10 +8,7 @@ import {
 } from "@cf-experiments/shared/simple-stream-processor";
 import { makeRpcTargetClass, type RpcMethods } from "@cf-experiments/shared/rpc-target";
 import { echoProcessor } from "./demo-processors/echo-processor.js";
-import type {
-  CoreStreamState,
-  SubscriptionConfiguredEvent,
-} from "./core-stream-processor.js";
+import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
 import type { StreamRpc, SubscriptionRpcTarget } from "./stream-types.js";
 
 export type ProcessorSlug = "echo";
@@ -37,7 +34,10 @@ export class StreamProcessorRunner extends DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     server.accept();
-    newWebSocketRpcSession<StreamProcessorRunnerRpc>(server, new StreamProcessorRunnerRpcTarget(this));
+    newWebSocketRpcSession<StreamProcessorRunnerRpc>(
+      server,
+      new StreamProcessorRunnerRpcTarget(this),
+    );
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -50,8 +50,8 @@ export class StreamProcessorRunner extends DurableObject {
     if (subscriber.type !== "built-in") {
       throw new Error("StreamProcessorRunner only supports built-in subscribers");
     }
-    if (subscriber.transport !== "captainweb-websocket") {
-      throw new Error("StreamProcessorRunner only supports captainweb-websocket subscribers");
+    if (subscriber.transport !== "capnweb-websocket") {
+      throw new Error("StreamProcessorRunner only supports capnweb-websocket subscribers");
     }
 
     this.#streamRpcTarget?.[Symbol.dispose]();
@@ -94,7 +94,8 @@ export class StreamProcessorRunner extends DurableObject {
   }
 
   #setProcessorSlug(processorSlug: string) {
-    if (processorSlug !== "echo") throw new Error(`Unknown stream processor slug: ${processorSlug}`);
+    if (processorSlug !== "echo")
+      throw new Error(`Unknown stream processor slug: ${processorSlug}`);
     this.ctx.storage.kv.put("processorSlug", processorSlug);
     this.#processor = processorForSlug(processorSlug);
   }
@@ -153,9 +154,9 @@ export type StreamProcessorRunnerRpc = SubscriptionRpcTarget &
     };
   };
 
-export const StreamProcessorRunnerRpcTarget = makeRpcTargetClass<StreamProcessorRunnerRpc, StreamProcessorRunner>(
-  StreamProcessorRunner,
-  {
-    exclude: ["fetch"],
-  },
-);
+export const StreamProcessorRunnerRpcTarget = makeRpcTargetClass<
+  StreamProcessorRunnerRpc,
+  StreamProcessorRunner
+>(StreamProcessorRunner, {
+  exclude: ["fetch"],
+});

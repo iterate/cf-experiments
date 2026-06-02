@@ -51,7 +51,7 @@ export class Stream extends DurableObject<Env> {
     );
   }
 
-  /** Opens the CaptainWeb RPC API for this stream Durable Object. */
+  /** Opens the capnweb RPC API for this stream Durable Object. */
   async fetch(request: Request) {
     // StreamRpcTarget is the capnweb "main object" for the stream's side of the connection.
     // The peer on the other side of the connection receives an RPC stub to it, on which it can call
@@ -106,6 +106,7 @@ export class Stream extends DurableObject<Env> {
 
     if (closeOutputGate) {
       this.#persistAppendSync(batch);
+      await this.#awaitSimulatedStorageSyncDelay();
     } else {
       const storageWrite = this.ctx.storage.put(this.#storageWritesForAppend(batch), {
         allowUnconfirmed: true,
@@ -113,11 +114,7 @@ export class Stream extends DurableObject<Env> {
       });
       this.state = batch.newState;
 
-      if (this.state.config.simulatedStorageSyncDelayMs !== null) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, this.state.config.simulatedStorageSyncDelayMs ?? 0),
-        );
-      }
+      await this.#awaitSimulatedStorageSyncDelay();
 
       if (waitForStorageSync) {
         await storageWrite;
@@ -186,6 +183,13 @@ export class Stream extends DurableObject<Env> {
     for (const [key, value] of Object.entries(this.#storageWritesForAppend(args))) {
       this.ctx.storage.kv.put(key, value);
     }
+  }
+
+  async #awaitSimulatedStorageSyncDelay(): Promise<void> {
+    if (this.state.config.simulatedStorageSyncDelayMs === null) return;
+    await new Promise((resolve) =>
+      setTimeout(resolve, this.state.config.simulatedStorageSyncDelayMs ?? 0),
+    );
   }
 
   // Returns a record of storage writes for the given append batch.
@@ -279,6 +283,11 @@ export class Stream extends DurableObject<Env> {
     throw new Error("This point should never be reached; abort should kill the DO.");
   }
 
+  /** Cheap RPC for measuring unrelated egress while append waits on storage.sync(). */
+  ping() {
+    return { ok: true as const, at: Date.now() };
+  }
+
   /** Returns durable core state plus runtime-only connection state for experiments. */
   debug() {
     return {
@@ -318,7 +327,7 @@ export class Stream extends DurableObject<Env> {
 
 export const StreamRpcTarget = makeRpcTargetClass(Stream);
 
-/** A live CaptainWeb subscription edge from this stream to a batch consumer. */
+/** A live capnweb subscription edge from this stream to a batch consumer. */
 type LiveSubscription = {
   direction: "inbound" | "outbound";
   subscriptionKey?: string;
