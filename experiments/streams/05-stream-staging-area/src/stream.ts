@@ -7,7 +7,6 @@ import {
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
-import { createDurableObjectClient, defineConfig, sql } from "sqlfu";
 import { coreStreamProcessorContract, type CoreStreamState } from "./core-stream-processor.js";
 import type {
   StreamCursor,
@@ -16,79 +15,9 @@ import type {
   SubscriptionSink,
 } from "./stream-types.js";
 
-export class Stream extends DurableObject<Env> implements StreamRpc {
-  static db = defineConfig({
-    definitions: sql`
-      create table events (
-        offset integer primary key autoincrement,
-        type text not null,
-        created_at text not null,
-        idempotency_key text unique,
-        raw_json text not null
-      );
-    `,
-    migrations: [
-      {
-        name: "2026-06-02T15.50.00.000Z_create_stream_events",
-        content: sql`
-          create table events (
-            offset integer primary key autoincrement,
-            type text not null,
-            created_at text not null,
-            idempotency_key text unique,
-            raw_json text not null
-          );
-        `,
-      },
-    ],
-    queries: {
-      appendEventsJson: {
-        mode: "metadata",
-        $type: {} as { parameters: { eventsJson: any } },
-        query: sql`
-          insert into events (offset, type, created_at, idempotency_key, raw_json)
-          select
-            json_extract(value, '$.offset') as offset,
-            json_extract(value, '$.type') as type,
-            json_extract(value, '$.createdAt') as created_at,
-            json_extract(value, '$.idempotencyKey') as idempotency_key,
-            value as raw_json
-          from json_each(cast(:eventsJson as text))
-        `,
-      },
-      eventByOffset: sql.nullableOne<{
-        parameters: { offset: number };
-        result: { rawJson: string };
-      }>`
-        select raw_json as rawJson
-        from events
-        where offset = :offset
-        limit 1
-      `,
-      eventByIdempotencyKey: sql.nullableOne<{
-        parameters: { idempotencyKey: string };
-        result: { rawJson: string };
-      }>`
-        select raw_json as rawJson
-        from events
-        where idempotency_key = :idempotencyKey
-        limit 1
-      `,
-      eventsInRange: sql.many<{
-        parameters: { afterOffset: number; beforeOffset: number; limit: number };
-        result: { rawJson: string };
-      }>`
-        select raw_json as rawJson
-        from events
-        where offset > :afterOffset
-          and offset < :beforeOffset
-        order by offset asc
-        limit :limit
-      `,
-    },
-  });
+const CORE_PROCESSOR_SLUG = coreStreamProcessorContract.slug;
 
-  db: ReturnType<typeof Stream.db<ReturnType<typeof createDurableObjectClient>>>;
+export class Stream extends DurableObject<Env> implements StreamRpc {
   state: CoreStreamState;
 
   // Live delivery connections, keyed by subscriptionKey. Runtime-only: outbound
@@ -100,25 +29,12 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.db = Stream.db(createDurableObjectClient(ctx.storage));
-    this.db.migrate();
+    this.#createTables();
 
-    // Hydrate state from KV storage, but layer it over the current core initial state.
-    // Local experiments often wake Durable Objects created before the latest reducer field existed.
-    const initialState = coreStreamProcessorContract.stateSchema.parse(
-      coreStreamProcessorContract.initialState,
-    );
-    const storedState = this.ctx.storage.kv.get<Partial<CoreStreamState>>("state");
-    this.state = coreStreamProcessorContract.stateSchema.parse({
-      ...initialState,
-      ...storedState,
-      maxOffset: Math.max(0, storedState?.maxOffset ?? initialState.maxOffset),
-      config: {
-        ...initialState.config,
-        ...storedState?.config,
-      },
-      subscriptionsByKey: storedState?.subscriptionsByKey ?? initialState.subscriptionsByKey,
-    });
+    // Hydrate the built-in core processor's durable snapshot. This table is the
+    // SQLite version of the StreamProcessorRunner DO's KV "snapshot" concept:
+    // processor-owned state keyed by processor slug.
+    this.state = this.#readCoreState();
 
     // When the durable object boots up the _first time_, we add a
     // events.iterate.com/stream/created event to the stream.
@@ -149,6 +65,143 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     this.#reconcile();
   }
 
+  #createTables(): void {
+    this.ctx.storage.sql.exec(`
+      -- Stream-owned append log. This is the same replay source that external
+      -- StreamProcessorRunner DOs consume over subscribe().
+      create table if not exists events (
+        offset integer primary key autoincrement,
+        type text not null,
+        created_at text not null,
+        idempotency_key text unique,
+        raw_json text not null
+      );
+
+      -- Processor-owned durable snapshots, keyed by processor slug. The Stream
+      -- DO stores events.iterate.com/stream/core here; runner DOs can use the
+      -- same shape later for echo or multiple processors in one runner.
+      create table if not exists processor_state (
+        processor_slug text primary key,
+        state text not null
+      );
+    `);
+  }
+
+  #initialCoreState(): CoreStreamState {
+    const initialState = coreStreamProcessorContract.stateSchema.parse(
+      coreStreamProcessorContract.initialState,
+    );
+    return coreStreamProcessorContract.stateSchema.parse({
+      ...initialState,
+      maxOffset: Math.max(0, initialState.maxOffset),
+    });
+  }
+
+  #appendEventRows(events: StreamEvent[]): void {
+    for (const event of events) {
+      this.ctx.storage.sql.exec(
+        `
+          insert into events (offset, type, created_at, idempotency_key, raw_json)
+          values (?, ?, ?, ?, ?)
+        `,
+        event.offset,
+        event.type,
+        event.createdAt,
+        event.idempotencyKey ?? null,
+        JSON.stringify(event),
+      );
+    }
+  }
+
+  #readEventByOffset(offset: number): StreamEvent | undefined {
+    const row = this.ctx.storage.sql
+      .exec<{ rawJson: string }>(
+        `
+          select raw_json as rawJson
+          from events
+          where offset = ?
+          limit 1
+        `,
+        offset,
+      )
+      .toArray()[0];
+    return row === undefined ? undefined : StreamEventSchema.parse(JSON.parse(row.rawJson));
+  }
+
+  #readEventByIdempotencyKey(idempotencyKey: string): StreamEvent | undefined {
+    const row = this.ctx.storage.sql
+      .exec<{ rawJson: string }>(
+        `
+          select raw_json as rawJson
+          from events
+          where idempotency_key = ?
+          limit 1
+        `,
+        idempotencyKey,
+      )
+      .toArray()[0];
+    return row === undefined ? undefined : StreamEventSchema.parse(JSON.parse(row.rawJson));
+  }
+
+  #readEventsInRange(args: {
+    afterOffset: number;
+    beforeOffset: number;
+    limit: number;
+  }): StreamEvent[] {
+    return this.ctx.storage.sql
+      .exec<{ rawJson: string }>(
+        `
+          select raw_json as rawJson
+          from events
+          where offset > ?
+            and offset < ?
+          order by offset asc
+          limit ?
+        `,
+        args.afterOffset,
+        args.beforeOffset,
+        args.limit,
+      )
+      .toArray()
+      .map((row) => StreamEventSchema.parse(JSON.parse(row.rawJson)));
+  }
+
+  #readProcessorStateJson(processorSlug: string): string | undefined {
+    return this.ctx.storage.sql
+      .exec<{ state: string }>(
+        `
+          select state
+          from processor_state
+          where processor_slug = ?
+          limit 1
+        `,
+        processorSlug,
+      )
+      .toArray()[0]?.state;
+  }
+
+  #writeProcessorStateJson(processorSlug: string, state: unknown): void {
+    this.ctx.storage.sql.exec(
+      `
+        insert into processor_state (processor_slug, state)
+        values (?, ?)
+        on conflict(processor_slug) do update set state = excluded.state
+      `,
+      processorSlug,
+      JSON.stringify(state),
+    );
+  }
+
+  #readCoreState(): CoreStreamState {
+    const stateJson = this.#readProcessorStateJson(CORE_PROCESSOR_SLUG);
+    if (stateJson === undefined) return this.#initialCoreState();
+    return coreStreamProcessorContract.stateSchema.parse(JSON.parse(stateJson));
+  }
+
+  #writeCoreState(state: CoreStreamState): void {
+    this.#writeProcessorStateJson(CORE_PROCESSOR_SLUG, state);
+  }
+
   /** Opens the capnweb RPC API for this stream Durable Object. */
   async fetch(request: Request) {
     return newWorkersRpcResponse(request, new StreamRpcTarget(this));
@@ -171,8 +224,8 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    * 1. `a` becomes offset 5, `b` becomes offset 6; each is folded into reduced state.
    *    An event whose `idempotencyKey` already exists is skipped and the existing
    *    event is returned in its place (so the returned array stays input-aligned).
-   * 2. Both rows + the new reduced state are written in one await-free SQLite turn —
-   *    this is the atomic commit boundary. After this line the append has succeeded.
+   * 2. Both rows + the new reduced state are written in one await-free SQLite turn.
+   *    After this line the append has succeeded.
    * 3. Post-commit fan-out: every live connection's `wake()` is called (its pump then
    *    reads offsets 5..6 from storage and delivers them); reconciliation runs only if
    *    one of the new events was a `subscription-configured`. Neither can fail the
@@ -223,17 +276,24 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
 
     if (newEvents.length === 0) return events;
 
-    // 2. Atomically persist new event rows and reduced state.
-    // Durable Object sync KV is backed by the same SQLite storage system as sql.exec.
-    // Keep this section await-free: event rows + reduced state are the atomic append boundary.
-    this.db.appendEventsJson({ eventsJson: JSON.stringify(newEvents) });
-    this.ctx.storage.kv.put("state", state);
+    // 2. Persist new event rows and reduced state.
+    // Durable Object SQL storage runs synchronously in the object's thread. The
+    // first-party docs say each sql.exec() call is atomic, cursors should be fully
+    // consumed before awaits, and Output Gates hold responses until writes are durable:
+    // https://developers.cloudflare.com/durable-objects/api/sql-storage/
+    // https://blog.cloudflare.com/sqlite-in-durable-objects/
+    //
+    // Keep this section await-free: event rows + reduced state are the append boundary.
+    this.#appendEventRows(newEvents);
+    this.#writeCoreState(state);
     this.state = state;
 
     // 3. Wake live delivery; reconcile only when subscription topology changed.
     // Append success is already decided above — this is pure post-commit fan-out.
     for (const connection of this.#connections.values()) connection.wake();
-    if (newEvents.some((event) => event.type === "events.iterate.com/stream/subscription-configured")) {
+    if (
+      newEvents.some((event) => event.type === "events.iterate.com/stream/subscription-configured")
+    ) {
       this.#reconcile();
     }
 
@@ -244,12 +304,11 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     args: { offset: number; idempotencyKey?: never } | { idempotencyKey: string; offset?: never },
   ): StreamEvent | undefined {
     if (args.idempotencyKey !== undefined) {
-      const row = this.db.eventByIdempotencyKey({ idempotencyKey: args.idempotencyKey });
-      return row === null ? undefined : StreamEventSchema.parse(JSON.parse(row.rawJson));
+      return this.#readEventByIdempotencyKey(args.idempotencyKey);
     }
-    const row = this.db.eventByOffset({ offset: args.offset });
-    if (row === null) throw new Error(`No stream event found at offset ${args.offset}.`);
-    return StreamEventSchema.parse(JSON.parse(row.rawJson));
+    const event = this.#readEventByOffset(args.offset);
+    if (event === undefined) throw new Error(`No stream event found at offset ${args.offset}.`);
+    return event;
   }
 
   getEvents(
@@ -266,13 +325,11 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
 
     // Later this should accept event type filters for subscription catch-up and
     // operator views. Keep the first SQLite shape offset-only until that design is real.
-    return this.db
-      .eventsInRange({
-        afterOffset: args.afterOffset ?? 0,
-        beforeOffset: args.beforeOffset ?? Number.MAX_SAFE_INTEGER,
-        limit: limit ?? Number.MAX_SAFE_INTEGER,
-      })
-      .map((row) => StreamEventSchema.parse(JSON.parse(row.rawJson)));
+    return this.#readEventsInRange({
+      afterOffset: args.afterOffset ?? 0,
+      beforeOffset: args.beforeOffset ?? Number.MAX_SAFE_INTEGER,
+      limit: limit ?? Number.MAX_SAFE_INTEGER,
+    });
   }
 
   reduce(args: { event: StreamEvent; state?: CoreStreamState }): CoreStreamState {
@@ -373,15 +430,14 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
 
     // The single delivery path: drain committed events to the sink, then park.
     //
-    // Future optimization: the live path currently pays one indexed `getEvents` read
-    // per batch even when the subscriber is exactly at the head of the log. The
-    // `appendBatch` caller already holds the freshly-committed events array in memory,
-    // so when this connection's `cursor` equals `firstNewOffset - 1` we could hand that
-    // array straight to the sink and skip the SQL read entirely. It stays correct
-    // because `cursor` remains the single source of truth: a connection that is behind,
-    // or mid-drain, simply ignores the in-memory hint and falls back to this loop. Left
-    // unimplemented on purpose — it adds a second delivery path, and isn't worth that
-    // until a benchmark actually shows the per-batch read hurting throughput.
+    // FUTURE OPTIMIZATION (Proposal B): the live path currently pays one indexed
+    // `getEvents` read per batch even when the subscriber is exactly at the head.
+    // `appendBatch` already has the freshly-committed events array in memory, so when
+    // `cursor === firstNewOffset - 1` it could hand that array straight to the sink and
+    // skip the SQL round-trip — a pure fast path that can't desync because `cursor`
+    // stays the source of truth (a behind/draining connection just falls back to this
+    // loop). Not worth it until a benchmark shows the per-batch read in the hot path;
+    // keeping one delivery path is the simpler default.
     const pump = async () => {
       if (draining) return;
       draining = true;
@@ -394,21 +450,9 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
           connection.batchesSent += 1;
           connection.eventsSent += events.length;
           connection.lastDeliveredAt = new Date().toISOString();
-          // Deliver the batch fire-and-forget. `processEventBatch` does not return a
-          // value — it returns a capnweb RpcPromise, a thenable handle to the remote
-          // result. We deliberately never await it. Awaiting would make capnweb pull
-          // the (meaningless) result back over the wire, turning every delivery into a
-          // request/response round-trip and serializing the whole stream on the network
-          // RTT to the subscriber. Instead we drop the handle right away. Disposing it
-          // tells capnweb we will never read the result, releasing the refcount and
-          // pipeline slot capnweb otherwise holds for that call — without the dispose
-          // the session leaks one outstanding result stub per batch we deliver.
-          // Piggyback the stream head so the subscriber can compute offset/time
-          // lag without a round-trip. headOffset is free (already in reduced state);
-          // headCreatedAt is omitted to avoid an extra read per batch — the runner
-          // falls back to the batch's last event for an approximate time-lag.
-          const rpcPromise = sink.processEventBatch({ events, headOffset: this.state.maxOffset });
-          rpcPromise[Symbol.dispose]();
+          // Batch-first, fire-and-forget: never await the thenable, dispose the ignored result.
+          // Awaiting it forces a return round-trip per batch (see design.md "capnweb API").
+          sink.processEventBatch({ events })[Symbol.dispose]();
           await Promise.resolve();
         }
       } finally {

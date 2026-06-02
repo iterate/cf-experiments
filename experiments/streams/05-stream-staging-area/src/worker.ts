@@ -18,14 +18,10 @@ export default createServerEntry({
       return env.STREAM.getByName(`stream:${path}`).fetch(request);
     }
 
-    const response = await handler.fetch(request);
-    const headers = new Headers(response.headers);
-    headers.set("Cross-Origin-Opener-Policy", "same-origin");
-    headers.set("Cross-Origin-Embedder-Policy", "require-corp");
-    return new Response(response.body, {
-      headers,
-      status: response.status,
-      statusText: response.statusText,
-    });
+    // No COOP/COEP: cross-origin isolation enables SharedArrayBuffer, which makes
+    // sqlite-wasm auto-install its async-proxy OPFS VFS during init — and that proxy
+    // worker deadlocks in production builds (see log.md). The opfs-sahpool VFS we use
+    // (patches/sqlocal@0.18.0.patch) needs neither SAB nor isolation.
+    return handler.fetch(request);
   },
 });

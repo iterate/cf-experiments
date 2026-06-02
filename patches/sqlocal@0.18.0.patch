@@ -14,10 +14,10 @@ index 5cab774d23558e6d585e5d22f930d408ffbbf3f2..31e5efd48c74be0a6e3da4203bd8f12c
          }
 -        this.db = new this.sqlite3.oo1.OpfsDb(databasePath, flags);
 +        // PATCH (cf-experiments): use the OPFS SAH-pool VFS (direct SyncAccessHandles,
-+        // no async-proxy worker / SharedArrayBuffer Atomics). The default OpfsDb proxy
-+        // VFS silently hangs on every query when deployed to Cloudflare Workers assets
-+        // (works under `vite dev`); the SAH-pool path does not. A per-database pool
-+        // directory + VFS name avoids cross-tab SyncAccessHandle conflicts.
++        // no async-proxy worker / SharedArrayBuffer Atomics). Works ONLY with NO cross-
++        // origin isolation (no SAB → sqlite-wasm skips the deadlocking async-proxy "opfs"
++        // VFS auto-install). See vite.config.ts `sqlocal({coi:false})` and log.md. A per-
++        // database pool directory + VFS name avoids cross-tab SyncAccessHandle conflicts.
 +        const poolDir = '/.sqlocal-sahpool' + (databasePath.startsWith('/') ? databasePath : '/' + databasePath);
 +        const poolUtil = await this.sqlite3.installOpfsSAHPoolVfs({
 +            name: 'sqlocal-sahpool' + databasePath,

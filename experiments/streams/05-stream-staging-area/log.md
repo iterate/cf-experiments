@@ -1,30 +1,62 @@
 # High level findings
 
-## sqlite-wasm OPFS hangs when served from Cloudflare Workers assets (works under `vite dev`)
+## SOLVED: sqlite-wasm OPFS froze in production builds because cross-origin isolation triggered the async-proxy VFS auto-install
 
-The browser SQLite mirror (SQLocal → `@sqlite.org/sqlite-wasm`, OPFS VFS) works under
-`vite dev` but **the SQLocal worker synchronously freezes on the first SQLite OPFS
-operation when the exact same build is served from Cloudflare Workers static assets**
-(`wrangler deploy`). The page subscribes and the browser-hosted processor receives events
-(`__receivedEventCount > 0`), but `Events` stays 0 and `Storage` stays `pending` forever.
+**Symptom:** The browser SQLite mirror (SQLocal → `@sqlite.org/sqlite-wasm`) worked under
+`vite dev` but **the SQLocal worker froze on the first SQL statement in every production
+build** (`vite preview`, `wrangler dev`, `wrangler deploy`). The page subscribed and the
+browser-hosted processor received events (`__receivedEventCount > 0`), but `Events` stayed
+`0` and `Storage` stayed `pending` forever.
 
-Ruled out (verified on the deployed page via headless Chrome for Testing):
-- COOP `same-origin` + COEP `require-corp` present; `crossOriginIsolated === true`.
-- `SharedArrayBuffer` available in workers; raw OPFS `createSyncAccessHandle` write works
-  in both classic and module workers on deployed.
-- Not asset-404: the runtime uses the hashed `new URL(...)` paths (200); emitting the
-  unhashed `sqlite3-opfs-async-proxy.js`/`sqlite3.wasm` did not help.
-- Not the VFS choice: patching SQLocal from the async-proxy `OpfsDb` to the proxy-free
-  `opfs-sahpool` VFS (`patches/sqlocal@0.18.0.patch`) still freezes on deployed (and the
-  install step does NOT time out — the freeze is in the *synchronous* SQL execution, so an
-  in-worker `setTimeout` guard cannot fire).
-- WASM instantiates (otherwise the worker would error, not freeze).
+**Root cause (confirmed):** `@sqlite.org/sqlite-wasm`'s default "opfs" VFS uses a nested
+**classic** async-proxy worker (`sqlite3-opfs-async-proxy.js`) + a `SharedArrayBuffer` /
+`Atomics.wait` handshake. SQLocal's vite plugin forces `worker.format:'es'` on ALL workers,
+so in a production build Rollup emits that proxy as an **ES module** while sqlite-wasm still
+instantiates it as a **classic** `new Worker(...)` → parse error → the proxy never signals
+ready → the SQLite worker **deadlocks in `Atomics.wait`** (synchronous; no `setTimeout`
+guard can fire). Under `vite dev` the proxy is served unbundled/classic so it parses — hence
+the dev-vs-prod split. Crucially, `sqlite3InitModule()` **auto-installs that async "opfs"
+VFS during init whenever `SharedArrayBuffer` exists** — so even after patching SQLocal to the
+proxy-free `opfs-sahpool` VFS, it still froze, because we had *added* COOP/COEP → the page was
+cross-origin-isolated → SAB present → the broken proxy spun up *before* the SAH-pool code ran.
 
-A deep sqlite-wasm OPFS-SyncAccessHandle ↔ Cloudflare-asset-serving interaction, orthogonal
-to the stream-processor design. Repro: `scripts/browser-inbound-proof.sh` shows the
-processor receiving events on deployed while the stream page UI shows `Events: 0`. Needs a
-minimal isolated repro (sqlite-wasm OPFS on a bare CF Worker asset) before an upstream
-report. NOT yet repeated across sessions — provisional.
+**Fix (confirmed on `vite preview` AND `wrangler deploy`, 2026-06-02):** **Remove
+cross-origin isolation.** With no COOP/COEP there is no `SharedArrayBuffer`, so
+`sqlite3InitModule()`'s OPFS auto-install early-rejects cleanly without ever spawning the
+proxy worker, and the patched `opfs-sahpool` VFS (which needs neither SAB nor isolation) runs.
+Counterintuitively, **adding** COOP/COEP (the usual "fix" for OPFS) is what *caused* the
+deadlock here. Concretely:
+- `src/worker.ts` — return the SSR response unmodified (no COOP/COEP).
+- removed `public/_headers` and `vite.config.ts` `preview.headers`.
+- `vite.config.ts` — `sqlocal({ coi: false })` so dev matches prod (no SAB anywhere).
+- kept `patches/sqlocal@0.18.0.patch` (switches SQLocal to `installOpfsSAHPoolVfs` /
+  `OpfsSAHPoolDb`).
+
+After the fix, a fresh deployed stream page shows `Events: 2`, `Storage: opfs`,
+`DB file size: 32 KB`, `crossOriginIsolated: false`, with 2 event rows rendered.
+**Note:** verify in a *fresh* browser profile — a profile that previously loaded the COI
+build reports stale `crossOriginIsolated: true` from cache and re-freezes.
+
+Hypotheses ruled out before finding the real cause (all on the production build):
+
+| Hypothesis | Verdict | Evidence |
+|---|---|---|
+| Missing / 404 assets | ✗ | `sqlite3-*.wasm`, `sqlite3-opfs-async-proxy-*.js`, `sqlite3-worker1-*.js` all emitted + served `200` |
+| Wrong MIME | ✗ | wasm `application/wasm`, proxy/worker `text/javascript` |
+| Asset COEP/CORP missing | ✗ | added via `public/_headers`; still froze |
+| `opfs-sahpool` VFS itself | ✗ | patch alone (with COI still on) still froze — the async-proxy auto-install during init deadlocks first |
+| Minifier mangling the glue | ✗ | `build.minify:false` build still froze |
+
+The real differentiator was cross-origin isolation (SAB presence), not bundling/MIME/minify.
+Repro of the fix: `scripts/browser-inbound-proof.sh` + a fresh-profile headless Chrome on the
+deployed URL now shows `Events` growing and rows rendering.
+
+First-party sources:
+- sqlite-wasm OPFS persistence + SAH-pool VFS: <https://sqlite.org/wasm/doc/trunk/persistence.md>
+- sqlite-wasm COOP/COEP requirement: <https://sqlite.org/wasm/doc/trunk/index.md>
+- SQLocal (the wrapper): <https://sqlocal.dev/guide/setup>
+- Cloudflare Workers static-asset response headers (`_headers`): <https://developers.cloudflare.com/workers/static-assets/headers/>
+- crossOriginIsolated + COOP/COEP (MDN): <https://developer.mozilla.org/en-US/docs/Web/API/crossOriginIsolated>
 
 # Notes
 

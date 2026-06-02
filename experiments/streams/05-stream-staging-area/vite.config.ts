@@ -5,17 +5,12 @@ import sqlocal from "sqlocal/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  server: {
-    watch: {
-      ignored: ["**/.wrangler/**"],
-    },
-  },
   plugins: [
-    sqlocal(),
+    // coi:false → no COOP/COEP in dev either, so dev matches prod: no SharedArrayBuffer,
+    // so sqlite-wasm never auto-installs its deadlocking async-proxy OPFS VFS. We use the
+    // proxy-free opfs-sahpool VFS (patches/sqlocal@0.18.0.patch), which needs no isolation.
+    sqlocal({ coi: false }),
     cloudflare({
-      inspectorPort: false,
-      remoteBindings: false,
-      tunnel: false,
       viteEnvironment: { name: "ssr" },
     }),
     tanstackStart(),
