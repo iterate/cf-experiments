@@ -1,7 +1,7 @@
 import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { describe, expect, it } from "vitest";
-import type { StreamRpc, SubscriptionRpcTarget } from "./stream-types.js";
+import type { StreamRpc, SubscriptionSink } from "./stream-types.js";
 import { connectStreamProcessorRunnerFromNode } from "./client-libraries/stream-node-worker.js";
 import { withStream } from "./client-libraries/stream-browser.js";
 
@@ -13,15 +13,15 @@ type WsMessage = {
   data: string;
 };
 
-class TestSubscriptionRpcTarget extends RpcTarget implements SubscriptionRpcTarget {
+class TestSubscriptionSink extends RpcTarget implements SubscriptionSink {
   readonly batches: StreamEvent[][] = [];
 
-  consumeEvents(args: { events: StreamEvent[] }): undefined {
+  processEventBatch(args: { events: StreamEvent[] }): undefined {
     this.batches.push(args.events);
   }
 }
 
-describe("stream CaptainWeb protocol", () => {
+describe("stream capnweb protocol", () => {
   e2eIt("browser client appends events by stream URL", async () => {
     const path = `stream-browser-client-${crypto.randomUUID()}`;
     await using stream = await withStream({ url: toStreamWebSocketUrl(path) });
@@ -41,7 +41,7 @@ describe("stream CaptainWeb protocol", () => {
     });
   });
 
-  e2eIt("appends events after the stream-created event over CaptainWeb", async () => {
+  e2eIt("appends events after the stream-created event over capnweb", async () => {
     const path = `stream-capnweb-append-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
@@ -71,6 +71,9 @@ describe("stream CaptainWeb protocol", () => {
         payload: { path },
       },
     });
+    await expect(stream.rpc.getEvent({ idempotencyKey: "batch-existing" })).resolves.toEqual(
+      existing,
+    );
     const batch = await stream.rpc.appendBatch({
       events: [
         {
@@ -104,6 +107,28 @@ describe("stream CaptainWeb protocol", () => {
     ]);
   });
 
+  e2eIt("can append through the public output-gated storage path", async () => {
+    const path = `stream-capnweb-sync-append-${crypto.randomUUID()}`;
+    await using stream = await connectStream(path);
+
+    const appended = await stream.rpc.append({
+      event: {
+        type: "test.stream.capnweb-sync-append",
+        payload: { path },
+      },
+      durability: {
+        closeOutputGate: true,
+      },
+    });
+
+    expect(appended).toMatchObject({
+      type: "test.stream.capnweb-sync-append",
+      payload: { path },
+      offset: 2,
+      createdAt: expect.any(String),
+    });
+  });
+
   e2eIt("replays history and then delivers live batches to inbound subscribers", async () => {
     const path = `stream-capnweb-replay-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
@@ -115,9 +140,9 @@ describe("stream CaptainWeb protocol", () => {
       },
     });
 
-    const subscriptionRpcTarget = new TestSubscriptionRpcTarget();
-    await stream.rpc.initInboundSubscription({ subscriptionRpcTarget });
-    await waitFor(() => subscriptionRpcTarget.batches.length === 1, 1_000);
+    const sink = new TestSubscriptionSink();
+    await stream.rpc.subscribe({ subscriptionKey: "replay", sink });
+    await waitFor(() => sink.batches.length === 1, 1_000);
 
     const second = await stream.rpc.append({
       event: {
@@ -125,9 +150,9 @@ describe("stream CaptainWeb protocol", () => {
         payload: { n: 2 },
       },
     });
-    await waitFor(() => subscriptionRpcTarget.batches.length === 2, 1_000);
+    await waitFor(() => sink.batches.length === 2, 1_000);
 
-    expect(subscriptionRpcTarget.batches).toEqual([
+    expect(sink.batches).toEqual([
       [
         expect.objectContaining({
           type: "events.iterate.com/stream/created",
@@ -167,7 +192,7 @@ describe("stream CaptainWeb protocol", () => {
           subscriptionKey,
           subscriber: {
             type: "built-in",
-            transport: "captainweb-websocket",
+            transport: "capnweb-websocket",
             processorSlug: "echo",
           },
         },
@@ -175,7 +200,7 @@ describe("stream CaptainWeb protocol", () => {
     });
 
     await waitFor(async () => {
-      const status = await processor.rpc.status();
+      const status = await processor.rpc.runtimeState();
       return (
         status.processorSlug === "echo" &&
         status.snapshot?.offset === configured.offset &&
@@ -191,18 +216,19 @@ describe("stream CaptainWeb protocol", () => {
     });
 
     await waitFor(async () => {
-      const status = await processor.rpc.status();
+      const status = await processor.rpc.runtimeState();
       return status.snapshot?.state.seen === 1 && status.snapshot.offset >= 4;
     }, 1_000);
   });
 
   e2eIt("delivers event batches without subscriber-originated return traffic", async () => {
     const path = `stream-capnweb-wire-${crypto.randomUUID()}`;
-    const subscriptionRpcTarget = new TestSubscriptionRpcTarget();
+    const sink = new TestSubscriptionSink();
 
     await using subscriber = await connectStream(path);
-    await subscriber.rpc.initInboundSubscription({
-      subscriptionRpcTarget,
+    await subscriber.rpc.subscribe({
+      subscriptionKey: "wire",
+      sink,
       afterOffset: 1,
     });
     const afterSubscribe = subscriber.wsMessages.length;
@@ -213,7 +239,7 @@ describe("stream CaptainWeb protocol", () => {
       payload: { path },
     };
     const appended = await publisher.rpc.append({ event: input });
-    await waitFor(() => subscriptionRpcTarget.batches.length === 1, 1_000);
+    await waitFor(() => sink.batches.length === 1, 1_000);
 
     expect(appended).toMatchObject({
       type: input.type,
@@ -221,7 +247,7 @@ describe("stream CaptainWeb protocol", () => {
       offset: 2,
       createdAt: expect.any(String),
     });
-    expect(subscriptionRpcTarget.batches).toEqual([[appended]]);
+    expect(sink.batches).toEqual([[appended]]);
     expect(outboundFrames(subscriber.wsMessages, afterSubscribe)).toEqual([]);
 
     const inbound = parsedFrames(subscriber.wsMessages)
@@ -236,7 +262,7 @@ describe("stream CaptainWeb protocol", () => {
           [
             "pipeline",
             expect.any(Number),
-            ["consumeEvents"],
+            ["processEventBatch"],
             [
               {
                 events: [

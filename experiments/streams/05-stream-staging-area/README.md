@@ -54,7 +54,7 @@ The React app serves one stream viewer:
 - `/streams/anything/else` shows the stream with path `/anything/else`
 
 The top bar has an editable stream path input, a `Go to stream` button when the input differs
-from the current route, and the current browser CaptainWeb connection status. The body subscribes
+from the current route, and the current browser capnweb connection status. The body subscribes
 from the start of the stream and renders received events as fixed-width JSON.
 
 Deploy with Wrangler through the TanStack Start Vite build:

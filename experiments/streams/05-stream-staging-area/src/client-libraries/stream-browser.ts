@@ -6,10 +6,18 @@ export type StreamBrowserConnectionStatus = "connecting" | "connected" | "closed
 /** Browser stream client. CapnWeb owns the WebSocket and queues sends while it is connecting. */
 export type StreamBrowserClient = Disposable & {
   rpc: RpcStub<StreamRpc>;
+  onWebSocketFrame(
+    listener: (frame: {
+      direction: "in" | "out";
+      data: string;
+      byteLength: number;
+      timestamp: number;
+    }) => void,
+  ): Disposable;
 };
 
-/** Connects browser JavaScript to one stream URL over CaptainWeb-WebSocket. */
-export function withStream(args: {
+/** Connects browser JavaScript to one stream URL over capnweb-WebSocket. */
+export function connectStream(args: {
   url: string | URL;
   onConnectionStatusChange?: (status: StreamBrowserConnectionStatus) => void;
 }): StreamBrowserClient {
@@ -17,17 +25,72 @@ export function withStream(args: {
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
 
+  const frameListeners = new Set<
+    (frame: {
+      direction: "in" | "out";
+      data: string;
+      byteLength: number;
+      timestamp: number;
+    }) => void
+  >();
   const webSocket = new WebSocket(url.toString());
+  const send = webSocket.send.bind(webSocket);
+  webSocket.send = ((data: Parameters<WebSocket["send"]>[0]) => {
+    emitFrame(frameListeners, "out", data);
+    return send(data);
+  }) as WebSocket["send"];
   args.onConnectionStatusChange?.("connecting");
   webSocket.addEventListener("open", () => args.onConnectionStatusChange?.("connected"));
   webSocket.addEventListener("close", () => args.onConnectionStatusChange?.("closed"));
   webSocket.addEventListener("error", () => args.onConnectionStatusChange?.("error"));
+  webSocket.addEventListener("message", (event) => emitFrame(frameListeners, "in", event.data));
 
   const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
   return {
     rpc,
+    onWebSocketFrame(listener) {
+      frameListeners.add(listener);
+      return {
+        [Symbol.dispose]() {
+          frameListeners.delete(listener);
+        },
+      };
+    },
     [Symbol.dispose]() {
       rpc[Symbol.dispose]();
+      webSocket.close();
     },
   };
+}
+
+export const withStream = connectStream;
+
+function emitFrame(
+  listeners: Set<
+    (frame: {
+      direction: "in" | "out";
+      data: string;
+      byteLength: number;
+      timestamp: number;
+    }) => void
+  >,
+  direction: "in" | "out",
+  data: unknown,
+) {
+  if (listeners.size === 0) return;
+  const text = describeWebSocketFrameData(data);
+  const frame = {
+    direction,
+    data: text,
+    byteLength: new TextEncoder().encode(text).byteLength,
+    timestamp: Date.now(),
+  };
+  for (const listener of listeners) listener(frame);
+}
+
+function describeWebSocketFrameData(data: unknown) {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
+  if (ArrayBuffer.isView(data)) return new TextDecoder().decode(data);
+  throw new TypeError(`unexpected WebSocket frame data: ${String(data)}`);
 }

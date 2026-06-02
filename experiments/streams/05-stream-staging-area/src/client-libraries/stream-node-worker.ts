@@ -1,14 +1,18 @@
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
-import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
-import type { StreamProcessorRunnerRpc } from "../stream-processor-runner.js";
-import type { StreamRpc } from "../stream-types.js";
+import type { StreamProcessorRunnerRpc, StreamRpc } from "../stream-types.js";
 
 type FetchEndpoint = (request: Request) => Promise<Response>;
 
 export type StreamClient = AsyncDisposable & {
   rpc: RpcStub<StreamRpc>;
-  append(args: { event: StreamEventInput }): Promise<StreamEvent>;
-  appendBatch(args: { events: StreamEventInput[] }): Promise<StreamEvent[]>;
+  onWebSocketFrame(
+    listener: (frame: {
+      direction: "in" | "out";
+      data: string;
+      byteLength: number;
+      timestamp: number;
+    }) => void,
+  ): Disposable;
 };
 
 export type StreamProcessorRunnerClient = AsyncDisposable & {
@@ -30,7 +34,9 @@ export async function connectStreamFromNode(endpoint: StreamEndpoint): Promise<S
 }
 
 /** Connects from a Worker or Durable Object using fetch plus a WebSocket upgrade. */
-export async function connectStreamFromWorker(endpoint: WorkerStreamEndpoint): Promise<StreamClient> {
+export async function connectStreamFromWorker(
+  endpoint: WorkerStreamEndpoint,
+): Promise<StreamClient> {
   const webSocket = await openWorkerWebSocket(endpoint.fetch, streamWebSocketUrl(endpoint));
   return streamClientFromWebSocket(webSocket);
 }
@@ -61,14 +67,31 @@ function connectStreamWebSocket(url: string) {
 }
 
 function streamClientFromWebSocket(webSocket: WebSocket): StreamClient {
+  const frameListeners = new Set<
+    (frame: {
+      direction: "in" | "out";
+      data: string;
+      byteLength: number;
+      timestamp: number;
+    }) => void
+  >();
+  const send = webSocket.send.bind(webSocket);
+  webSocket.send = ((data: Parameters<WebSocket["send"]>[0]) => {
+    emitFrame(frameListeners, "out", data);
+    return send(data);
+  }) as WebSocket["send"];
+  webSocket.addEventListener("message", (event) => emitFrame(frameListeners, "in", event.data));
+
   const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
   return {
     rpc,
-    append(args) {
-      return rpc.append(args);
-    },
-    appendBatch(args) {
-      return rpc.appendBatch(args);
+    onWebSocketFrame(listener) {
+      frameListeners.add(listener);
+      return {
+        [Symbol.dispose]() {
+          frameListeners.delete(listener);
+        },
+      };
     },
     async [Symbol.asyncDispose]() {
       rpc[Symbol.dispose]();
@@ -132,4 +155,34 @@ function closeWebSocket(webSocket: WebSocket) {
     webSocket.addEventListener("close", () => resolve(), { once: true });
     webSocket.close();
   });
+}
+
+function emitFrame(
+  listeners: Set<
+    (frame: {
+      direction: "in" | "out";
+      data: string;
+      byteLength: number;
+      timestamp: number;
+    }) => void
+  >,
+  direction: "in" | "out",
+  data: unknown,
+) {
+  if (listeners.size === 0) return;
+  const text = describeWebSocketFrameData(data);
+  const frame = {
+    direction,
+    data: text,
+    byteLength: new TextEncoder().encode(text).byteLength,
+    timestamp: Date.now(),
+  };
+  for (const listener of listeners) listener(frame);
+}
+
+function describeWebSocketFrameData(data: unknown) {
+  if (typeof data === "string") return data;
+  if (data instanceof ArrayBuffer) return new TextDecoder().decode(data);
+  if (ArrayBuffer.isView(data)) return new TextDecoder().decode(data);
+  throw new TypeError(`unexpected WebSocket frame data: ${String(data)}`);
 }
