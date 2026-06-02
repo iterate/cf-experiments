@@ -184,7 +184,7 @@ export class StreamBrowserDatabase {
   // committed offset range to every tab.
   #writeMode: StreamDatabaseWriteMode = "batch";
   #pendingWrites: StreamEvent[] = [];
-  #flushing: Promise<void> | undefined;
+  #flushScheduled = false;
   readonly #insertedListeners = new Set<(rows: StreamEventRow[]) => void>();
   readonly #writeErrorListeners = new Set<(error: unknown) => void>();
 
@@ -204,7 +204,10 @@ export class StreamBrowserDatabase {
 
   write(event: StreamEvent) {
     this.#pendingWrites.push(event);
-    this.#flushing ??= Promise.resolve().then(() => this.#flushPendingWrites());
+    // Coalesce a batch of per-event writes into one flush on the next microtask.
+    if (this.#flushScheduled) return;
+    this.#flushScheduled = true;
+    void Promise.resolve().then(() => this.#flushPendingWrites());
   }
 
   clearPendingWrites() {
@@ -212,7 +215,7 @@ export class StreamBrowserDatabase {
   }
 
   async #flushPendingWrites() {
-    this.#flushing = undefined;
+    this.#flushScheduled = false;
     const events = this.#pendingWrites;
     this.#pendingWrites = [];
     if (events.length === 0) return;

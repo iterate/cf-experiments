@@ -36,7 +36,8 @@ export async function withStreamSubscription(args: {
 
     for (const event of events) {
       inbox.push(event);
-      for (const waiter of [...waiters]) {
+      // Deleting the current element during Set iteration is safe in JS.
+      for (const waiter of waiters) {
         if (!waiter.predicate(event)) continue;
         clearTimeout(waiter.timeout);
         waiters.delete(waiter);
