@@ -282,7 +282,8 @@ export class StreamBrowserDatabase {
   async info(): Promise<StreamDatabaseInfo> {
     this.#infoRefresh ??= (async () => {
       try {
-        const persisted = (await navigator.storage?.persist?.()) ?? false;
+        // Pure read of the current grant — does NOT request persistence (that's persist()).
+        const persisted = (await navigator.storage?.persisted?.()) ?? false;
         const [size] = await this.#exec<{ bytes: number }>(
           `SELECT page_count * page_size AS bytes
            FROM pragma_page_count(), pragma_page_size()`,

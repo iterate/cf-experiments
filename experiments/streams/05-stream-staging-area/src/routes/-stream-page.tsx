@@ -537,7 +537,7 @@ function SubscriptionTool({
     <section className="stream-page__tool">
       <h2 className="stream-page__tool-title">Subscription</h2>
       <dl className="stream-page__facts">
-        <div>
+        <div title="Connection to the stream Durable Object over a capnweb WebSocket: connecting → connected → subscribing → subscribed (or reconnecting / error).">
           <dt>Status</dt>
           <dd>
             <output
@@ -551,14 +551,14 @@ function SubscriptionTool({
             </output>
           </dd>
         </div>
-        <div>
+        <div title="This tab's role in the Web Locks election. leader = the single writer (it subscribes to the stream and writes events into the shared local DB); follower = a reader that mirrors the leader's writes from the same on-disk DB; electing/idle = before a role is assigned.">
           <dt>Subscription</dt>
           <dd>
             <output className="stream-page__state">{snapshot.subscriptionStatus}</output>
           </dd>
         </div>
         {snapshot.connectionError === undefined ? null : (
-          <div>
+          <div title="The most recent connection or subscription error, if any.">
             <dt>Error</dt>
             <dd>
               <output className="stream-page__state stream-page__state--error stream-page__state--wrap">
@@ -567,21 +567,21 @@ function SubscriptionTool({
             </dd>
           </div>
         )}
-        <div>
+        <div title="Number of events stored in this tab's local SQLite mirror (one row per stream offset).">
           <dt>Events</dt>
           <dd>
             <output className="stream-page__state">{eventCount}</output>
           </dd>
         </div>
-        <div>
-          <dt>OPFS isolated</dt>
+        <div title="Whether the page is crossOriginIsolated (the COOP+COEP / SharedArrayBuffer mode). Deliberately false: wa-sqlite's OPFSCoopSyncVFS needs no isolation, and enabling it would re-introduce the SharedArrayBuffer OPFS deadlock. Not a problem — it's expected.">
+          <dt>Cross-origin isolated</dt>
           <dd>
             <output className="stream-page__state">
               {String(snapshot.databaseInfo?.crossOriginIsolated ?? false)}
             </output>
           </dd>
         </div>
-        <div>
+        <div title="Where the SQLite database lives. opfs = the browser's Origin Private File System — a real file on disk that survives reloads.">
           <dt>Storage</dt>
           <dd>
             <output className="stream-page__state">
@@ -589,7 +589,7 @@ function SubscriptionTool({
             </output>
           </dd>
         </div>
-        <div>
+        <div title="Whether the browser granted eviction-protected ('persistent') storage to this origin. false = best-effort: the data IS saved to disk, but the browser may evict it under storage pressure. Chrome only grants this to engaged/installed origins; there's no API to force it.">
           <dt>Persisted</dt>
           <dd>
             <output className="stream-page__state">
@@ -597,7 +597,7 @@ function SubscriptionTool({
             </output>
           </dd>
         </div>
-        <div>
+        <div title="On-disk size of this tab's local SQLite database file.">
           <dt>DB file size</dt>
           <dd>
             <output className="stream-page__state">
