@@ -26,7 +26,7 @@ path="proof-$(date +%s)"
 agent-browser --cdp "$PORT" open "$URL/streams/$path" >/dev/null 2>&1
 agent-browser --cdp "$PORT" wait 9000 >/dev/null 2>&1
 
-result=$(agent-browser --cdp "$PORT" eval 'JSON.stringify({ status: document.querySelector(".stream-page__facts output")?.textContent, received: globalThis.__receivedEventCount ?? 0 })' 2>&1 | tail -1)
+result=$(agent-browser --cdp "$PORT" eval 'JSON.stringify({ status: document.querySelector("[data-testid=stream-status]")?.textContent, received: globalThis.__receivedEventCount ?? 0 })' 2>&1 | tail -1)
 echo "browser result: $result"
 
 received=$(printf '%s' "$result" | grep -oE 'received[^0-9]*[0-9]+' | grep -oE '[0-9]+$' || echo 0)

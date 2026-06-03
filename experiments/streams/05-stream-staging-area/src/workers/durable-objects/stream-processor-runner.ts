@@ -1,26 +1,27 @@
 import { newWorkersRpcResponse, type RpcStub } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
-import type { StreamEvent } from "@cf-experiments/shared/event";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import {
-  createProcessorRunner,
-  streamPortFromRpc,
-  type ProcessorRunner,
-} from "./stream-processor.js";
+  createStreamSubscription,
+  type StreamSubscription,
+} from "../../subscription.js";
+import { createProcessorRunner, type ProcessorRunner } from "../../processor-runner.js";
 // The SAME processor the Node e2e (inbound) and the browser tab (inbound) run.
-import { echo } from "./demo-processor.js";
-import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
+import { echoTestProcessor } from "../../processors/echo-test/implementation.js";
+import type { CoreStreamState, SubscriptionConfiguredEvent } from "../../core-stream-processor.js";
 import type {
   StreamProcessorRunnerRpc,
   StreamProcessorRunnerSnapshot,
   StreamProcessorSlug,
   StreamRpc,
   SubscriptionSink,
-} from "./stream-types.js";
+} from "../../types.js";
 
 export class StreamProcessorRunner extends DurableObject {
   #stream: RpcStub<StreamRpc> | undefined;
   #runner: ProcessorRunner | undefined;
+  #subscription: StreamSubscription | undefined;
+  #processing: AsyncDisposable | undefined;
 
   // Stream durable object calls fetch on us to wake us up and establish a capnweb rpc connection
   // whenever an event is appended to a stream that this StreamProcessorRunner is subscribed to,
@@ -33,11 +34,13 @@ export class StreamProcessorRunner extends DurableObject {
   // that implements processEventBatch.
   // The Stream durable object helpfully shares the subscriptionConfiguredEvent with us,
   // so we can decide which stream processor implementation to use
-  requestSubscription(args: {
+  async requestSubscription(args: {
     stream: RpcStub<StreamRpc>;
+    subscriptionKey: string;
+    streamMaxOffset: number;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
     streamRuntimeState: { state: CoreStreamState };
-  }): { sink: SubscriptionSink; afterOffset?: number } {
+  }): Promise<{ sink: SubscriptionSink; replayAfterOffset?: number }> {
     const subscriber = args.subscriptionConfiguredEvent.payload.subscriber;
     if (subscriber.type !== "built-in") {
       throw new Error("StreamProcessorRunner only supports built-in subscribers");
@@ -45,27 +48,36 @@ export class StreamProcessorRunner extends DurableObject {
     if (subscriber.transport !== "capnweb-websocket") {
       throw new Error("StreamProcessorRunner only supports capnweb-websocket subscribers");
     }
-    if (subscriber.processorSlug !== "echo") {
+    if (subscriber.processorSlug !== "echo-test") {
       throw new Error(`Unknown stream processor slug: ${subscriber.processorSlug}`);
     }
 
+    await this.#processing?.[Symbol.asyncDispose]();
+    await this.#subscription?.[Symbol.asyncDispose]();
     this.#stream?.[Symbol.dispose]();
     this.#stream = args.stream.dup();
     this.ctx.storage.kv.put("processorSlug", subscriber.processorSlug);
-    // Same runner as Node/browser. KV is the storage port; the stream stub is the
-    // stream port. The DO stays the sink and just delegates processEventBatch.
+    // Same runner path as Node/browser. KV is the storage port; the stream stub is
+    // the exact Stream RPC API passed to processor afterAppend.
     this.#runner = createProcessorRunner({
-      processor: echo,
+      processor: echoTestProcessor,
       deps: undefined,
       storage: {
         load: () => this.ctx.storage.kv.get<StreamProcessorRunnerSnapshot>("snapshot"),
         save: (snapshot) => void this.ctx.storage.kv.put("snapshot", snapshot),
       },
-      stream: streamPortFromRpc(this.#stream),
+      stream: this.#stream,
+    });
+    const snapshot = await this.#runner.snapshot();
+    this.#subscription = createStreamSubscription({
+      subscriptionKey: args.subscriptionKey,
+    });
+    this.#processing = this.#runner.run({
+      subscription: this.#subscription,
     });
     return {
-      sink: new StreamProcessorRunnerRpcTarget(this),
-      afterOffset: this.ctx.storage.kv.get<StreamProcessorRunnerSnapshot>("snapshot")?.offset,
+      sink: this.#subscription.sink,
+      replayAfterOffset: snapshot?.offset ?? 0,
     };
   }
 
@@ -77,13 +89,6 @@ export class StreamProcessorRunner extends DurableObject {
     };
   }
 
-  /** Consumes a batch delivered by a stream subscription sink. */
-  async processEventBatch(args: { events: StreamEvent[]; headOffset?: number; headCreatedAt?: string }) {
-    if (this.#runner === undefined) {
-      throw new Error("StreamProcessorRunner has not been attached to a stream");
-    }
-    await this.#runner.processEventBatch(args);
-  }
 }
 
 export const StreamProcessorRunnerRpcTarget = makeRpcTargetClass<

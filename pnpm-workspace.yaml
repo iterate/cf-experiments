@@ -1,6 +1,7 @@
 packages:
   - experiments/*
   - experiments/streams/*
+  - experiments/streams/*/example-app
   - packages/*
 
 catalogs:

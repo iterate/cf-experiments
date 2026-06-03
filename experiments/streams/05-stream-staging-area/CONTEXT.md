@@ -33,10 +33,14 @@ A row in the browser `processor_state` table — the same idea as `stream.ts`'s 
 _Avoid_: Processor state without offset, checkpoint table
 
 **Processor Stem**:
-The single kebab-case name that identifies a **Browser Stream Processor** and deterministically generates its identity surfaces: query param value = stem; processor slug = `browser-` + stem; processor name = Title Case(stem); React component = Pascal(stem) + `View`. Tables are NOT derived from the stem — a processor declares its own table(s), free-form snake_case, and may own several. The two current stems:
-- `raw-events` → slug `browser-raw-events`, name "Raw events", `RawEventsView`, table `events`.
-- `event-feed` → slug `browser-event-feed`, name "Event feed", `EventFeedView`, table `feed_items` (more tables possible later).
-_Avoid_: pretty (renamed to event-feed), deriving a table name from the stem
+The single kebab-case name that identifies a **Browser Stream Processor** and deterministically generates its identity surfaces: query param value = stem; processor slug + folder = `browser-` + stem; processor name = Title Case(stem); React component = Pascal(stem) + `View`. Tables are NOT derived from the stem — a processor declares its own table(s), free-form snake_case, and may own several. The two stems:
+- `raw-events` → slug/folder `browser-raw-events`, name "Raw events", `RawEventsView`, table `events`. BUILT (code currently uses the suffix form `raw-events-browser` — rename slug + `processors/` folder to the `browser-` prefix).
+- `event-feed` → slug/folder `browser-event-feed`, name "Event feed", `EventFeedView`, table `feed_items` (more tables possible later). NOT YET BUILT.
+_Avoid_: pretty (renamed to event-feed); the `-browser` suffix form (slug is `browser-` prefix, matching the `processors/<slug>/` folder); deriving a table name from the stem
+
+**Feed Item**:
+One row in `feed_items`, written by the `browser-event-feed` processor: a contiguous run of events that map to the same `component` collapsed into one rendered unit. Columns: `local_index` (dense 0-based PK, what TanStack Virtual indexes), `component` (the React component name to render), `first_offset` + `last_offset` (the run's stream-offset span), `event_count`, and `data` (a JSON blob holding whatever that component needs to render). `component = componentForEventType(type)` via a small pure mapping (created → `"stream.created"`, woken → `"stream.woken"`, else a default such as `"generic"`); grouping is by `component`, not raw `type`.
+_Avoid_: UI element, feed row, grouped event (use "Feed Item"); typed render columns (render payload is the single `data` JSON blob)
 
 ## Relationships
 
@@ -61,8 +65,9 @@ _Avoid_: pretty (renamed to event-feed), deriving a table name from the stem
 - Two dedup scopes keyed on `(stream path, processor slug)`: (1) cross-tab, Web Locks elect ONE writer/leader across all tabs (others are read-only followers); (2) within one tab, a ref-counted registry shares ONE runtime instance (one capnweb connection + one processor runner) across an arbitrary number of React views with that key.
 - Connection count = number of distinct `(path, slug)` runtimes mounted in a tab. Two streams × two processors = 4 connections; a 5th view reusing an existing `(path, slug)` adds 0. The first view for a key creates the runtime; the last to unmount tears it down.
 - The SQLite connection (wa-sqlite worker / `Browser Mirror`) is shared per `path` (one worker per stream per tab), via a `path`-keyed ref-counted registry beneath the `(path, slug)` runtime registry. Both registries use one small generic ref-count helper; a stream's multiple processors share one DB worker (no intra-tab OPFS handle contention).
-- A **Browser Stream Processor** debounces its own SQLite writes: `deps` is just a SQLite client, and `afterAppend` accumulates events in closure state and schedules a flush (~10ms / next tick). The runner knows nothing about this.
-- Debounce recovery rule: the durable checkpoint moves ONLY inside the flush transaction. The runner's `storage.save` is a no-op and `storage.load` reads `processor_state.max_offset`; the flush writes output rows + `processor_state.state` + `max_offset` atomically, and the buffer is cleared only on commit (failure re-queues and retries). On restart, resume `afterOffset = processor_state.max_offset`, so buffered-but-uncommitted events are simply re-delivered — replay is idempotent (events trigger ignores identical re-inserts; feed grouping re-derives from the reloaded `state`). Never persist a checkpoint ahead of the flush.
+- Debounce (as built for `raw-events-browser`): `afterAppend` calls a fire-and-forget `deps.storeEvent(event)`; the browser store buffers into `pendingEvents` and flushes once per `requestAnimationFrame` into ONE `insertEventBatch` transaction, serialized through a `tail` promise chain, with write errors surfaced to React (a broken mirror must not look like an empty stream). The runner and processor stay ignorant of the coalescing. `blockProcessorUntil` exists in the runner but raw-events does not use it.
+- Checkpoint (as built for `raw-events-browser`): resume from the `events` table's max offset; `storage.save` is a no-op; there is NO `processor_state` row for raw events (its output table IS its checkpoint). Because offset only advances as rows commit, replay is safe (the events trigger ignores identical re-inserts).
+- PLANNED, for a reducing processor like `event-feed-browser`: it WILL need a `processor_state` row (its grouping `state` + `max_offset`) since its checkpoint isn't simply its output table's max offset. Whether to write rows + state + offset atomically (and whether to use `blockProcessorUntil`) is an open design question for that processor — not yet decided.
 
 ## Example Dialogue
 

@@ -111,7 +111,7 @@ describe("core stream processor", () => {
             subscriber: {
               type: "built-in",
               transport: "capnweb-websocket",
-              processorSlug: "echo",
+              processorSlug: "echo-test",
             },
           },
           createdAt: "2026-06-01T12:00:01.000Z",
@@ -131,7 +131,7 @@ describe("core stream processor", () => {
             subscriber: {
               type: "built-in",
               transport: "capnweb-websocket",
-              processorSlug: "echo",
+              processorSlug: "echo-test",
             },
           },
           createdAt: "2026-06-01T12:00:02.000Z",

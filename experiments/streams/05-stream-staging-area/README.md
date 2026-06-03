@@ -9,7 +9,7 @@ It keeps only the pieces we want to graduate:
 - the stream processor runner Durable Object
 - CapnWeb-over-WebSocket RPC between streams and subscribers
 - browser, Node.js, and Workers client entry points
-- a tiny TanStack Start React app served by the same Worker
+- a tiny TanStack Start React app in `example-app/`, served by the same Worker
 - end-to-end fixtures for append, replay, outbound processors, and one-way batch delivery
 
 It intentionally does not include the old handwritten WebSocket protocol, benchmark runners,
@@ -29,6 +29,9 @@ Run the local TanStack Start + Cloudflare dev server:
 ```sh
 pnpm --filter @cf-experiments/05-stream-staging-area dev
 ```
+
+The root package is shaped like the future stream package; `dev`, `build`,
+`deploy`, and browser e2e scripts delegate to `example-app/`.
 
 Then run end-to-end tests against it:
 
@@ -56,14 +59,14 @@ WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev pnpm --fi
 Use the browser client library with a full stream URL:
 
 ```ts
-import { withStream } from "./src/client-libraries/stream-browser.js";
+import { connectStream } from "./src/browser/connect.js";
 
-using stream = withStream({ url: "wss://stream-staging-area.iterate-dev-preview.workers.dev/stream/example" });
-const event = await stream.rpc.append({ event: { type: "example", payload: {} } });
+await using connection = await connectStream({ url: "wss://stream-staging-area.iterate-dev-preview.workers.dev/stream/example" });
+const event = await connection.stream.append({ event: { type: "example", payload: {} } });
 ```
 
-CapnWeb's `newWebSocketRpcSession()` returns the RPC stub synchronously and queues sends while
-the browser WebSocket is connecting, so this does not need an async connect step.
+CapnWeb's `newWebSocketRpcSession()` queues sends while the browser WebSocket is connecting; the
+browser helper still returns an async-disposable connection so network/RPC cleanup has one shape.
 
 The React app serves one stream viewer:
 
@@ -88,7 +91,7 @@ doppler run --project os --config dev -- pnpm --filter @cf-experiments/05-stream
 Run the same end-to-end tests against the deployed worker:
 
 ```sh
-WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev STREAM_STAGING_E2E=true pnpm --filter @cf-experiments/05-stream-staging-area test -- src/stream-capnweb.test.ts
+WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev STREAM_STAGING_E2E=true pnpm --filter @cf-experiments/05-stream-staging-area test -- src/stream-capnweb.test.ts src/stream-processor-node.test.ts
 ```
 
 ## Evaluate
@@ -97,7 +100,7 @@ This experiment is successful when the staging API stays small and clear enough 
 main repo:
 
 - appends are expressed as event batches
-- subscribers consume event batches through a `processEventBatch({ events })` RPC method
+- subscribers consume event batches through a `processEventBatch({ events, streamMaxOffset })` RPC method
 - stream delivery does not await each subscriber's `processEventBatch` result
 - stream state is reduced by the core stream processor contract
 - outbound built-in subscribers are reconciled from `subscription-configured` events

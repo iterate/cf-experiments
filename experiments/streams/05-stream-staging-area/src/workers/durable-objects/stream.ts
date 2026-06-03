@@ -1,5 +1,6 @@
 import { newWebSocketRpcSession, newWorkersRpcResponse, type RpcStub } from "capnweb";
 import { DurableObject } from "cloudflare:workers";
+import { posix } from "node:path";
 import {
   StreamEvent as StreamEventSchema,
   StreamEventInput as StreamEventInputSchema,
@@ -7,12 +8,12 @@ import {
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
-import { coreStreamProcessorContract, type CoreStreamState } from "./core-stream-processor.js";
+import { coreStreamProcessorContract, type CoreStreamState } from "../../core-stream-processor.js";
 import type {
   StreamProcessorRunnerRpc,
   StreamRpc,
   SubscriptionSink,
-} from "./stream-types.js";
+} from "../../types.js";
 
 const CORE_PROCESSOR_SLUG = coreStreamProcessorContract.slug;
 
@@ -77,8 +78,8 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
       );
 
       -- Processor-owned durable snapshots, keyed by processor slug. The Stream
-      -- DO stores events.iterate.com/stream/core here; runner DOs can use the
-      -- same shape later for echo or multiple processors in one runner.
+      -- DO stores the built-in "stream" processor here; runner DOs can use the
+      -- same shape later for echo-test or multiple processors in one runner.
       create table if not exists processor_state (
         processor_slug text primary key,
         state text not null
@@ -201,6 +202,12 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     this.#writeProcessorStateJson(CORE_PROCESSOR_SLUG, state);
   }
 
+  #resolveStream(streamPath: string): Pick<StreamRpc, "append" | "appendBatch"> {
+    const resolvedPath = posix.resolve("/", this.state.path, streamPath).slice(1);
+    if (resolvedPath === this.state.path) return this;
+    return this.env.STREAM.getByName(`${this.state.namespace}:${resolvedPath}`);
+  }
+
   /** Opens the capnweb RPC API for this stream Durable Object. */
   async fetch(request: Request) {
     return newWorkersRpcResponse(request, new StreamRpcTarget(this));
@@ -211,8 +218,11 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    *
    * Uses `appendBatch()`, so all append ordering and persistence stays in one place.
    */
-  append(args: { event: StreamEventInput }): StreamEvent {
-    return this.appendBatch({ events: [args.event] })[0]!;
+  append(args: { streamPath?: string; event: StreamEventInput }): StreamEvent | Promise<StreamEvent> {
+    if (args.streamPath !== undefined) {
+      return this.#resolveStream(args.streamPath).append({ event: args.event });
+    }
+    return this.#appendBatchHere({ events: [args.event] })[0]!;
   }
 
   /**
@@ -232,7 +242,15 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    *
    * Returns the persisted events (including offsets + `createdAt`) in input order.
    */
-  appendBatch(args: { events: StreamEventInput[] }): StreamEvent[] {
+  appendBatch(args: { streamPath?: string; events: StreamEventInput[] }): StreamEvent[] | Promise<StreamEvent[]> {
+    if (args.streamPath !== undefined) {
+      return this.#resolveStream(args.streamPath).appendBatch({ events: args.events });
+    }
+
+    return this.#appendBatchHere({ events: args.events });
+  }
+
+  #appendBatchHere(args: { events: StreamEventInput[] }): StreamEvent[] {
     let state = this.state;
     const events: StreamEvent[] = [];
     const newEvents: StreamEvent[] = [];
@@ -344,19 +362,18 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
   /**
    * Inbound subscribe: a subscriber hands the stream a sink and the stream delivers.
    *
-   * `subscribe({ subscriptionKey: "s", sink })` on a stream with offsets 1..3 already
-   * present: the subscriber immediately receives a replay batch `[1, 2, 3]`, then one
-   * batch per subsequent append (`[4]`, `[5]`, ...). Passing `afterOffset: 3` skips the
-   * replay and starts at offset 4. Re-subscribing with the same key replaces the old
-   * connection. Omit `subscriptionKey` for an anonymous subscription; the stream assigns
-   * a random key and returns it. Call the returned `unsubscribe()` to stop delivery
-   * without closing the underlying capnweb session.
+   * `subscribe({ subscriptionKey: "s", sink })` live-tails by default. Passing
+   * `replayAfterOffset: 0` replays from the first event before live delivery; passing
+   * `replayAfterOffset: 3` starts at offset 4. Re-subscribing with the same key replaces
+   * the old connection. Omit `subscriptionKey` for an anonymous subscription; the stream
+   * assigns a random key and returns it. Call the returned `unsubscribe()` to stop
+   * delivery without closing the underlying capnweb session.
    */
   subscribe(args: {
     subscriptionKey?: string;
     sink: RpcStub<SubscriptionSink>;
-    afterOffset?: number;
-  }): { subscriptionKey: string; unsubscribe(): void } {
+    replayAfterOffset?: number;
+  }): { subscriptionKey: string; streamMaxOffset: number; unsubscribe(): void } {
     // Type-filtered subscriptions belong here later. For now every subscription
     // observes the stream's full ordered event log after its offset boundary.
     const subscriptionKey = args.subscriptionKey?.trim() || crypto.randomUUID();
@@ -407,8 +424,8 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    * are the same `getEvents(afterOffset: cursor)` loop. `appendBatch` re-arms the
    * pump via `wake()`; the `draining` guard makes that idempotent and race-free.
    *
-   * What actually happens (stream has offsets 1..3, subscribe with no afterOffset):
-   * - open: `cursor = 0`, `wake()` → pump reads `(>0)` → delivers `[1, 2, 3]`,
+   * What actually happens (stream has offsets 1..3, subscribe with `replayAfterOffset: 0`):
+   * - open: `cursor = 0`, `wake()` -> pump reads `(>0)` -> delivers `[1, 2, 3]`,
    *   `cursor = 3` → reads `(>3)` → empty → parks.
    * - append offset 4 → `wake()` → pump reads `(>3)` → delivers `[4]`, `cursor = 4`
    *   → empty → parks. One batch per append while the subscriber keeps up.
@@ -425,9 +442,9 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     direction: "inbound" | "outbound";
     subscriptionKey: string;
     sink: RpcStub<SubscriptionSink>;
-    afterOffset?: number;
+    replayAfterOffset?: number;
     onClose?: () => void;
-  }): { subscriptionKey: string; unsubscribe(): void } {
+  }): { subscriptionKey: string; streamMaxOffset: number; unsubscribe(): void } {
     const subscriptionKey = args.subscriptionKey.trim();
     if (subscriptionKey.length === 0) throw new Error("subscriptionKey must not be blank.");
 
@@ -435,14 +452,14 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     this.#connections.get(subscriptionKey)?.close();
 
     const sink = args.sink.dup();
-    let cursor = args.afterOffset ?? 0;
+    let cursor = args.replayAfterOffset ?? this.state.maxOffset;
     let draining = false;
     let open = true;
 
     // The single delivery path: drain committed events to the sink, then park.
     //
     // FUTURE OPTIMIZATION (Proposal B): the live path currently pays one indexed
-    // `getEvents` read per batch even when the subscriber is exactly at the head.
+    // `getEvents` read per batch even when the subscriber has caught up to maxOffset.
     // `appendBatch` already has the freshly-committed events array in memory, so when
     // `cursor === firstNewOffset - 1` it could hand that array straight to the sink and
     // skip the SQL round-trip — a pure fast path that can't desync because `cursor`
@@ -463,7 +480,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
           connection.lastDeliveredAt = new Date().toISOString();
           // Batch-first, fire-and-forget: never await the thenable, dispose the ignored result.
           // Awaiting it forces a return round-trip per batch (see design.md "capnweb API").
-          sink.processEventBatch({ events })[Symbol.dispose]();
+          sink.processEventBatch({ events, streamMaxOffset: this.state.maxOffset })[Symbol.dispose]();
           await Promise.resolve();
         }
       } finally {
@@ -495,7 +512,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     sink.onRpcBroken(() => connection.close());
     connection.wake();
 
-    return { subscriptionKey, unsubscribe: () => connection.close() };
+    return { subscriptionKey, streamMaxOffset: this.state.maxOffset, unsubscribe: () => connection.close() };
   }
 
   /** Fire-and-forget outbound reconciliation; never blocks the append path. */
@@ -511,9 +528,9 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    * subscription that has none. Triggered on boot, on subscription-configured
    * appends, and on outbound connection loss — never per-append.
    *
-   * What actually happens after appending a `subscription-configured` for key "echo":
-   * reduced state now has `subscriptionsByKey.echo`, no connection exists for it, so
-   * this dials the `echo` runner DO over a websocket, handshakes via `runner.requestSubscription`,
+   * What actually happens after appending a `subscription-configured` for key "echo-test":
+   * reduced state now has `subscriptionsByKey.echo-test`, no connection exists for it, so
+   * this dials the `echo-test` runner DO over a websocket, handshakes via `runner.requestSubscription`,
    * and `#openConnection`s the resulting sink as an outbound connection. On the next
    * boot the constructor's `#reconcile()` re-establishes that same connection from
    * persisted state with no new append needed.
@@ -560,6 +577,8 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
         const runner = newWebSocketRpcSession<StreamProcessorRunnerRpc>(webSocket);
         const request = await runner.requestSubscription({
           stream: new StreamRpcTarget(this),
+          subscriptionKey,
+          streamMaxOffset: this.state.maxOffset,
           subscriptionConfiguredEvent: configured.latestConfiguredEvent,
           streamRuntimeState: this.runtimeState(),
         });

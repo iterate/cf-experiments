@@ -62,6 +62,36 @@ First-party sources:
 
 ## 2026-06-03
 
+### Refactored subscription/processor runner API toward package shape
+
+Reworked the staging API around explicit primitives instead of `with*` wrappers:
+
+- `StreamConnection` now exposes `connection.stream` rather than `connection.stream`.
+- Runtime connection helpers are package-shaped under `src/browser`, `src/node`, and `src/workers`.
+- `createStreamSubscription` owns the capnweb sink, queue, async iterator, `waitForEvent`, and latest `streamMaxOffset`.
+- `createStreamSubscription` and `processorRunner.run({ subscription })` were removed from the active model.
+- `createProcessorRunner` now exposes `snapshot()`, `processEvent(...)`, and `run({ subscription })`; browser, Node/Vitest, and the StreamProcessorRunner Durable Object use the same downstream runner path.
+- Delivery batches now call `processEventBatch({ events, streamMaxOffset })`; max-offset terminology replaced the old ambiguous stream-position wording.
+- Subscription replay uses `replayAfterOffset`; omitting it live-tails, while `0` replays from the first event.
+- Processor `afterAppend` remains synchronous and receives the exact stream append API plus `keepAlive(...)` and `blockProcessorUntil(...)`.
+
+Also moved processors into `src/processors/<slug>/{contract,implementation}.ts` with filesystem-safe slugs:
+
+- `stream`
+- `echo-test`
+- `raw-events-browser`
+
+The browser SQLite mirror is now driven by the `raw-events-browser` processor instead of a bespoke `BrowserMirrorSink`, while preserving the existing requestAnimationFrame batching behavior for SQLite writes.
+
+Verification:
+
+- `pnpm --filter @cf-experiments/05-stream-staging-area typecheck`
+- `pnpm --filter @cf-experiments/05-stream-staging-area test`
+- `pnpm --filter @cf-experiments/05-stream-staging-area build`
+- deployed `stream-staging-area`
+- deployed `STREAM_STAGING_E2E=true ... test -- src/stream-capnweb.test.ts src/stream-processor-node.test.ts`: `24 passed | 2 skipped`
+- deployed Playwright: `21 passed`
+
 ### Fixed stale browser writer lock after deploy/schema changes
 
 Observed a deployed-profile failure where `/streams/` showed `connected`, `follower`,
@@ -230,7 +260,7 @@ First-party sources:
 ### Two more browser non-linearities (both size-dependent → now constant)
 
 1. **"kill stream" → slow `woken` on large streams.** On reconnect the browser re-subscribed
-   at `afterOffset = -1` (the runner's no-op storage had no cursor), so the Stream DO replayed
+   at `replayAfterOffset = -1` (the runner's no-op storage had no cursor), so the Stream DO replayed
    the WHOLE stream before the newly-appended `woken` arrived — delay grew with stream size.
    Fix: the runner's `storage.load` now returns the local SQLite mirror's `maxOffset()` as the
    resume cursor (the events table IS the durable cursor), with a fallback to `-1` if the DB
@@ -342,7 +372,7 @@ Consumers updated (no backcompat kept): `runtimeState().runtime.liveSubscription
 `stream-types.ts` (folded `Offset` into `StreamCursor`).
 
 Known trade-off + future optimization documented inline in `#openConnection`: the live
-path pays one indexed `getEvents` read per batch even when the subscriber is at the head.
+path pays one indexed `getEvents` read per batch even when the subscriber is caught up.
 Proposal B fast path (hand the in-memory append array straight to the sink when
 `cursor === firstNewOffset - 1`) is left as a documented TODO, gated on a benchmark.
 

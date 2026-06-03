@@ -12,12 +12,12 @@ import {
   createStreamBrowserStore,
   type StreamBrowserSnapshot,
   type StreamBrowserStore,
-} from "../client-libraries/stream-browser-store.js";
+} from "../../../src/browser/stream-browser-store.js";
 import {
   type StreamBrowserDatabase,
   type StreamEventRow,
-} from "../client-libraries/stream-browser-db.js";
-import { useStreamQuery } from "../client-libraries/use-stream-query.js";
+} from "../../../src/browser/stream-browser-db.js";
+import { useStreamQuery } from "../../../src/browser/hooks/use-stream-query.js";
 import "./-stream-page.css";
 
 export function StreamPage({ streamPath }: { streamPath: string }) {
@@ -64,15 +64,15 @@ function HydratedStreamCompactView({ streamPath }: { streamPath: string }) {
 
   return (
     <section
-      className="stream-page__compact-view"
+      className="flex min-h-0 flex-col border-r border-slate-200 last:border-r-0"
       aria-label={`Stream ${streamPath}`}
       data-stream-path={streamPath}
     >
-      <div className="stream-page__compact-status">
-        <span className="stream-page__path-display">{streamPath}</span>
-        <output className="stream-page__state" data-testid="stream-status">{runtime.snapshot.connectionStatus}</output>
-        <output className="stream-page__state" data-testid="subscription-status">{runtime.snapshot.subscriptionStatus}</output>
-        <output className="stream-page__state" data-testid="event-count">{runtime.eventCount}</output>
+      <div className="grid min-h-9 grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-2 border-b border-slate-100 px-3 py-1.5">
+        <span className="min-w-0 truncate font-mono text-xs leading-snug text-slate-950">{streamPath}</span>
+        <output className="font-mono text-xs text-slate-500" data-testid="stream-status">{runtime.snapshot.connectionStatus}</output>
+        <output className="font-mono text-xs text-slate-500" data-testid="subscription-status">{runtime.snapshot.subscriptionStatus}</output>
+        <output className="font-mono text-xs text-slate-500" data-testid="event-count">{runtime.eventCount}</output>
       </div>
       {runtime.countResult.status !== "ok" ? (
         <StreamLoadingPanel
@@ -140,9 +140,9 @@ function useStreamRuntime(streamPath: string, eventTypeFilter: string) {
 
 function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
   return (
-    <div className="stream-page__hydrate-frame">
-      <div className="stream-page__hydrate">
-        <div className="stream-page__spinner" aria-hidden="true" />
+    <div className="min-h-full bg-white font-sans text-slate-950">
+      <div className="flex min-h-60 items-center justify-center gap-2.5 text-sm text-slate-500">
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
         <span>SSR done, hydrating client for {streamPath}</span>
       </div>
     </div>
@@ -227,10 +227,10 @@ function StreamPageLayout({
   );
 
   return (
-    <main className="stream-page">
-      <div className="stream-page__body">
+    <main className="block h-dvh overflow-hidden bg-white font-sans text-[#16181d]">
+      <div className="flex h-full min-h-0 flex-row gap-4 p-0 max-[760px]:flex-col max-[760px]:gap-0">
         <StreamSidebar
-          className={sidebarOpen ? undefined : "stream-page__sidebar--hidden"}
+          className={sidebarOpen ? undefined : "hidden"}
           eventCount={eventCount}
           key={`sidebar:${streamPath}`}
           snapshot={snapshot}
@@ -242,15 +242,15 @@ function StreamPageLayout({
         <div
           className={
             sidebarOpen
-              ? "stream-page__main"
-              : "stream-page__main stream-page__main--sidebar-hidden"
+              ? "relative flex min-h-0 min-w-0 flex-1 flex-col"
+              : "relative flex min-h-0 min-w-0 flex-1 flex-col pl-4"
           }
         >
           {sidebarOpen ? null : (
             <button
               aria-controls="stream-sidebar"
               aria-label="Show sidebar"
-              className="stream-page__sidebar-button stream-page__show-sidebar-button"
+              className="absolute left-4 top-4 z-20 inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
               title="Show sidebar"
               type="button"
               onClick={() => setSidebarOpen(true)}
@@ -290,10 +290,10 @@ function StreamLoadingPanel({ message }: { message: string }) {
   return (
     <section
       aria-label="Stream events"
-      className="stream-page__stream stream-page__stream--loading"
+      className="relative grid min-h-0 flex-1 place-items-center overflow-y-auto bg-white"
     >
-      <div className="stream-page__hydrate">
-        <div className="stream-page__spinner" aria-hidden="true" />
+      <div className="flex min-h-60 items-center justify-center gap-2.5 text-sm text-slate-500">
+        <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
         <span>{message}</span>
       </div>
     </section>
@@ -304,7 +304,7 @@ function EditStreamIcon() {
   return (
     <svg
       aria-hidden
-      className="stream-page__edit-icon"
+      className="h-3.5 w-3.5"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -322,7 +322,7 @@ function SidebarIcon() {
   return (
     <svg
       aria-hidden
-      className="stream-page__sidebar-icon"
+      className="h-3.5 w-3.5"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -340,7 +340,7 @@ function AppendEventIcon() {
   return (
     <svg
       aria-hidden
-      className="stream-page__append-icon"
+      className="h-3.5 w-3.5"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -408,24 +408,24 @@ function StreamTopBar({
   }
 
   return (
-    <header className="stream-page__top-bar">
+    <header className="mb-4 grid items-start gap-3 border-b border-[#e8ebf0] bg-white pb-4">
       <button
         aria-controls="stream-sidebar"
         aria-label="Hide sidebar"
-        className="stream-page__sidebar-button stream-page__hide-sidebar-button"
+        className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
         title="Hide sidebar"
         type="button"
         onClick={() => onSidebarOpenChange(false)}
       >
         <SidebarIcon />
       </button>
-      <div className="stream-page__controls">
-        <div className="stream-page__path-area">
+      <div className="flex min-w-0 flex-1 items-center gap-1.5 w-full">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
           {editingPath ? (
             <>
               <input
                 aria-label="Stream path"
-                className="stream-page__input stream-page__path-input"
+                className="min-w-0 flex-1 rounded-md border border-[#bac2cf] px-2 py-1.5 font-mono text-[13px]"
                 id="stream-path"
                 ref={pathInputRef}
                 value={editedPath}
@@ -442,7 +442,7 @@ function StreamTopBar({
                 }}
               />
               <button
-                className="stream-page__button stream-page__path-submit"
+                className="shrink-0 cursor-pointer whitespace-nowrap rounded-md bg-[#1f6feb] px-2.5 py-1.5 text-xs font-semibold text-white no-underline disabled:cursor-default disabled:opacity-55"
                 disabled={!pathChanged}
                 type="button"
                 onClick={() => goToDraftPath()}
@@ -451,12 +451,12 @@ function StreamTopBar({
               </button>
             </>
           ) : (
-            <span className="stream-page__path-display">{streamPath}</span>
+            <span className="min-w-0 truncate font-mono text-xs leading-snug text-slate-950">{streamPath}</span>
           )}
         </div>
         {editingPath ? (
           <button
-            className="stream-page__text-link"
+            className="shrink-0 cursor-pointer border-0 bg-transparent px-0 py-1 text-[11px] text-[#98a2b3] hover:text-[#475467] hover:underline"
             type="button"
             onClick={() => cancelEditingPath()}
           >
@@ -465,7 +465,7 @@ function StreamTopBar({
         ) : (
           <button
             aria-label="Edit stream path"
-            className="stream-page__edit-button"
+            className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
             title="Edit stream path"
             type="button"
             onClick={() => startEditingPath()}
@@ -517,7 +517,7 @@ function EventRows({
     followOnAppend: true,
     paddingStart: topScrollAffordanceHeight,
     scrollEndThreshold: 80,
-    overscan: 6,
+    overscan: 24,
     // The official React chat example uses direct DOM updates. Without this,
     // a tiny/non-scrollable list that receives a huge same-render append can
     // scroll to the previous max offset and stop following the end.
@@ -563,7 +563,7 @@ function EventRows({
   const showScrollToTop = eventCount > 0 && !scrollPosition.isAtTop;
 
   return (
-    <div className="stream-page__feed">
+    <div className="relative flex min-h-0 flex-1 flex-col">
       <EventTypeFilterBar
         eventCount={eventCount}
         eventTypeFilter={eventTypeFilter}
@@ -573,12 +573,12 @@ function EventRows({
       />
       <StreamRuntimeNotice eventCount={eventCount} snapshot={snapshot} />
       {showScrollToTop ? (
-        <div className="stream-page__feed-top-fade">
-          <div className="stream-page__feed-top-fade-mask" aria-hidden />
-          <div className="stream-page__scroll-affordance stream-page__scroll-affordance--in-top-fade">
+        <div className="pointer-events-none absolute left-0 right-3.5 top-11 z-10 flex h-12 items-start justify-center pt-2">
+          <div className="absolute inset-0 bg-gradient-to-b from-white via-white/80 to-transparent" aria-hidden />
+          <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 top-3">
             <button
               aria-label="Scroll to top"
-              className="stream-page__scroll-button"
+              className="pointer-events-auto grid h-8 w-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
               type="button"
               onClick={() => {
                 virtualizer.scrollToOffset(0);
@@ -592,13 +592,13 @@ function EventRows({
       <section
         aria-label="Stream events"
         data-testid="stream-events"
-        className="stream-page__stream"
+        className="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-white pr-4 [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
         ref={parentRef}
       >
         {eventCount === 0 ? (
-          <div className="stream-page__stream-placeholder">
+          <div className="flex min-h-60 items-center justify-center gap-2.5 text-sm text-slate-500">
             {snapshot.connectionStatus === "subscribed" ? null : (
-              <div className="stream-page__spinner" aria-hidden="true" />
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
             )}
             <span>
               {eventTypeFilter !== ""
@@ -613,7 +613,7 @@ function EventRows({
         ) : (
           <>
             <div
-              className="stream-page__virtual-content"
+              className="relative w-full"
               style={{ height: virtualizer.getTotalSize() }}
             >
               <EventRowWindow
@@ -638,11 +638,11 @@ function EventRows({
             </div>
           </>
         )}
-        <div className="stream-page__feed-footer">
+        <div className="sticky bottom-0 z-[2] bg-white">
           {showScrollToBottom ? (
-            <div className="stream-page__feed-fade">
-              <div className="stream-page__feed-fade-mask" aria-hidden />
-              <div className="stream-page__scroll-affordance stream-page__scroll-affordance--in-fade">
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex min-h-[72px] -translate-y-full items-end justify-center pb-2.5">
+              <div className="absolute inset-0 bg-gradient-to-t from-white via-white/80 to-transparent" aria-hidden />
+              <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 bottom-4">
                 <button
                   aria-label={
                     newEventCount === 0
@@ -653,8 +653,8 @@ function EventRows({
                   }
                   className={
                     newEventCount === 0
-                      ? "stream-page__scroll-button"
-                      : "stream-page__scroll-button stream-page__scroll-button--with-count"
+                      ? "pointer-events-auto grid h-8 w-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
+                      : "pointer-events-auto inline-grid h-8 auto-cols-max grid-flow-col place-items-center gap-1.5 rounded-full border border-[#e8ebf0] bg-white px-2.5 text-[13px] text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
                   }
                   type="button"
                   onClick={() => {
@@ -662,9 +662,9 @@ function EventRows({
                     virtualizer.scrollToEnd();
                   }}
                 >
-                  <span className="stream-page__scroll-button-arrow">↓</span>
+                  <span className="text-base leading-none">↓</span>
                   {newEventCount === 0 ? null : (
-                    <span className="stream-page__scroll-button-count">{newEventCount}</span>
+                    <span className="font-mono text-xs leading-none">{newEventCount}</span>
                   )}
                 </button>
               </div>
@@ -698,12 +698,12 @@ function EventTypeFilterBar({
   }`;
 
   return (
-    <div className="stream-page__filter-bar">
-      <label className="stream-page__filter-field">
+    <div className="grid min-h-11 flex-none grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 border-b border-[#eef1f5] bg-white pr-4">
+      <label className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-xs font-semibold text-[#667085]">
         <span>Event type</span>
         <select
           aria-label="Event type filter"
-          className="stream-page__input stream-page__filter-select"
+          className="min-w-0 rounded-md border border-[#bac2cf] bg-white px-2 py-1.5 font-mono text-xs"
           value={eventTypeFilter}
           onChange={(event) => onEventTypeFilterChange(event.currentTarget.value)}
         >
@@ -715,7 +715,7 @@ function EventTypeFilterBar({
           ))}
         </select>
       </label>
-      <output className="stream-page__filter-count" data-testid="filter-count">
+      <output className="whitespace-nowrap font-mono text-xs text-[#667085]" data-testid="filter-count">
         {eventTypeFilter === "" ? totalLabel : `${filteredLabel} / ${totalLabel}`}
       </output>
     </div>
@@ -731,7 +731,7 @@ function StreamRuntimeNotice({
 }) {
   if (snapshot.connectionError !== undefined) {
     return (
-      <div className="stream-page__notice stream-page__notice--error" data-testid="stream-error" role="alert">
+      <div className="grid gap-[3px] border-b border-[#fecdca] bg-[#fff4f2] py-[9px] pr-4 text-xs text-[#912018]" data-testid="stream-error" role="alert">
         <strong>Stream error</strong>
         <span>{snapshot.connectionError}</span>
       </div>
@@ -744,7 +744,7 @@ function StreamRuntimeNotice({
     // SQLite mirror is empty. Surface it loudly instead of showing only a
     // spinner, because there may be no exception in this tab's console.
     return (
-      <div className="stream-page__notice stream-page__notice--warning" data-testid="stream-warning" role="status">
+      <div className="grid gap-[3px] border-b border-[#fedf89] bg-[#fff8e6] py-[9px] pr-4 text-xs text-[#7a4b00]" data-testid="stream-warning" role="status">
         <strong>Follower with empty SQLite mirror</strong>
         <span>
           This tab is waiting for the elected writer tab to mirror events into local SQLite.
@@ -839,27 +839,29 @@ function EventRowWindow({
       <div
         className={
           isLastEventRow
-            ? "stream-page__virtual-row stream-page__virtual-row--last"
-            : "stream-page__virtual-row"
+            ? "absolute left-0 top-0 w-full pb-2"
+            : "absolute left-0 top-0 w-full pb-2 after:absolute after:bottom-1 after:left-0 after:right-0 after:h-px after:bg-[#eef1f5]"
         }
         data-index={virtualItem.index}
+        data-testid="virtual-row"
         key={virtualItem.key}
         ref={event === undefined ? undefined : measureElement}
         style={{ transform: `translateY(${virtualItem.start}px)` }}
       >
         {event === undefined ? (
-          <article className="stream-page__event-row stream-page__event-row--pending" />
+          <article className="box-border h-[30px] rounded-md border border-[#e1e5eb]" data-testid="event-row-pending" />
         ) : (
           <article
+            data-testid="event-row"
             className={
               isExpanded
-                ? "stream-page__event-row stream-page__event-row--expanded"
-                : "stream-page__event-row stream-page__event-row--collapsed"
+                ? "min-w-0 overflow-hidden bg-white"
+                : "min-w-0 overflow-hidden bg-white"
             }
           >
             <button
               aria-expanded={isExpanded}
-              className="stream-page__event-meta"
+              className="grid w-full cursor-pointer grid-cols-[64px_minmax(0,1fr)_auto] items-center gap-3 border-0 bg-transparent px-2.5 py-2 text-left font-mono text-xs text-[#536073] hover:bg-[#f8fafc]"
               data-event-offset={event.offset}
               data-event-type={event.type}
               data-local-index={event.local_index}
@@ -872,7 +874,7 @@ function EventRowWindow({
               <time dateTime={event.created_at}>{event.created_at}</time>
             </button>
             {isExpanded ? (
-              <pre className="stream-page__event-json">{event.raw_json}</pre>
+              <pre className="m-0 overflow-auto whitespace-pre-wrap break-words p-2.5 font-mono text-[13px] leading-normal" data-testid="event-json">{event.raw_json}</pre>
             ) : null}
           </article>
         )}
@@ -923,7 +925,7 @@ function StreamSidebar({
 }) {
   return (
     <aside
-      className={className === undefined ? "stream-page__sidebar" : `stream-page__sidebar ${className}`}
+      className={className === undefined ? "w-[252px] flex-[0_0_252px] shrink-0 overflow-y-auto border-r border-[#e8ebf0] bg-white p-4 max-[760px]:order-first max-[760px]:max-h-[50dvh] max-[760px]:w-auto max-[760px]:flex-none max-[760px]:border-b max-[760px]:border-r-0" : `w-[252px] flex-[0_0_252px] shrink-0 overflow-y-auto border-r border-[#e8ebf0] bg-white p-4 max-[760px]:order-first max-[760px]:max-h-[50dvh] max-[760px]:w-auto max-[760px]:flex-none max-[760px]:border-b max-[760px]:border-r-0 ${className}`}
       id="stream-sidebar"
     >
       <StreamTopBar streamPath={streamPath} onSidebarOpenChange={onSidebarOpenChange} />
@@ -958,17 +960,17 @@ function SubscriptionTool({
   const serverActionBusy = actionFeedback === "killing" || actionFeedback === "resetting";
 
   return (
-    <section className="stream-page__tool">
-      <h2 className="stream-page__tool-title">Subscription</h2>
-      <dl className="stream-page__facts">
+    <section className="border-b border-slate-200 py-4 first:pt-0">
+      <h2 className="mb-3 text-sm font-semibold text-slate-900">Subscription</h2>
+      <dl className="grid gap-1 text-xs">
         <div title="Connection to the stream Durable Object over a capnweb WebSocket: connecting → connected → subscribing → subscribed (or reconnecting / error).">
           <dt>Status</dt>
           <dd>
             <output
               className={
                 snapshot.connectionStatus === "error"
-                  ? "stream-page__state stream-page__state--error"
-                  : "stream-page__state"
+                  ? "font-mono text-xs text-slate-500 text-red-700"
+                  : "font-mono text-xs text-slate-500"
               }
               data-testid="stream-status"
             >
@@ -979,14 +981,14 @@ function SubscriptionTool({
         <div title="This tab's role in the Web Locks election. leader = the single writer (it subscribes to the stream and writes events into the shared local DB); follower = a reader that mirrors the leader's writes from the same on-disk DB; electing/idle = before a role is assigned.">
           <dt>Subscription</dt>
           <dd>
-            <output className="stream-page__state" data-testid="subscription-status">{snapshot.subscriptionStatus}</output>
+            <output className="font-mono text-xs text-slate-500" data-testid="subscription-status">{snapshot.subscriptionStatus}</output>
           </dd>
         </div>
         {snapshot.connectionError === undefined ? null : (
           <div title="The most recent connection or subscription error, if any.">
             <dt>Error</dt>
             <dd>
-              <output className="stream-page__state stream-page__state--error stream-page__state--wrap">
+              <output className="font-mono text-xs text-slate-500 text-red-700 whitespace-normal break-words">
                 {snapshot.connectionError}
               </output>
             </dd>
@@ -995,13 +997,13 @@ function SubscriptionTool({
         <div title="Number of events stored in this tab's local SQLite mirror (one row per stream offset).">
           <dt>Events</dt>
           <dd>
-            <output className="stream-page__state" data-testid="event-count">{eventCount}</output>
+            <output className="font-mono text-xs text-slate-500" data-testid="event-count">{eventCount}</output>
           </dd>
         </div>
         <div title="Whether the page is crossOriginIsolated (the COOP+COEP / SharedArrayBuffer mode). Deliberately false: wa-sqlite's OPFSCoopSyncVFS needs no isolation, and enabling it would re-introduce the SharedArrayBuffer OPFS deadlock. Not a problem — it's expected.">
           <dt>Cross-origin isolated</dt>
           <dd>
-            <output className="stream-page__state">
+            <output className="font-mono text-xs text-slate-500">
               {String(snapshot.databaseInfo?.crossOriginIsolated ?? false)}
             </output>
           </dd>
@@ -1009,7 +1011,7 @@ function SubscriptionTool({
         <div title="Where the SQLite database lives. opfs = the browser's Origin Private File System — a real file on disk that survives reloads.">
           <dt>Storage</dt>
           <dd>
-            <output className="stream-page__state">
+            <output className="font-mono text-xs text-slate-500">
               {snapshot.databaseInfo?.storageType ?? "pending"}
             </output>
           </dd>
@@ -1017,7 +1019,7 @@ function SubscriptionTool({
         <div title="Whether the browser granted eviction-protected ('persistent') storage to this origin. false = best-effort: the data IS saved to disk, but the browser may evict it under storage pressure. Chrome only grants this to engaged/installed origins; there's no API to force it.">
           <dt>Persisted</dt>
           <dd>
-            <output className="stream-page__state">
+            <output className="font-mono text-xs text-slate-500">
               {String(snapshot.databaseInfo?.persisted ?? false)}
             </output>
           </dd>
@@ -1025,15 +1027,15 @@ function SubscriptionTool({
         <div title="On-disk size of this tab's local SQLite database file.">
           <dt>DB file size</dt>
           <dd>
-            <output className="stream-page__state">
+            <output className="font-mono text-xs text-slate-500">
               {formatByteSize(snapshot.databaseInfo?.databaseSizeBytes ?? 0)}
             </output>
           </dd>
         </div>
       </dl>
-      <div className="stream-page__action-grid">
+      <div className="flex flex-wrap gap-1.5">
         <button
-          className="stream-page__button"
+          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={actionFeedback === "downloading" || serverActionBusy}
           type="button"
           onClick={() => {
@@ -1047,7 +1049,7 @@ function SubscriptionTool({
           Download
         </button>
         <button
-          className="stream-page__button"
+          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={actionFeedback === "clearing" || serverActionBusy}
           type="button"
           onClick={() => {
@@ -1061,7 +1063,7 @@ function SubscriptionTool({
           Clear local
         </button>
         <button
-          className="stream-page__button"
+          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={serverActionBusy}
           title="Abort the stream DO; durable log is kept and a woken event is appended on restart."
           type="button"
@@ -1076,7 +1078,7 @@ function SubscriptionTool({
           Kill
         </button>
         <button
-          className="stream-page__button"
+          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={serverActionBusy}
           title="Wipe all stream DO storage, then abort — next connection starts a fresh stream."
           type="button"
@@ -1095,8 +1097,8 @@ function SubscriptionTool({
         <output
           className={
             actionFeedback === "error"
-              ? "stream-page__insert-state stream-page__insert-state--error"
-              : "stream-page__insert-state"
+              ? "min-h-5 text-xs text-slate-500 text-red-700"
+              : "min-h-5 text-xs text-slate-500"
           }
         >
           {actionFeedback}
@@ -1233,12 +1235,12 @@ function InsertEventsTool({
   }
 
   return (
-    <section className="stream-page__tool">
-      <h2 className="stream-page__tool-title">Insert events</h2>
-      <label className="stream-page__field">
+    <section className="border-b border-slate-200 py-4 first:pt-0">
+      <h2 className="mb-3 text-sm font-semibold text-slate-900">Insert events</h2>
+      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
         <span>Count</span>
         <input
-          className="stream-page__input"
+          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
           min="1"
           step="1"
           type="number"
@@ -1251,10 +1253,10 @@ function InsertEventsTool({
           }
         />
       </label>
-      <label className="stream-page__field">
+      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
         <span>Seconds</span>
         <input
-          className="stream-page__input"
+          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
           min="0"
           step="0.1"
           type="number"
@@ -1267,10 +1269,10 @@ function InsertEventsTool({
           }
         />
       </label>
-      <label className="stream-page__field">
+      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
         <span>Batch size</span>
         <input
-          className="stream-page__input"
+          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
           min="1"
           step="1"
           type="number"
@@ -1283,10 +1285,10 @@ function InsertEventsTool({
           }
         />
       </label>
-      <label className="stream-page__field">
+      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
         <span>appendBatch response</span>
         <select
-          className="stream-page__input"
+          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
           value={insertState.appendResponseMode}
           onChange={(event) =>
             dispatchInsertState({
@@ -1306,14 +1308,14 @@ function InsertEventsTool({
         </select>
       </label>
       <button
-        className="stream-page__button"
+        className="cursor-pointer whitespace-nowrap rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white no-underline disabled:cursor-not-allowed disabled:opacity-55"
         disabled={insertState.insertState === "inserting"}
         type="button"
         onClick={() => void insertRandomEvents()}
       >
         Stream random events
       </button>
-      <output className="stream-page__insert-state">{insertState.insertState}</output>
+      <output className="min-h-5 text-xs text-slate-500" data-testid="insert-state">{insertState.insertState}</output>
     </section>
   );
 }
@@ -1464,11 +1466,12 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
   }
 
   return (
-    <section className="stream-page__composer" aria-label="Append event">
-      <div className="stream-page__composer-input">
+    <section className="relative bg-white py-4" aria-label="Append event" data-testid="stream-composer">
+      <div className="relative">
         <textarea
           aria-label="Event JSON"
-          className="stream-page__textarea"
+          className="block min-h-[104px] w-full resize-y box-border rounded-md border border-[#bac2cf] px-2.5 pb-[38px] pt-2.5 font-mono text-[13px] leading-[1.5]"
+          data-testid="composer-textarea"
           ref={textareaRef}
           spellCheck={false}
           value={composerText}
@@ -1482,9 +1485,10 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
             aria-live="polite"
             className={
               appendState === "error"
-                ? "stream-page__composer-state stream-page__composer-state--error"
-                : "stream-page__composer-state"
+                ? "pointer-events-none absolute bottom-[13px] left-3 font-mono text-[11px] uppercase text-[#b42318]"
+                : "pointer-events-none absolute bottom-[13px] left-3 font-mono text-[11px] uppercase text-[#667085]"
             }
+            data-testid="composer-state"
           >
             {appendState === "appending" ? "appending" : appendState === "done" ? "appended" : "error"}
           </output>
@@ -1502,10 +1506,10 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
           }
           className={
             appendState === "error"
-              ? "stream-page__composer-submit stream-page__composer-submit--error"
+              ? "absolute bottom-1.5 right-1.5 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#b42318] hover:bg-[#f2f4f7] disabled:cursor-default disabled:opacity-60"
               : appendState === "done"
-                ? "stream-page__composer-submit stream-page__composer-submit--done"
-              : "stream-page__composer-submit"
+                ? "absolute bottom-1.5 right-1.5 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#067647] hover:bg-[#f2f4f7] disabled:cursor-default disabled:opacity-60"
+              : "absolute bottom-1.5 right-1.5 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#98a2b3] hover:bg-[#f2f4f7] hover:text-[#536073] disabled:cursor-default disabled:opacity-60"
           }
           disabled={appendState === "appending"}
           type="button"

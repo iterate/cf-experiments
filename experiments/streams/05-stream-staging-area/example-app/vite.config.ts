@@ -1,5 +1,6 @@
 import { cloudflare } from "@cloudflare/vite-plugin";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
+import tailwindcss from "@tailwindcss/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -14,6 +15,7 @@ export default defineConfig({
   // async-proxy "opfs" VFS and deadlock in production builds — see log.md.)
   optimizeDeps: { exclude: ["@journeyapps/wa-sqlite"] },
   plugins: [
+    tailwindcss(),
     cloudflare({ viteEnvironment: { name: "ssr" } }),
     tanstackStart(),
     viteReact(),

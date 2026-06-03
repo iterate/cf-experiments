@@ -3,37 +3,28 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build && tsc --noEmit",
-    "preview": "vite preview",
-    "deploy": "pnpm build && wrangler deploy",
+    "dev": "pnpm --dir example-app dev",
+    "build": "pnpm --dir example-app build",
+    "preview": "pnpm --dir example-app preview",
+    "deploy": "pnpm --dir example-app run deploy",
     "test": "vitest run",
-    "test:e2e": "playwright test",
+    "test:e2e": "pnpm --dir example-app test:e2e",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@cf-experiments/shared": "workspace:*",
-    "@cloudflare/vite-plugin": "^1.39.0",
     "@journeyapps/wa-sqlite": "^1.7.0",
-    "@tanstack/react-router": "^1.170.10",
-    "@tanstack/react-start": "^1.168.18",
-    "@tanstack/react-virtual": "^3.14.2",
     "capnweb": "^0.8.0",
     "react": "^19.2.6",
-    "react-dom": "^19.2.6",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260601.1",
-    "@playwright/test": "^1.60.0",
     "@types/node": "^24.12.4",
     "@types/react": "^19.2.15",
-    "@types/react-dom": "^19.2.3",
     "@types/ws": "^8.18.1",
-    "@vitejs/plugin-react": "^6.0.2",
     "vite": "^8.0.16",
     "vitest": "^4.1.7",
-    "wrangler": "^4.95.0",
     "ws": "^8.21.0"
   }
 }

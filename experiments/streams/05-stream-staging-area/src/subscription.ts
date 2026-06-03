@@ -1,22 +1,22 @@
-import { RpcTarget, type RpcStub } from "capnweb";
+import { RpcTarget } from "capnweb";
 import type { StreamEvent } from "@cf-experiments/shared/event";
-import type { StreamRpc, SubscriptionSink } from "../stream-types.js";
+import type { SubscriptionSink } from "./types.js";
 
-export async function withStreamSubscription(args: {
-  connection: { rpc: RpcStub<StreamRpc> };
+export type StreamSubscription = AsyncDisposable &
+  AsyncIterable<StreamEvent> & {
+    readonly subscriptionKey: string | undefined;
+    readonly streamMaxOffset: number | undefined;
+    readonly sink: SubscriptionSink;
+    waitForEvent<T extends StreamEvent>(args: {
+      predicate: (event: StreamEvent) => event is T;
+      timeoutMs?: number;
+    }): Promise<T>;
+  };
+
+export function createStreamSubscription(args: {
   subscriptionKey?: string;
-  afterOffset?: number;
-  processEventBatch?: (events: StreamEvent[]) => void;
-}): Promise<
-  AsyncDisposable &
-    AsyncIterable<StreamEvent> & {
-      subscriptionKey: string;
-      waitForEvent<T extends StreamEvent>(args: {
-        predicate: (event: StreamEvent) => event is T;
-        timeoutMs?: number;
-      }): Promise<T>;
-    }
-> {
+  onDispose?: () => void | Promise<void>;
+} = {}): StreamSubscription {
   const inbox = messageInbox<StreamEvent>();
   const waiters = new Set<{
     predicate(event: StreamEvent): boolean;
@@ -24,18 +24,12 @@ export async function withStreamSubscription(args: {
     reject(error: unknown): void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
-  let handle: { subscriptionKey: string; unsubscribe(): void } | undefined;
-  const sink = new ClientSubscriptionSink((events) => {
-    try {
-      args.processEventBatch?.(events);
-    } catch (error) {
-      inbox.error(error);
-      for (const waiter of waiters) waiter.reject(error);
-      handle?.unsubscribe();
-      return;
-    }
+  let streamMaxOffset: number | undefined;
+  let disposed = false;
+  const sink = new ClientSubscriptionSink((batch) => {
+    streamMaxOffset = batch.streamMaxOffset;
 
-    for (const event of events) {
+    for (const event of batch.events) {
       inbox.push(event);
       // Deleting the current element during Set iteration is safe in JS.
       for (const waiter of waiters) {
@@ -47,14 +41,16 @@ export async function withStreamSubscription(args: {
     }
   });
 
-  handle = await args.connection.rpc.subscribe({
-    subscriptionKey: args.subscriptionKey,
-    sink,
-    afterOffset: args.afterOffset,
-  });
-
   const subscription = {
-    subscriptionKey: handle.subscriptionKey,
+    get subscriptionKey() {
+      return args.subscriptionKey;
+    },
+    get streamMaxOffset() {
+      return streamMaxOffset;
+    },
+    get sink() {
+      return sink;
+    },
     waitForEvent<T extends StreamEvent>(waitArgs: {
       predicate: (event: StreamEvent) => event is T;
       timeoutMs?: number;
@@ -77,13 +73,15 @@ export async function withStreamSubscription(args: {
       return inbox;
     },
     async [Symbol.asyncDispose]() {
+      if (disposed) return;
+      disposed = true;
       for (const waiter of waiters) {
         clearTimeout(waiter.timeout);
         waiter.reject(new Error("Stream subscription disposed."));
       }
       waiters.clear();
       inbox.close();
-      handle?.unsubscribe();
+      await args.onDispose?.();
     },
   };
 
@@ -91,15 +89,15 @@ export async function withStreamSubscription(args: {
 }
 
 class ClientSubscriptionSink extends RpcTarget implements SubscriptionSink {
-  readonly #processEventBatch: (events: StreamEvent[]) => void;
+  readonly #processEventBatch: (args: { events: StreamEvent[]; streamMaxOffset: number }) => void;
 
-  constructor(processEventBatch: (events: StreamEvent[]) => void) {
+  constructor(processEventBatch: (args: { events: StreamEvent[]; streamMaxOffset: number }) => void) {
     super();
     this.#processEventBatch = processEventBatch;
   }
 
-  processEventBatch(args: { events: StreamEvent[] }): undefined {
-    this.#processEventBatch(args.events);
+  processEventBatch(args: { events: StreamEvent[]; streamMaxOffset: number }): undefined {
+    this.#processEventBatch(args);
   }
 }
 

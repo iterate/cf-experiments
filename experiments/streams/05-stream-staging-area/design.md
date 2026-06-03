@@ -218,10 +218,9 @@ TODO: Add webhooks only if we want non-capnweb delivery semantics.
     - the new event
     - previous state
     - new state (because reducer is run for us)
-    - an `append({event})` function that appends an event to the stream and returns a promise that resolves when the event is confirmed. 
+    - the exact stream RPC append API as `stream`
     - a `blockProcessorUntil` function that tells the processor runer to not process any more events until the promise returned from the callback completes
-    - a function that appends but DOESN'T stop consuming events - maybe called `appendAndWaitForConfirmation`
-    - a function `waitUntil` to say "i'm going to do some long running work - please wait for it" (this is mostly relevant in a durable object context)
+    - a `keepAlive` function to track detached work without blocking the processor checkpoint
     - 
 
 
@@ -311,7 +310,7 @@ The primary way to interact with the stream is via a capnweb API.
 The subscription handshake should be symmetrical:
 
 - For inbound subscriptions, the subscriber calls `subscribe()` on the stream and passes its
-  subscription sink plus optional `afterOffset`.
+  subscription sink plus optional `replayAfterOffset`.
 - For outbound subscriptions, the stream calls `requestSubscription()` on the subscriber and passes
   its stream RPC target, the `subscription-configured` event, and `runtimeState()`. The subscriber
   returns the same request shape used by inbound subscriptions, so the stream can call `subscribe()`
@@ -325,9 +324,9 @@ The subscription connection lifecycle is:
    subscribe directly.
 2. One side opens a capnweb session.
 3. The initiating side calls the appropriate request/subscribe method.
-4. The subscriber side provides a subscription sink and optional `afterOffset`.
+4. The subscriber side provides a subscription sink and optional `replayAfterOffset`.
 5. The stream stores a subscription connection in memory and starts replay/live delivery from
-   `afterOffset + 1`.
+   `replayAfterOffset + 1`.
 6. When the capnweb session breaks, the stream forgets the runtime connection. The durable
    subscription configuration remains in stream reduced state.
 
@@ -336,15 +335,15 @@ The subscription request shape is:
 ```ts
 {
   sink,
-  afterOffset?,
+  replayAfterOffset?,
 }
 ```
 
-`afterOffset` is owned by the subscriber and is optional. If omitted, the stream treats it as
+`replayAfterOffset` is owned by the subscriber and is optional. If omitted, the stream treats it as
 `"start"`, meaning "start before the first event". For inbound subscriptions, the subscriber sends it
 directly to `subscribe()`. For outbound subscriptions, the subscriber returns it from
 `requestSubscription()` after looking at `runtimeState()` and the `subscription-configured` event. The
-stream then starts replay/live delivery from `afterOffset + 1`.
+stream then starts replay/live delivery from `replayAfterOffset + 1`.
 
 Not every capnweb session is a subscription connection. Debug and control clients can open
 capnweb sessions and call RPC methods without providing a subscription sink. A capnweb session
@@ -434,10 +433,9 @@ Working reference implementation: `src/stream-processor.ts (+ stream-processor.t
 - **No `onStart`.** Setup is done in `build`, lazily on first use, or via a
   `processorStarted` *event* the processor consumes.
 - **`afterAppend` is per-event and synchronous** (a switch statement, returns void).
-  NOT batch-shaped. It receives `event`, `previousState`, `state`, and four
-  capabilities: `append` (fire-and-forget background; the runner keeps it alive via
-  `waitUntil`), `appendAndWait` (awaitable; use inside `blockProcessorUntil`/`waitUntil`),
-  `blockProcessorUntil(() => work)`, `waitUntil(promise)` (detached lifetime).
+  NOT batch-shaped. It receives `event`, `previousState`, `state`, `streamMaxOffset`,
+  the exact `stream` append API, `blockProcessorUntil(() => work)`, and
+  `keepAlive(promise)` for detached lifetime tracking.
 - **Two usage patterns, and "when do we persist the processed offset?" is the axis:**
   - *Default (high-volume / fire-and-forget):* effects fire in the background; the runner
     advances and persists the offset **optimistically, coalesced once per delivered
@@ -460,26 +458,25 @@ Working reference implementation: `src/stream-processor.ts (+ stream-processor.t
   get contextual param typing — so the contract+implementation split is functional, not
   a base class.
 - **Exactly one runner and one transport.** Processors connect to a stream only via a
-  capnweb subscription: the stream calls `processEventBatch({ events })` on a sink the
+  capnweb subscription: the stream calls `processEventBatch({ events, streamMaxOffset })` on a sink the
   processor supplied. Identical for inbound (browser/node call `subscribe()`) and
   outbound (stream dials the runner DO) connections.
-- **The runner IS the sink.** No `catchUp()` / `readHistory` / catch-up-vs-live split:
+- **The runner consumes a subscription.** No `catchUp()` / `readHistory` / catch-up-vs-live split:
   the stream replays history through the *same* `processEventBatch` channel, so the
-  runner only ever "processes a batch." Runner responsibilities: dedup by
-  `event.offset <= snapshot.offset`, serialize batches in offset order, persist the
-  `{ state, offset }` snapshot via a storage port, append side effects via the stream
-  stub, and expose `afterOffset() = snapshot.offset` to hand to `subscribe()`.
-- **Runtimes differ only in two ports** (`storage`, `stream` stub) + `waitUntil`. DO:
-  KV storage, `ctx.waitUntil`. Node/vitest + browser: in-memory storage, no-op
-  `waitUntil`. Proven for the browser: `withStreamProcessor` builds the runner, wraps
-  `runner.processEventBatch` in a capnweb `SubscriptionSink`, calls `subscribe()` with
-  `runner.afterOffset()`. Same runner code as the DO; only the two ports differ.
+  runner processes one event at a time through `processorRunner.run({ subscription })`.
+  Runner responsibilities: dedup by `event.offset <= snapshot.offset`, serialize events,
+  persist the `{ state, offset }` snapshot via a storage port, and append side effects
+  through the exact stream API.
+- **Runtimes differ only in connection setup and storage.** Browser and Node call
+  `stream.subscribe({ sink: subscription.sink, replayAfterOffset })`; the outbound
+  StreamProcessorRunner DO returns `{ sink: subscription.sink, replayAfterOffset }` to
+  the Stream DO. After that, all three call `processorRunner.run({ subscription })`.
 - **The browser SQLite projector** is `consumes: ["*"]`, no `reduce`, and an `afterAppend`
   that does a fire-and-forget `db.write(event)` (the db coalesces into batched
   transactions). Its resume cursor is the side-effect target itself —
-  `afterOffset = SELECT MAX(offset) FROM events` — so no separate snapshot is needed and a
+  `replayAfterOffset = SELECT MAX(offset) FROM events` — so no separate snapshot is needed and a
   lost write is just re-delivered and re-written via `INSERT OR IGNORE`. Proven through
-  the same `createProcessorRunner` + `withStreamProcessor` as node/DO.
+  the same `createProcessorRunner` + `processorRunner.run({ subscription })` as node/DO.
 - **Builtin (inline) processors have a `beforeAppend` gate; subscription processors do
   not.** Three hook tiers:
   - Contract (pure, portable): `reduce` only.
@@ -509,14 +506,10 @@ Working reference implementation: `src/stream-processor.ts (+ stream-processor.t
   `exampleCircuitBreaker()` => trips after the burst budget, later appends rejected. The
   trial now runs under `tsx`, not just typecheck.
 
-- **`afterAppend` gets the stream's high-water-mark as `head: { offset, createdAt }` —
-  raw facts only, no derived fields.** The stream piggybacks it on each delivery:
-  `processEventBatch({ events, headOffset, headCreatedAt })` (no extra round-trip; the core
-  already tracks `maxOffset`). The processor deduces what it wants from `head` + `event`:
-  offset lag = `head.offset - event.offset`, time lag =
-  `Date.parse(head.createdAt) - Date.parse(event.createdAt)`, caught-up =
-  `event.offset >= head.offset`. Works through replay (a backfill batch carries the real
-  head) and subsumes first-attach suppression (`if (event.offset < head.offset) return;`).
+- **`afterAppend` gets `streamMaxOffset`, a raw fact with no derived fields.** The stream
+  piggybacks it on each delivery via `processEventBatch({ events, streamMaxOffset })`
+  (no extra round-trip; the core already tracks `maxOffset`). The processor deduces
+  offset lag as `streamMaxOffset - event.offset`.
 
 - **Append→delivery round-trip latency is measured on the RECEIVE side, never by
   awaiting `append()`.** When instrumented, the runner stamps a wall-clock send time into
@@ -538,7 +531,7 @@ Working reference implementation: `src/stream-processor.ts (+ stream-processor.t
 ## Deferred (explicitly not now)
 
 - First-attach side-effect suppression as a runner *policy*: no longer needed as a
-  framework feature — a processor self-services it with `if (event.offset < head.offset) return;`.
+  framework feature — a processor self-services it with `if (event.offset < streamMaxOffset) return;`.
 - Gap repair / out-of-order live delivery (the old `consumeLiveProcessorEvent`).
 
 # Future work
@@ -588,7 +581,7 @@ await using connection = await connectStream({
   fetch, // optional; useful in Cloudflare Workers and tests
 });
 
-const appended = await connection.rpc.append({
+const appended = await connection.stream.append({
   event: {
     type: "events.example.com/widget-created",
     payload: { widgetId },
@@ -626,9 +619,9 @@ Disposal should be async: dispose the capnweb session, then close the underlying
 
 ### Level 2: subscriptions
 
-`withStreamSubscription()` should wrap the caller's callback/iterator as a subscription sink
+`createStreamSubscription()` should wrap the caller's callback/iterator as a subscription sink
 with `processEventBatch({ events })`, then call `subscribe()` on the stream RPC target. The Durable
-Object stores that runtime target and starts delivering replay/live batches from `afterOffset + 1`.
+Object stores that runtime target and starts delivering replay/live batches from `replayAfterOffset + 1`.
 
 The subscription API should use portable JavaScript primitives:
 
@@ -647,21 +640,21 @@ subscribe(args: {
   sink: {
     processEventBatch(args: { events: StreamEvent[] }): unknown;
   };
-  afterOffset?: number | "start";
+  replayAfterOffset?: number | "start";
 }): Promise<{
   unsubscribe(): Promise<void>;
 }>;
 ```
 
-`afterOffset` is exclusive. If omitted, it defaults to `"start"`, meaning replay from the first
+`replayAfterOffset` is exclusive. If omitted, it defaults to `"start"`, meaning replay from the first
 available event and then continue live.
 
 The user-facing helper can still provide event-shaped conveniences:
 
 ```ts
-await using subscription = await withStreamSubscription({
+await using subscription = await createStreamSubscription({
   connection,
-  afterOffset: appended.offset - 1,
+  replayAfterOffset: appended.offset - 1,
 });
 
 for await (const event of subscription) {
@@ -717,9 +710,9 @@ That means the client library should not have a whole-stream `stream.withContrac
 as the primary design. Instead, the subscription helper can optionally accept a processor contract:
 
 ```ts
-await using subscription = await withStreamSubscription({
+await using subscription = await createStreamSubscription({
   connection,
-  afterOffset: "start",
+  replayAfterOffset: "start",
   contract: widgetProcessorContract,
 });
 
@@ -737,16 +730,16 @@ unconsumed event types should not be silently treated as typed processor events.
 The same contract-aware narrowing path should be used by the inbound processor runner:
 
 ```ts
-await using runner = await withStreamProcessor({
+await using runner = await processorRunner.run({ subscription })({
   connection,
   processor: widgetProcessor,
-  afterOffset,
+  replayAfterOffset,
 });
 ```
 
 Append typing is useful, but it is a separate concern from subscription narrowing. Processor-facing
 stream APIs and e2e helpers can expose `append({ event: EmittedInput<Contract> })` when they are
-already bound to a processor contract. The low-level `connection.rpc.append()` should keep accepting
+already bound to a processor contract. The low-level `connection.stream.append()` should keep accepting
 raw `StreamEventInput`.
 
 ### Level 3: inbound stream processor runner
@@ -763,18 +756,18 @@ What the caller has:
 
 What the caller wants:
 
-- catch up from `afterOffset`
+- catch up from `replayAfterOffset`
 - reduce matching events into state
 - run `afterAppend` for live/relevant events
 - inspect the current processor snapshot
 - stop the runner with async disposal
 
 ```ts
-await using runner = await withStreamProcessor({
+await using runner = await processorRunner.run({ subscription })({
   connection,
   processor: widgetProcessor,
   initialState,
-  afterOffset,
+  replayAfterOffset,
 });
 
 await runner.waitForSnapshot((snapshot) => snapshot.state.completed > 0);

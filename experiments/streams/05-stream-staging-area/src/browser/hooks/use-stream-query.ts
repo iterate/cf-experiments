@@ -3,7 +3,7 @@ import type {
   SqliteQuerySnapshot,
   SqlValue,
   StreamBrowserDatabase,
-} from "./stream-browser-db.js";
+} from "../stream-browser-db.js";
 
 export function useStreamQuery(
   db: StreamBrowserDatabase,

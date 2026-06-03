@@ -1,8 +1,8 @@
 import handler, { createServerEntry } from "@tanstack/react-start/server-entry";
 import { env } from "cloudflare:workers";
 
-export { Stream } from "./stream.js";
-export { StreamProcessorRunner } from "./stream-processor-runner.js";
+export { Stream } from "../../src/workers/durable-objects/stream.js";
+export { StreamProcessorRunner } from "../../src/workers/durable-objects/stream-processor-runner.js";
 
 export default createServerEntry({
   async fetch(request) {

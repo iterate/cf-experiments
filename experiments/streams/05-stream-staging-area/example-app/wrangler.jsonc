@@ -1,5 +1,5 @@
 {
-  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
   "account_id": "376ef7ed81b0573f93524de763666c15",
   "name": "stream-staging-area",
   "main": "src/worker.ts",

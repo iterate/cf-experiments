@@ -10,12 +10,17 @@ import type {
   StreamProcessorRunnerRpc,
   StreamRpc,
   SubscriptionSink,
-} from "./stream-types.js";
-import { connectStreamProcessorRunnerFromNode } from "./client-libraries/stream-node-worker.js";
-import { withStream } from "./client-libraries/stream-browser.js";
+} from "./types.js";
+import { connectStreamProcessorRunner } from "./node/connect-processor-runner.js";
+import { connectStream as connectBrowserStream } from "./browser/connect.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
+const localWorkerE2eIt =
+  process.env.STREAM_STAGING_E2E === "true" &&
+  ["localhost", "127.0.0.1"].includes(new URL(workerUrl).hostname)
+    ? it
+    : it.skip;
 const cloudflaredE2eIt =
   process.env.STREAM_STAGING_E2E === "true" &&
   process.env.STREAM_STAGING_CLOUDFLARED_E2E === "true"
@@ -31,7 +36,7 @@ type WsMessage = {
 class TestSubscriptionSink extends RpcTarget implements SubscriptionSink {
   readonly batches: StreamEvent[][] = [];
 
-  processEventBatch(args: { events: StreamEvent[] }): undefined {
+  processEventBatch(args: { events: StreamEvent[]; streamMaxOffset: number }): undefined {
     this.batches.push(args.events);
   }
 }
@@ -44,15 +49,17 @@ class NodeStreamProcessorRunner extends RpcTarget implements StreamProcessorRunn
 
   requestSubscription(args: {
     stream: RpcStub<StreamRpc>;
+    subscriptionKey: string;
+    streamMaxOffset: number;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
     streamRuntimeState: { state: CoreStreamState };
-  }): { sink: SubscriptionSink; afterOffset?: number } {
+  }): { sink: SubscriptionSink; replayAfterOffset?: number } {
     this.subscriptionConfiguredEvent = args.subscriptionConfiguredEvent;
     this.streamRuntimeState = args.streamRuntimeState;
     return { sink: this };
   }
 
-  processEventBatch(args: { events: StreamEvent[] }): undefined {
+  processEventBatch(args: { events: StreamEvent[]; streamMaxOffset: number }): undefined {
     this.batches.push(args.events);
   }
 
@@ -67,9 +74,9 @@ class NodeStreamProcessorRunner extends RpcTarget implements StreamProcessorRunn
 describe("stream capnweb protocol", () => {
   e2eIt("browser client appends events by stream URL", async () => {
     const path = `stream-browser-client-${crypto.randomUUID()}`;
-    await using stream = await withStream({ url: toStreamWebSocketUrl(path) });
+    await using stream = await connectBrowserStream({ url: toStreamWebSocketUrl(path) });
 
-    const appended = await stream.rpc.append({
+    const appended = await stream.stream.append({
       event: {
         type: "test.stream.browser-client",
         payload: { path },
@@ -88,7 +95,7 @@ describe("stream capnweb protocol", () => {
     const path = `stream-capnweb-append-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
-    const appended = await stream.rpc.append({
+    const appended = await stream.stream.append({
       event: {
         type: "test.stream.capnweb-append",
         payload: { path },
@@ -107,17 +114,17 @@ describe("stream capnweb protocol", () => {
     const path = `stream-capnweb-batch-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
-    const existing = await stream.rpc.append({
+    const existing = await stream.stream.append({
       event: {
         type: "test.stream.capnweb-batch-existing",
         idempotencyKey: "batch-existing",
         payload: { path },
       },
     });
-    await expect(stream.rpc.getEvent({ idempotencyKey: "batch-existing" })).resolves.toEqual(
+    await expect(stream.stream.getEvent({ idempotencyKey: "batch-existing" })).resolves.toEqual(
       existing,
     );
-    const batch = await stream.rpc.appendBatch({
+    const batch = await stream.stream.appendBatch({
       events: [
         {
           type: "test.stream.capnweb-batch-new",
@@ -154,7 +161,7 @@ describe("stream capnweb protocol", () => {
     const path = `stream-capnweb-same-batch-idempotency-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
-    const batch = await stream.rpc.appendBatch({
+    const batch = await stream.stream.appendBatch({
       events: [
         {
           type: "test.stream.capnweb-same-batch-idempotency",
@@ -171,7 +178,7 @@ describe("stream capnweb protocol", () => {
 
     expect(batch[1]).toEqual(batch[0]);
     await expect(
-      stream.rpc.getEvents({ afterOffset: 0 }).then((events) => events.map((event) => event.type)),
+      stream.stream.getEvents({ afterOffset: 0 }).then((events) => events.map((event) => event.type)),
     ).resolves.toEqual([
       "events.iterate.com/stream/created",
       "events.iterate.com/stream/woken",
@@ -183,7 +190,7 @@ describe("stream capnweb protocol", () => {
     const path = `stream-capnweb-cursors-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
-    await stream.rpc.appendBatch({
+    await stream.stream.appendBatch({
       events: [
         {
           type: "test.stream.capnweb-cursor",
@@ -196,17 +203,17 @@ describe("stream capnweb protocol", () => {
       ],
     });
 
-    await expect(stream.rpc.getEvents({ afterOffset: 0 })).resolves.toMatchObject([
+    await expect(stream.stream.getEvents({ afterOffset: 0 })).resolves.toMatchObject([
       { offset: 1 },
       { offset: 2 },
       { offset: 3 },
       { offset: 4 },
     ]);
-    await expect(stream.rpc.getEvents({ afterOffset: 1, beforeOffset: 4 })).resolves.toMatchObject([
+    await expect(stream.stream.getEvents({ afterOffset: 1, beforeOffset: 4 })).resolves.toMatchObject([
       { offset: 2 },
       { offset: 3 },
     ]);
-    await expect(stream.rpc.getEvents({ afterOffset: 2 })).resolves.toMatchObject([
+    await expect(stream.stream.getEvents({ afterOffset: 2 })).resolves.toMatchObject([
       { offset: 3 },
       { offset: 4 },
     ]);
@@ -216,7 +223,7 @@ describe("stream capnweb protocol", () => {
     const path = `stream-capnweb-reduce-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
-    const state = await stream.rpc.reduce({
+    const state = await stream.stream.reduce({
       event: {
         type: "events.iterate.com/stream/configured",
         offset: 3,
@@ -236,7 +243,7 @@ describe("stream capnweb protocol", () => {
     const path = `stream-capnweb-replay-${crypto.randomUUID()}`;
     await using stream = await connectStream(path);
 
-    const first = await stream.rpc.append({
+    const first = await stream.stream.append({
       event: {
         type: "test.stream.capnweb-replay",
         payload: { n: 1 },
@@ -244,10 +251,10 @@ describe("stream capnweb protocol", () => {
     });
 
     const sink = new TestSubscriptionSink();
-    await stream.rpc.subscribe({ subscriptionKey: "replay", sink });
+    await stream.stream.subscribe({ subscriptionKey: "replay", sink, replayAfterOffset: 0 });
     await waitFor(() => sink.batches.length === 1, 1_000);
 
-    const second = await stream.rpc.append({
+    const second = await stream.stream.append({
       event: {
         type: "test.stream.capnweb-replay",
         payload: { n: 2 },
@@ -284,8 +291,8 @@ describe("stream capnweb protocol", () => {
 
     const sinkA = new TestSubscriptionSink();
     const sinkB = new TestSubscriptionSink();
-    const first = await stream.rpc.subscribe({ sink: sinkA });
-    const second = await stream.rpc.subscribe({ sink: sinkB });
+    const first = await stream.stream.subscribe({ sink: sinkA });
+    const second = await stream.stream.subscribe({ sink: sinkB });
 
     expect(first.subscriptionKey).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
@@ -295,7 +302,7 @@ describe("stream capnweb protocol", () => {
     );
     expect(first.subscriptionKey).not.toBe(second.subscriptionKey);
 
-    const runtime = await stream.rpc.runtimeState();
+    const runtime = await stream.stream.runtimeState();
     expect(runtime.runtime.connections[first.subscriptionKey]).toMatchObject({
       direction: "inbound",
     });
@@ -303,7 +310,7 @@ describe("stream capnweb protocol", () => {
       direction: "inbound",
     });
 
-    const appended = await stream.rpc.append({
+    const appended = await stream.stream.append({
       event: {
         type: "test.stream.capnweb-anon-sub",
         payload: { path },
@@ -314,7 +321,7 @@ describe("stream capnweb protocol", () => {
     expect(sinkB.batches.at(-1)).toEqual([appended]);
 
     first.unsubscribe();
-    await stream.rpc.append({
+    await stream.stream.append({
       event: {
         type: "test.stream.capnweb-anon-sub-after-unsub",
         payload: { path },
@@ -326,14 +333,13 @@ describe("stream capnweb protocol", () => {
 
   e2eIt("runs a built-in outbound processor from subscription-configured", async () => {
     const path = `stream-capnweb-processor-${crypto.randomUUID()}`;
-    const subscriptionKey = "echo";
+    const subscriptionKey = "echo-test";
     await using stream = await connectStream(path);
-    await using processor = await connectStreamProcessorRunnerFromNode({
-      path: `stream:${path}:${subscriptionKey}`,
-      workerUrl,
+    await using processor = await connectStreamProcessorRunner({
+      url: toStreamProcessorRunnerWebSocketUrl(`stream:${path}:${subscriptionKey}`),
     });
 
-    const configured = await stream.rpc.append({
+    const configured = await stream.stream.append({
       event: {
         type: "events.iterate.com/stream/subscription-configured",
         idempotencyKey: `subscription:${subscriptionKey}`,
@@ -342,7 +348,7 @@ describe("stream capnweb protocol", () => {
           subscriber: {
             type: "built-in",
             transport: "capnweb-websocket",
-            processorSlug: "echo",
+            processorSlug: "echo-test",
           },
         },
       },
@@ -351,13 +357,13 @@ describe("stream capnweb protocol", () => {
     await waitFor(async () => {
       const status = await processor.rpc.runtimeState();
       return (
-        status.processorSlug === "echo" &&
+        status.processorSlug === "echo-test" &&
         status.snapshot?.offset === configured.offset &&
         status.snapshot?.state.seen === 0
       );
     }, 1_000);
 
-    await stream.rpc.append({
+    await stream.stream.append({
       event: {
         type: "test.processor.input",
         payload: { path },
@@ -370,7 +376,7 @@ describe("stream capnweb protocol", () => {
     }, 1_000);
   });
 
-  e2eIt("runs an external-url capnweb websocket processor from a node server", async () => {
+  localWorkerE2eIt("runs an external-url capnweb websocket processor from a node server", async () => {
     const path = `stream-capnweb-node-runner-${crypto.randomUUID()}`;
     const subscriptionKey = "node-runner";
     const headerValue = crypto.randomUUID();
@@ -381,7 +387,7 @@ describe("stream capnweb protocol", () => {
     });
     await using stream = await connectStream(path);
 
-    const configured = await stream.rpc.append({
+    const configured = await stream.stream.append({
       event: {
         type: "events.iterate.com/stream/subscription-configured",
         idempotencyKey: `subscription:${subscriptionKey}`,
@@ -407,7 +413,7 @@ describe("stream capnweb protocol", () => {
       10_000,
     );
 
-    const appended = await stream.rpc.append({
+    const appended = await stream.stream.append({
       event: {
         type: "test.processor.node-runner-input",
         payload: { path },
@@ -435,7 +441,7 @@ describe("stream capnweb protocol", () => {
       await using tunnel = await startCloudflaredTunnel(runnerServer.url);
       await using stream = await connectStream(path);
 
-      const configured = await stream.rpc.append({
+      const configured = await stream.stream.append({
         event: {
           type: "events.iterate.com/stream/subscription-configured",
           idempotencyKey: `subscription:${subscriptionKey}`,
@@ -461,7 +467,7 @@ describe("stream capnweb protocol", () => {
         20_000,
       );
 
-      const appended = await stream.rpc.append({
+      const appended = await stream.stream.append({
         event: {
           type: "test.processor.cloudflared-input",
           payload: { path },
@@ -482,10 +488,10 @@ describe("stream capnweb protocol", () => {
     const sink = new TestSubscriptionSink();
 
     await using subscriber = await connectStream(path);
-    await subscriber.rpc.subscribe({
+    await subscriber.stream.subscribe({
       subscriptionKey: "wire",
       sink,
-      afterOffset: 2,
+      replayAfterOffset: 2,
     });
     const afterSubscribe = subscriber.wsMessages.length;
 
@@ -494,7 +500,7 @@ describe("stream capnweb protocol", () => {
       type: "test.stream.capnweb-wire",
       payload: { path },
     };
-    const appended = await publisher.rpc.append({ event: input });
+    const appended = await publisher.stream.append({ event: input });
     await waitFor(() => sink.batches.length === 1, 1_000);
 
     expect(appended).toMatchObject({
@@ -660,20 +666,20 @@ async function waitForCloudflaredUrl(
 
 async function connectStream(path: string): Promise<
   AsyncDisposable & {
-    rpc: RpcStub<StreamRpc>;
+    stream: RpcStub<StreamRpc>;
     wsMessages: WsMessage[];
   }
 > {
   const wsMessages: WsMessage[] = [];
   const webSocket = newRecordingWebSocket(toStreamWebSocketUrl(path), wsMessages);
   await waitForWebSocketOpen(webSocket);
-  const rpc = newWebSocketRpcSession<StreamRpc>(webSocket as unknown as globalThis.WebSocket);
+  const stream = newWebSocketRpcSession<StreamRpc>(webSocket as unknown as globalThis.WebSocket);
 
   return {
-    rpc,
+    stream,
     wsMessages,
     async [Symbol.asyncDispose]() {
-      rpc[Symbol.dispose]();
+      stream[Symbol.dispose]();
       await closeWebSocket(webSocket);
     },
   };
@@ -698,6 +704,14 @@ function newRecordingWebSocket(url: string, wsMessages: WsMessage[]) {
 function toStreamWebSocketUrl(path: string) {
   const url = new URL(workerUrl);
   url.pathname = `/stream/${path}`;
+  if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol === "https:") url.protocol = "wss:";
+  return url.toString();
+}
+
+function toStreamProcessorRunnerWebSocketUrl(path: string) {
+  const url = new URL(workerUrl);
+  url.pathname = `/stream-processor-runner/${path}`;
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   return url.toString();

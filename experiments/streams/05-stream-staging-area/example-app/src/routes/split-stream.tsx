@@ -32,35 +32,35 @@ function SplitStreamRoute() {
   }
 
   return (
-    <main className="stream-page stream-page--split">
+    <main className="block h-dvh overflow-hidden bg-white font-sans text-slate-950 flex flex-col">
       <form
-        className="stream-page__split-controls"
+        className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-end gap-2.5 border-b border-slate-200 p-3"
         onSubmit={(event) => {
           event.preventDefault();
           goToDrafts();
         }}
       >
-        <label className="stream-page__field">
+        <label className="grid gap-1.5 text-xs font-medium text-slate-600">
           <span>Left stream</span>
           <input
-            className="stream-page__input"
+            className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
             value={leftDraft}
             onChange={(event) => setLeftDraft(event.currentTarget.value)}
           />
         </label>
-        <label className="stream-page__field">
+        <label className="grid gap-1.5 text-xs font-medium text-slate-600">
           <span>Right stream</span>
           <input
-            className="stream-page__input"
+            className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
             value={rightDraft}
             onChange={(event) => setRightDraft(event.currentTarget.value)}
           />
         </label>
-        <button className="stream-page__button" type="submit">
+        <button className="cursor-pointer whitespace-nowrap rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white no-underline disabled:cursor-not-allowed disabled:opacity-55" type="submit">
           Go to streams
         </button>
       </form>
-      <div className="stream-page__split-grid">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-px">
         <StreamCompactView streamPath={search.left} />
         <StreamCompactView streamPath={search.right} />
       </div>

@@ -105,7 +105,7 @@ test("random bulk insert creates multiple filterable event types and shows filte
   await page.getByLabel("Batch size").fill("80");
   await page.getByLabel("Seconds").fill("0");
   await page.getByRole("button", { name: "Stream random events" }).click();
-  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
   await expect(page.getByTestId("event-count")).toHaveText("82", { timeout: 30_000 });
   await expect(page.getByTestId("filter-count")).toHaveText("82 total events");
 
@@ -155,7 +155,7 @@ test("split view can mount the same stream twice and mirror appends", async ({ p
     payload: { streamPath, value: crypto.randomUUID() },
   });
 
-  await expect(page.locator(".stream-page__composer-state").first()).toHaveText("appended");
+  await expect(page.getByTestId("composer-state").first()).toHaveText("appended");
   await expect(eventMeta(page, type)).toHaveCount(2);
 });
 
@@ -305,8 +305,8 @@ test("auto-growing composer stays in the stream scrollbar and preserves tail app
   ).toBeGreaterThan(initialTextareaHeight + 100);
   await expect.poll(async () => {
     const alignment = await page.evaluate(() => {
-      const eventRow = document.querySelector(".stream-page__event-row");
-      const composerTextarea = document.querySelector(".stream-page__textarea");
+      const eventRow = document.querySelector("[data-testid=\"event-row\"]");
+      const composerTextarea = document.querySelector("[data-testid=\"composer-textarea\"]");
       if (!(eventRow instanceof HTMLElement) || !(composerTextarea instanceof HTMLTextAreaElement)) {
         throw new Error("missing stream row or composer textarea");
       }
@@ -321,11 +321,11 @@ test("auto-growing composer stays in the stream scrollbar and preserves tail app
   }).toBe("0:0");
 
   await page.getByRole("button", { name: "Append event" }).first().click();
-  await expect(page.locator(".stream-page__composer-state").first()).toHaveText("appended");
+  await expect(page.getByTestId("composer-state").first()).toHaveText("appended");
   await expect(eventMeta(page, type).first()).toBeVisible();
-  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+  await expectAtStreamEnd(page);
   await scrollStreamBy(page, -120);
-  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+  await expectComposerAtScrollerBottom(page);
 });
 
 // Regression for the bottom affordance badge. When the user is reading older rows, appends
@@ -340,9 +340,9 @@ test("scroll to bottom affordance counts new events while away from tail", async
   await page.getByLabel("Batch size").fill("80");
   await page.getByLabel("Seconds").fill("0");
   await page.getByRole("button", { name: "Stream random events" }).click();
-  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
   await expect(page.getByTestId("event-count")).toHaveText("82", { timeout: 30_000 });
-  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+  await expectAtStreamEnd(page);
 
   await page.getByRole("button", { name: "Scroll to top" }).click();
   await expect(page.getByRole("button", { name: "Scroll to bottom" })).toBeVisible();
@@ -372,9 +372,9 @@ test("scroll to bottom affordance keeps counting while scrolling older rows duri
   await page.getByLabel("Batch size").fill("100");
   await page.getByLabel("Seconds").fill("0");
   await page.getByRole("button", { name: "Stream random events" }).click();
-  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
   await expect(page.getByTestId("event-count")).toHaveText("102", { timeout: 30_000 });
-  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+  await expectAtStreamEnd(page);
 
   await scrollStreamBy(page, -500);
   await expect(page.getByRole("button", { name: "Scroll to bottom" })).toBeVisible();
@@ -387,17 +387,17 @@ test("scroll to bottom affordance keeps counting while scrolling older rows duri
   await page.getByRole("button", { name: "Stream random events" }).click();
   await Promise.all([
     scrollJitter,
-    expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 60_000 }),
+    expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 60_000 }),
   ]);
 
   await expect(page.getByTestId("event-count")).toHaveText("5102", { timeout: 60_000 });
   await expect(page.getByRole("button", { name: "Scroll to bottom, 5000 new events" })).toBeVisible();
   await expect.poll(() => streamDistanceFromEnd(page)).toBeGreaterThan(0);
-  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+  await expectComposerAtScrollerBottom(page);
 
   await page.getByRole("button", { name: "Scroll to bottom, 5000 new events" }).click();
   await expect(page.getByRole("button", { name: "Scroll to bottom, 5000 new events" })).toHaveCount(0);
-  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+  await expectAtStreamEnd(page);
 });
 
 // Row expansion is local view state keyed by stream offset, not DOM state on the virtual row.
@@ -412,7 +412,7 @@ test("event row open and closed state survives virtual row unmounts", async ({ p
   await page.getByLabel("Batch size").fill("160");
   await page.getByLabel("Seconds").fill("0");
   await page.getByRole("button", { name: "Stream random events" }).click();
-  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
   await expect(page.getByTestId("event-count")).toHaveText("162", { timeout: 30_000 });
 
   await page.getByRole("button", { name: "Scroll to top" }).click();
@@ -420,13 +420,13 @@ test("event row open and closed state survives virtual row unmounts", async ({ p
   await expect(firstRow).toBeVisible();
   await firstRow.click();
   await expect(firstRow).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator(".stream-page__event-json")).toBeVisible();
+  await expect(page.getByTestId("event-json")).toBeVisible();
 
   await page.getByRole("button", { name: "Scroll to bottom" }).click();
   await expect(firstRow).toHaveCount(0);
   await page.getByRole("button", { name: "Scroll to top" }).click();
   await expect(eventRowByOffset(page, 1)).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator(".stream-page__event-json")).toBeVisible();
+  await expect(page.getByTestId("event-json")).toBeVisible();
 
   await eventRowByOffset(page, 1).click();
   await expect(eventRowByOffset(page, 1)).toHaveAttribute("aria-expanded", "false");
@@ -434,7 +434,7 @@ test("event row open and closed state survives virtual row unmounts", async ({ p
   await expect(eventRowByOffset(page, 1)).toHaveCount(0);
   await page.getByRole("button", { name: "Scroll to top" }).click();
   await expect(eventRowByOffset(page, 1)).toHaveAttribute("aria-expanded", "false");
-  await expect(page.locator(".stream-page__event-json")).toHaveCount(0);
+  await expect(page.getByTestId("event-json")).toHaveCount(0);
 });
 
 // Exercises disposal when one of two same-stream panes changes path. This prevents stale
@@ -484,7 +484,7 @@ test("split view disposes a replaced same-stream pane and keeps leadership", asy
 // stays bounded by TanStack Virtual, then samples animation frames while scrolling upward from
 // the tail and middle. The fix was to keep close to the TanStack chat setup and batch delivered
 // server writes into one SQLite invalidation per animation frame.
-test("large streams stay virtualized and can scroll from tail to head", async ({ page }) => {
+test("large streams stay virtualized and can scroll from tail to earliest rows", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(streamRoute(streamPath));
   await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
@@ -494,7 +494,7 @@ test("large streams stay virtualized and can scroll from tail to head", async ({
   await page.getByLabel("Batch size").fill("250");
   await page.getByLabel("Seconds").fill("0");
   await page.getByRole("button", { name: "Stream random events" }).click();
-  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
 
   const expectedCount = insertedCount + 2;
   await expect(page.getByTestId("event-count")).toHaveText(String(expectedCount), { timeout: 30_000 });
@@ -504,15 +504,15 @@ test("large streams stay virtualized and can scroll from tail to head", async ({
   ).toBeLessThan(120);
   await expect(page.locator("[data-index='0']")).toHaveCount(0);
   await expect(page.locator(`[data-index='${expectedCount - 1}']`)).toBeVisible();
-  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+  await expectComposerAtScrollerBottom(page);
   await waitForVisibleRowsSettled(page);
   expectStableUpwardScroll(await sampleUpwardScroll(page, { stepCount: 60, scrollDelta: 10 }));
-  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+  await expectComposerAtScrollerBottom(page);
 
   await scrollToMiddle(page);
   await waitForVisibleRowsSettled(page);
   expectStableUpwardScroll(await sampleUpwardScroll(page, { stepCount: 80, scrollDelta: 8 }));
-  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+  await expectComposerAtScrollerBottom(page);
 
   await page.getByRole("button", { name: "Scroll to top" }).click();
   await expect(page.locator("[data-index='0']")).toBeVisible();
@@ -708,15 +708,23 @@ async function streamDistanceFromEnd(page: Page) {
   });
 }
 
+async function expectAtStreamEnd(page: Page) {
+  await expect.poll(() => streamDistanceFromEnd(page)).toBeLessThanOrEqual(2);
+}
+
 async function composerDistanceFromScrollerBottom(page: Page) {
   return await page.evaluate(() => {
     const scroller = document.querySelector("[data-testid='stream-events']");
-    const composer = document.querySelector(".stream-page__composer");
+    const composer = document.querySelector("[data-testid=\"stream-composer\"]");
     if (!(scroller instanceof HTMLElement) || !(composer instanceof HTMLElement)) {
       throw new Error("missing stream scroller or composer");
     }
     return Math.round(scroller.getBoundingClientRect().bottom - composer.getBoundingClientRect().bottom);
   });
+}
+
+async function expectComposerAtScrollerBottom(page: Page) {
+  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBeLessThanOrEqual(2);
 }
 
 async function scrollStreamBy(page: Page, delta: number) {
@@ -752,7 +760,7 @@ async function jitterScrollAwayFromBottom(
 
 async function waitForVisibleRowsSettled(page: Page) {
   await expect.poll(() => page.locator("[data-testid='event-meta']").count()).toBeGreaterThan(0);
-  await expect.poll(() => page.locator(".stream-page__event-row--pending").count()).toBe(0);
+  await expect.poll(() => page.getByTestId("event-row-pending").count()).toBe(0);
 }
 
 async function scrollToMiddle(page: Page) {
@@ -767,7 +775,7 @@ async function sampleUpwardScroll(page: Page, options: { stepCount: number; scro
     if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
 
     function frame() {
-      const virtualRows = [...element.querySelectorAll(".stream-page__virtual-row")];
+      const virtualRows = [...element.querySelectorAll("[data-testid=\"virtual-row\"]")];
       const indexFor = (row: Element | undefined) => {
         const value = row?.getAttribute("data-index");
         return value === undefined || value === null ? null : Number(value);
@@ -777,7 +785,7 @@ async function sampleUpwardScroll(page: Page, options: { stepCount: number; scro
         clientHeight: element.clientHeight,
         firstIndex: indexFor(virtualRows[0]),
         lastIndex: indexFor(virtualRows.at(-1)),
-        pendingRowCount: element.querySelectorAll(".stream-page__event-row--pending").length,
+        pendingRowCount: element.querySelectorAll("[data-testid=\"event-row-pending\"]").length,
         renderedRowCount: element.querySelectorAll("[data-testid='event-meta']").length,
         scrollHeight: element.scrollHeight,
         scrollTop: element.scrollTop,

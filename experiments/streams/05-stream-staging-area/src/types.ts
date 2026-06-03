@@ -2,23 +2,23 @@ import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event
 import type { RpcStub, RpcTarget } from "capnweb";
 import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
 
+type MaybePromise<T> = T | Promise<T>;
+
 /**
  * The subscriber-side capnweb RPC target that receives stream event batches.
- * The stream piggybacks its high-water-mark (`headOffset`/`headCreatedAt`) so the
- * subscriber can compute lag without an extra round-trip. Both are optional; a
- * runner falls back to the batch's last event when absent.
+ * The stream piggybacks its current max offset so subscribers can compute lag
+ * without an extra round trip.
  */
 export type SubscriptionSink = RpcTarget & {
   processEventBatch(args: {
     events: StreamEvent[];
-    headOffset?: number;
-    headCreatedAt?: string;
+    streamMaxOffset: number;
   }): unknown;
 };
 
 export type StreamRpc = {
-  append(args: { event: StreamEventInput }): StreamEvent;
-  appendBatch(args: { events: StreamEventInput[] }): StreamEvent[];
+  append(args: { streamPath?: string; event: StreamEventInput }): MaybePromise<StreamEvent>;
+  appendBatch(args: { streamPath?: string; events: StreamEventInput[] }): MaybePromise<StreamEvent[]>;
   getEvent(
     args:
       | { offset: number; idempotencyKey?: never }
@@ -40,8 +40,8 @@ export type StreamRpc = {
   subscribe(args: {
     subscriptionKey?: SubscriptionKey;
     sink: RpcStub<SubscriptionSink>;
-    afterOffset?: number;
-  }): { subscriptionKey: SubscriptionKey; unsubscribe(): void };
+    replayAfterOffset?: number;
+  }): { subscriptionKey: SubscriptionKey; streamMaxOffset: number; unsubscribe(): void };
   runtimeState(): {
     state: CoreStreamState;
     runtime: {
@@ -66,7 +66,7 @@ export type ConnectionInfo = {
   lastDeliveredAt?: string;
 };
 
-export type StreamProcessorSlug = "echo";
+export type StreamProcessorSlug = "echo-test";
 
 export type StreamProcessorState = { seen: number };
 
@@ -77,11 +77,13 @@ export type StreamProcessorRunnerRuntimeState = {
   snapshot: StreamProcessorRunnerSnapshot | undefined;
 };
 
-export type StreamProcessorRunnerRpc = SubscriptionSink & {
+export type StreamProcessorRunnerRpc = {
   requestSubscription(args: {
     stream: RpcStub<StreamRpc>;
+    subscriptionKey: SubscriptionKey;
+    streamMaxOffset: number;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
     streamRuntimeState: { state: CoreStreamState };
-  }): { sink: SubscriptionSink; afterOffset?: number };
+  }): { sink: SubscriptionSink; replayAfterOffset?: number };
   runtimeState(): StreamProcessorRunnerRuntimeState;
 };

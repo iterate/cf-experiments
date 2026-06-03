@@ -99,8 +99,8 @@ function VirtualReproRoute() {
   }
 
   return (
-    <main className="virtual-repro">
-      <section className="virtual-repro__panel">
+    <main className="grid h-dvh grid-cols-[20rem_minmax(0,1fr)] bg-white text-slate-950">
+      <section className="overflow-y-auto border-r border-slate-200 p-4">
         <h1>TanStack Virtual chat repro</h1>
         <dl>
           <div><dt>Count</dt><dd data-testid="virtual-repro-count">{messages.length}</dd></div>
@@ -111,7 +111,7 @@ function VirtualReproRoute() {
           <div><dt>Footer</dt><dd>{search.footer}</dd></div>
           <div><dt>Keys</dt><dd>{search.indexKeys ? "index" : "id"}</dd></div>
         </dl>
-        <div className="virtual-repro__actions">
+        <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => void appendBatch()}>
             Append batch
           </button>
@@ -126,26 +126,26 @@ function VirtualReproRoute() {
         <output data-testid="virtual-repro-hydrated">{String(hydrated)}</output>
       </section>
 
-      <section className="virtual-repro__feed">
+      <section className="relative min-h-0 overflow-hidden">
         {search.affordance ? (
           <button
-            className="virtual-repro__affordance virtual-repro__affordance--top"
+            className="pointer-events-none absolute inset-x-0 z-10 flex justify-center p-3 top-0"
             type="button"
             onClick={() => virtualizer.scrollToOffset(0)}
           >
             Top
           </button>
         ) : null}
-        <div className="virtual-repro__scroller" data-testid="virtual-repro-scroller" ref={parentRef}>
+        <div className="h-full overflow-y-auto" data-testid="virtual-repro-scroller" ref={parentRef}>
           <div
-            className="virtual-repro__content"
+            className="relative w-full"
             style={{ height: virtualizer.getTotalSize() }}
           >
             {virtualItems.map((virtualItem) => {
               const message = messages[virtualItem.index];
               return (
                 <div
-                  className="virtual-repro__row"
+                  className="absolute left-0 top-0 w-full border-b border-slate-100 px-3 py-2 font-mono text-xs"
                   data-index={virtualItem.index}
                   key={virtualItem.key}
                   ref={virtualizer.measureElement}
@@ -159,7 +159,7 @@ function VirtualReproRoute() {
         </div>
         {search.affordance ? (
           <button
-            className="virtual-repro__affordance virtual-repro__affordance--bottom"
+            className="pointer-events-none absolute inset-x-0 z-10 flex justify-center p-3 bottom-0"
             type="button"
             onClick={() => virtualizer.scrollToEnd()}
           >
@@ -170,8 +170,8 @@ function VirtualReproRoute() {
           <div
             className={
               search.footer === "overlay-measured"
-                ? "virtual-repro__footer virtual-repro__footer--overlay"
-                : "virtual-repro__footer"
+                ? "sticky bottom-0 border-t border-slate-200 bg-white p-3 absolute inset-x-0 bottom-0"
+                : "sticky bottom-0 border-t border-slate-200 bg-white p-3"
             }
             ref={footerRef}
           >
@@ -188,7 +188,7 @@ function makeMessages(startIndex: number, count: number) {
     const index = startIndex + offset;
     return {
       id: `message-${index}`,
-      text: `${index + 1} events.iterate.com/debug/virtual-repro ${new Date(0).toISOString()}`,
+      text: `${index + 1} events.iterate.com/debug/grid h-dvh grid-cols-[20rem_minmax(0,1fr)] bg-white text-slate-950 ${new Date(0).toISOString()}`,
     };
   });
 }

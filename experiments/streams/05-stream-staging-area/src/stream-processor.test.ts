@@ -1,20 +1,18 @@
 // Runnable in the Node/vitest runtime, fully in-process (no worker needed).
 // Proves the processor model: per-event afterAppend, durable blockProcessorUntil,
 // the builtin beforeAppend gate folded into a core processor (child-stream
-// topology + circuit breaker), the SQLite-projector shape, and the append->
-// delivery round-trip metric.
+// topology + circuit breaker), and the SQLite-projector shape.
 
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { defineProcessorContract, getInitialProcessorState, runProcessorReduce } from "@cf-experiments/shared/stream-processors";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import {
-  createProcessorRunner,
   implementBuiltinProcessor,
   implementProcessor,
-  type Snapshot,
-  type StreamPort,
-} from "./stream-processor.js";
+} from "./processor.js";
+import { createProcessorRunner, type Snapshot } from "./processor-runner.js";
+import type { StreamRpc } from "./types.js";
 
 const iso = (ms = 0) => new Date(ms).toISOString();
 
@@ -35,15 +33,35 @@ function event(args: {
 }
 
 // A stream stub that commits appends in memory and (optionally) fans them back.
-function memoryStream(args: { onCommit?: (e: StreamEvent) => void; startOffset?: number } = {}) {
-  let nextOffset = args.startOffset ?? 100;
+function memoryStream(options: { onCommit?: (e: StreamEvent) => void; startOffset?: number } = {}) {
+  let nextOffset = options.startOffset ?? 100;
   const committed: StreamEvent[] = [];
-  const stream: StreamPort = {
-    append: async (input) => {
-      const e: StreamEvent = { ...input, offset: nextOffset++, createdAt: iso(1) };
+  const stream: StreamRpc = {
+    append: (args) => {
+      const e: StreamEvent = { ...args.event, offset: nextOffset++, createdAt: iso(1) };
       committed.push(e);
-      args.onCommit?.(e);
+      options.onCommit?.(e);
       return e;
+    },
+    appendBatch: (batch) =>
+      batch.events.map((input) => {
+        const e: StreamEvent = { ...input, offset: nextOffset++, createdAt: iso(1) };
+        committed.push(e);
+        options.onCommit?.(e);
+        return e;
+      }),
+    getEvent: () => undefined,
+    getEvents: () => [],
+    subscribe: () => {
+      throw new Error("memoryStream does not implement subscribe");
+    },
+    runtimeState: () => {
+      throw new Error("memoryStream does not implement runtimeState");
+    },
+    kill: () => {},
+    reset: async () => {},
+    reduce: () => {
+      throw new Error("memoryStream does not implement reduce");
     },
   };
   return { stream, committed };
@@ -71,9 +89,9 @@ const echoContract = defineProcessorContract({
 });
 
 const echo = implementProcessor(echoContract, () => ({
-  afterAppend({ event, state, append }) {
+  afterAppend({ event, state, stream, keepAlive }) {
     if (event.type !== "test.input") return;
-    append({ type: "test.output", payload: { seen: state.seen } });
+    keepAlive(stream.append({ event: { type: "test.output", payload: { seen: state.seen } } }));
   },
 }));
 
@@ -88,10 +106,13 @@ describe("subscription processor (node, in-process)", () => {
       stream,
     });
 
-    await runner.processEventBatch({ events: [event({ type: "test.input", payload: { path: "/x" }, offset: 2 })], headOffset: 2 });
+    await runner.processEvent({
+      event: event({ type: "test.input", payload: { path: "/x" }, offset: 2 }),
+      streamMaxOffset: 2,
+    });
 
     expect(committed).toMatchObject([{ type: "test.output", payload: { seen: 1 } }]);
-    expect((await runner.snapshot()).offset).toBe(2);
+    expect((await runner.snapshot())?.offset).toBe(2);
     expect(saved?.offset).toBe(2);
   });
 
@@ -103,7 +124,10 @@ describe("subscription processor (node, in-process)", () => {
       storage: { load: () => ({ state: { seen: 0 }, offset: 5 }), save: () => {} },
       stream,
     });
-    await runner.processEventBatch({ events: [event({ type: "test.input", payload: { path: "/x" }, offset: 3 })], headOffset: 5 });
+    await runner.processEvent({
+      event: event({ type: "test.input", payload: { path: "/x" }, offset: 3 }),
+      streamMaxOffset: 5,
+    });
     expect(committed).toHaveLength(0); // offset 3 <= snapshot 5
   });
 });
@@ -130,12 +154,12 @@ const transcribeContract = defineProcessorContract({
 });
 
 const transcribe = implementProcessor(transcribeContract, (deps: { transcribe(url: string): Promise<string> }) => ({
-  afterAppend({ event, appendAndWait, blockProcessorUntil }) {
+  afterAppend({ event, stream, blockProcessorUntil }) {
     if (event.type !== "test.audio") return;
     const url = event.payload.url;
     blockProcessorUntil(async () => {
       const text = await deps.transcribe(url);
-      await appendAndWait({ type: "test.transcript", payload: { url, text } });
+      await stream.append({ event: { type: "test.transcript", payload: { url, text } } });
     });
   },
 }));
@@ -159,7 +183,10 @@ describe("durable processor (blockProcessorUntil)", () => {
       stream,
     });
 
-    const processed = runner.processEventBatch({ events: [event({ type: "test.audio", payload: { url: "/a" }, offset: 2 })], headOffset: 2 });
+    const processed = runner.processEvent({
+      event: event({ type: "test.audio", payload: { url: "/a" }, offset: 2 }),
+      streamMaxOffset: 2,
+    });
     await new Promise((r) => setTimeout(r, 0));
     expect(saves).toEqual([]); // blocked: not yet checkpointed
 
@@ -200,44 +227,9 @@ describe("projector processor (consumes everything, writes to a db port)", () =>
       storage: { load: () => undefined, save: () => {} },
       stream,
     });
-    await runner.processEventBatch({
-      events: [event({ type: "a", offset: 0, payload: {} }), event({ type: "b", offset: 1, payload: {} })],
-      headOffset: 1,
-    });
+    await runner.processEvent({ event: event({ type: "a", offset: 0, payload: {} }), streamMaxOffset: 1 });
+    await runner.processEvent({ event: event({ type: "b", offset: 1, payload: {} }), streamMaxOffset: 1 });
     expect(written).toEqual([0, 1]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// append -> delivery round-trip metric (no await on append)
-// ---------------------------------------------------------------------------
-
-describe("append round-trip metric", () => {
-  it("measures latency on receipt without awaiting the append", async () => {
-    const samples: number[] = [];
-    let nextOffset = 2;
-    let runner: { processEventBatch(b: { events: StreamEvent[]; headOffset?: number }): unknown } | undefined;
-
-    const stream: StreamPort = {
-      append: async (input) => {
-        const committed: StreamEvent = { ...input, offset: nextOffset++, createdAt: iso(1) };
-        runner?.processEventBatch({ events: [committed], headOffset: committed.offset }); // fan back
-        return committed;
-      },
-    };
-
-    runner = createProcessorRunner({
-      processor: echo,
-      deps: undefined,
-      storage: { load: () => undefined, save: () => {} },
-      stream,
-      onAppendRoundTrip: ({ ms }) => samples.push(ms),
-    });
-
-    await runner.processEventBatch({ events: [event({ type: "test.input", payload: { path: "/x" }, offset: 1 })], headOffset: 1 });
-    await new Promise((r) => setTimeout(r, 0));
-    expect(samples).toHaveLength(1);
-    expect(samples[0]).toBeGreaterThanOrEqual(0);
   });
 });
 
@@ -246,7 +238,7 @@ describe("append round-trip metric", () => {
 // ---------------------------------------------------------------------------
 
 const coreContract = defineProcessorContract({
-  slug: "events.iterate.com/stream/core",
+  slug: "stream",
   version: "0.1.0",
   description: "core",
   stateSchema: z.object({
@@ -317,9 +309,9 @@ const core = implementBuiltinProcessor(coreContract, (deps: { appendToStream(pat
     if (event.type === "events.iterate.com/stream/resumed") return;
     throw new Error(`stream paused: ${state.pauseReason ?? "circuit breaker open"}`);
   },
-  afterAppend({ event, state, append }) {
+  afterAppend({ event, state, stream, keepAlive }) {
     if (!state.paused && state.availableTokens < 0) {
-      append({ type: "events.iterate.com/stream/paused", payload: { reason: "circuit breaker tripped" } });
+      keepAlive(stream.append({ event: { type: "events.iterate.com/stream/paused", payload: { reason: "circuit breaker tripped" } } }));
     }
     if (event.type === "events.iterate.com/stream/created") {
       for (const ancestor of ancestorStreamPaths(state.path)) {
@@ -374,15 +366,31 @@ class CoreStreamSim {
     entry.offset = committed.offset;
     if (reduction === undefined) return committed;
     entry.state = reduction.state;
+    const stream: StreamRpc = {
+      append: (args) => this.append(path, args.event, createdAtMs),
+      appendBatch: (args) => args.events.map((input) => this.append(path, input, createdAtMs)),
+      getEvent: () => undefined,
+      getEvents: () => [],
+      subscribe: () => {
+        throw new Error("CoreStreamSim does not implement subscribe");
+      },
+      runtimeState: () => {
+        throw new Error("CoreStreamSim does not implement runtimeState");
+      },
+      kill: () => {},
+      reset: async () => {},
+      reduce: () => {
+        throw new Error("CoreStreamSim does not implement reduce");
+      },
+    };
     this.#impl.afterAppend?.({
       event: reduction.event,
       previousState,
       state: entry.state,
-      head: { offset: committed.offset, createdAt: committed.createdAt },
-      append: (e) => void this.append(path, e, createdAtMs),
-      appendAndWait: async (e) => this.append(path, e, createdAtMs),
+      streamMaxOffset: committed.offset,
+      stream,
       blockProcessorUntil: (work) => void work(),
-      waitUntil: () => {},
+      keepAlive: () => {},
     });
     return committed;
   }

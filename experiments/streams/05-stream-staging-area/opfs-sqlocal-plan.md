@@ -120,7 +120,7 @@ avoid broader cross-tab command proxying because every tab owns its own CapnWeb 
 2. Browser DB module initializes SQLocal and runs `CREATE TABLE IF NOT EXISTS`.
 3. Stream store opens CapnWeb with `withStream({ url })`.
 4. Store participates in leader election for `streamPath`.
-5. The elected tab calls `stream.rpc.subscribe({ subscriptionKey, sink, afterOffset })`.
+5. The elected tab calls `connection.stream.subscribe({ subscriptionKey, sink, replayAfterOffset })`.
 6. `sink.processEventBatch({ events })` enqueues the batch and returns immediately.
 7. A single async writer drains batches in order.
 8. Each drained batch inserts rows in one SQLite transaction.
@@ -266,7 +266,7 @@ reduced state and most recent processed offset explicitly.
 ## Deferred work
 
 - Browser processor state table containing reduced state and most recent processed offset.
-- Reconnecting with `afterOffset` derived from that processor state.
+- Reconnecting with `replayAfterOffset` derived from that processor state.
 - Cross-tab subscription-owner election with `broadcast-channel`.
 - More sophisticated offset-window caching for 100k+ rows.
 - TTL/pruning behavior that can make `virtual_index` diverge from stream `offset`.

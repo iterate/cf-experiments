@@ -1,8 +1,11 @@
-import { RpcTarget, type RpcPromise, type RpcStub } from "capnweb";
+import type { RpcPromise, RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
-import type { SubscriptionSink, StreamRpc } from "../stream-types.js";
+import { connectStream, type StreamBrowserConnectionStatus } from "./connect.js";
+import { rawEventsBrowserProcessor } from "../processors/raw-events-browser/implementation.js";
+import { createProcessorRunner } from "../processor-runner.js";
+import type { StreamRpc } from "../types.js";
+import { createStreamSubscription, type StreamSubscription } from "../subscription.js";
 import { acquireWriterRole, type WriterRole } from "./stream-leader.js";
-import { withStream, type StreamBrowserConnectionStatus } from "./stream-browser.js";
 import {
   BROWSER_DB_SCHEMA_VERSION,
   StreamBrowserDatabase,
@@ -39,8 +42,10 @@ export function createStreamBrowserStore(args: {
 }): StreamBrowserStore {
   const streamDatabase = new StreamBrowserDatabase(args.streamPath);
   const listeners = new Set<() => void>();
-  let stream: ReturnType<typeof withStream> | undefined;
+  let stream: Awaited<ReturnType<typeof connectStream>> | undefined;
   let subscriptionHandle: { unsubscribe(): void } | undefined;
+  let subscription: StreamSubscription | undefined;
+  let processing: AsyncDisposable | undefined;
   let writerRole: WriterRole | undefined;
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -162,7 +167,7 @@ export function createStreamBrowserStore(args: {
     );
     const subscriptionKey = `browser:${browserSubscriberId}`;
 
-    const connection = withStream({
+    void connectStream({
       url: streamUrl,
       onConnectionStatusChange(connectionStatus, connectionError) {
         if (disposed) return;
@@ -180,13 +185,21 @@ export function createStreamBrowserStore(args: {
         };
         emitSnapshot();
       },
+    }).then((connection) => {
+      if (disposed) {
+        void connection[Symbol.asyncDispose]();
+        return;
+      }
+      stream = connection;
+      startSubscriptionElection({ connection, subscriptionKey });
+    }).catch((error: unknown) => {
+      if (disposed) return;
+      reconnectAfter(`connect failed: ${errorMessage(error)}`);
     });
-    stream = connection;
-    startSubscriptionElection({ connection, subscriptionKey });
   }
 
   function startSubscriptionElection(election: {
-    connection: ReturnType<typeof withStream>;
+    connection: Awaited<ReturnType<typeof connectStream>>;
     subscriptionKey: string;
   }) {
     snapshot = { ...snapshot, subscriptionStatus: "electing" };
@@ -212,23 +225,68 @@ export function createStreamBrowserStore(args: {
         if (disposed || stream !== election.connection) return undefined;
         snapshot = { ...snapshot, subscriptionStatus: "leader" };
         emitSnapshot();
-        await reconcileLocalMirrorWithServer(election.connection.rpc);
-        const afterOffset = await streamDatabase.maxOffset();
+        await reconcileLocalMirrorWithServer(election.connection.stream);
+        const localSummary = await streamDatabase.eventSummary();
+        const localMaxOffset = localSummary.maxOffset ?? undefined;
+        const replayAfterOffset = localMaxOffset ?? 0;
+        let flushFrame: number | undefined;
+        let pendingEvents: StreamEvent[] = [];
+        let tail = Promise.resolve();
+        const flushSoon = () => {
+          if (flushFrame !== undefined) return;
+          // The server may deliver several batches inside one browser frame. Buffer
+          // them into one SQLite transaction so the local mirror remains high-throughput
+          // and TanStack Virtual sees one large append instead of same-turn count churn.
+          flushFrame = requestAnimationFrame(() => {
+            flushFrame = undefined;
+            const events = pendingEvents;
+            pendingEvents = [];
+            if (events.length === 0) return;
+            // Never let failed SQLite writes disappear into the fire-and-forget
+            // subscription path. A broken local mirror must be visible in both console
+            // and React state, otherwise followers can show an infinite empty spinner.
+            tail = tail
+              .then(() => streamDatabase.insertEventBatch({ events }), () =>
+                streamDatabase.insertEventBatch({ events }),
+              )
+              .then(() => onStored(events))
+              .catch((error: unknown) => {
+                onMirrorWriteError(error);
+              });
+            if (pendingEvents.length > 0) flushSoon();
+          });
+        };
+        const processorRunner = createProcessorRunner({
+          processor: rawEventsBrowserProcessor,
+          deps: {
+            storeEvent(event) {
+              pendingEvents.push(event);
+              flushSoon();
+            },
+          },
+          storage: {
+            load: () =>
+              localMaxOffset === undefined ? undefined : { state: {}, offset: localMaxOffset },
+            save: () => {},
+          },
+          stream: election.connection.stream,
+        });
+        const streamSubscription = createStreamSubscription({
+          subscriptionKey: election.subscriptionKey,
+        });
+        subscription = streamSubscription;
+        processing = processorRunner.run({ subscription: streamSubscription });
         return {
-          afterOffset,
-          sink: new BrowserMirrorSink({
-            streamDatabase,
-            onError: onMirrorWriteError,
-            onStored,
-          }),
+          replayAfterOffset,
+          sink: streamSubscription.sink,
         };
       })
       .then((subscription) => {
         if (subscription === undefined || disposed || stream !== election.connection) return undefined;
-        return election.connection.rpc.subscribe({
+        return election.connection.stream.subscribe({
           subscriptionKey: election.subscriptionKey,
           sink: subscription.sink,
-          afterOffset: subscription.afterOffset,
+          replayAfterOffset: subscription.replayAfterOffset,
         });
       })
       .then((handle) => {
@@ -246,7 +304,7 @@ export function createStreamBrowserStore(args: {
         if (disposed) return;
         console.error(`[stream-browser ${args.streamPath}] subscribe failed`, error);
         stopSubscriptionElection();
-        stream?.[Symbol.dispose]();
+        void stream?.[Symbol.asyncDispose]();
         stream = undefined;
         reconnectAfter(`subscribe failed: ${errorMessage(error)}`);
       });
@@ -271,6 +329,10 @@ export function createStreamBrowserStore(args: {
   function stopSubscriptionElection() {
     subscriptionHandle?.unsubscribe();
     subscriptionHandle = undefined;
+    void processing?.[Symbol.asyncDispose]();
+    processing = undefined;
+    void subscription?.[Symbol.asyncDispose]();
+    subscription = undefined;
     writerRole?.release();
     writerRole = undefined;
     snapshot = { ...snapshot, subscriptionStatus: "idle" };
@@ -303,7 +365,7 @@ export function createStreamBrowserStore(args: {
       databaseInfoTimer = undefined;
     }
     stopSubscriptionElection();
-    stream?.[Symbol.dispose]();
+    void stream?.[Symbol.asyncDispose]();
     stream = undefined;
     offDatabaseChange();
     streamDatabase.dispose();
@@ -326,11 +388,11 @@ export function createStreamBrowserStore(args: {
     appendBatch(appendArgs) {
       reconnectNow();
       if (stream === undefined) throw new Error("stream connection is disposed");
-      return stream.rpc.appendBatch(appendArgs);
+      return stream.stream.appendBatch(appendArgs);
     },
     async clearLocalDatabase() {
       stopSubscriptionElection();
-      stream?.[Symbol.dispose]();
+      void stream?.[Symbol.asyncDispose]();
       stream = undefined;
       await discardLocalMirror();
       reconnectNow();
@@ -338,12 +400,12 @@ export function createStreamBrowserStore(args: {
     kill() {
       reconnectNow();
       if (stream === undefined) throw new Error("stream connection is disposed");
-      return stream.rpc.kill();
+      return stream.stream.kill();
     },
     reset() {
       reconnectNow();
       if (stream === undefined) throw new Error("stream connection is disposed");
-      return stream.rpc.reset();
+      return stream.stream.reset();
     },
     getSnapshot() {
       return snapshot;
@@ -372,58 +434,6 @@ export function createStreamBrowserStore(args: {
       dispose();
     },
   };
-}
-
-class BrowserMirrorSink extends RpcTarget implements SubscriptionSink {
-  #tail = Promise.resolve();
-  #flushFrame: number | undefined;
-  #pendingEvents: StreamEvent[] = [];
-  readonly #streamDatabase: StreamBrowserDatabase;
-  readonly #onError: (error: unknown) => void;
-  readonly #onStored: (events: StreamEvent[]) => void;
-
-  constructor(args: {
-    streamDatabase: StreamBrowserDatabase;
-    onError(error: unknown): void;
-    onStored(events: StreamEvent[]): void;
-  }) {
-    super();
-    this.#streamDatabase = args.streamDatabase;
-    this.#onError = args.onError;
-    this.#onStored = args.onStored;
-  }
-
-  processEventBatch(args: { events: StreamEvent[] }): undefined {
-    this.#pendingEvents.push(...args.events);
-    this.#flushSoon();
-  }
-
-  #flushSoon() {
-    if (this.#flushFrame !== undefined) return;
-    // The server may deliver several batches inside one browser frame. Buffer
-    // them into one SQLite transaction so the local mirror remains high-throughput
-    // and TanStack Virtual sees one large append instead of same-turn count churn.
-    this.#flushFrame = requestAnimationFrame(() => {
-      this.#flushFrame = undefined;
-      const events = this.#pendingEvents;
-      this.#pendingEvents = [];
-      if (events.length === 0) return;
-      // Never let failed SQLite writes disappear into the fire-and-forget
-      // subscription path. A broken local mirror must be visible in both console
-      // and React state, otherwise followers can show an infinite empty spinner.
-      this.#tail = this.#tail
-        .then(() => this.#store(events), () => this.#store(events))
-        .catch((error: unknown) => {
-          this.#onError(error);
-        });
-      if (this.#pendingEvents.length > 0) this.#flushSoon();
-    });
-  }
-
-  async #store(events: StreamEvent[]) {
-    await this.#streamDatabase.insertEventBatch({ events });
-    this.#onStored(events);
-  }
 }
 
 function errorMessage(error: unknown) {

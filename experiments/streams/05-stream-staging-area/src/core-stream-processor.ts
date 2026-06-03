@@ -18,7 +18,7 @@ const outboundSubscriberSchema = z.discriminatedUnion("type", [
 ]);
 
 export const coreStreamProcessorContract = defineProcessorContract({
-  slug: "events.iterate.com/stream/core",
+  slug: "stream",
   version: "0.1.0",
   description: "Maintains the stream's own reduced state.",
   stateSchema: z.object({

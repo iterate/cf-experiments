@@ -1,6 +1,8 @@
 interface StreamStagingEnv {
-  STREAM: DurableObjectNamespace<import("./worker").Stream>;
-  STREAM_PROCESSOR_RUNNER: DurableObjectNamespace<import("./worker").StreamProcessorRunner>;
+  STREAM: DurableObjectNamespace<import("./workers/durable-objects/stream").Stream>;
+  STREAM_PROCESSOR_RUNNER: DurableObjectNamespace<
+    import("./workers/durable-objects/stream-processor-runner").StreamProcessorRunner
+  >;
 }
 
 interface Env extends StreamStagingEnv {}

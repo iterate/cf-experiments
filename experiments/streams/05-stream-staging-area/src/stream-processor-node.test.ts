@@ -1,13 +1,15 @@
 // Node runtime over a REAL WebSocket subscription: hosts a stream processor
-// in-process via withStreamProcessor against a running worker. Gated like the
+// in-process against a running worker. Gated like the
 // other e2e — set STREAM_STAGING_E2E=true (and WORKER_URL) with `wrangler dev`
 // running. Typecheck-verified always.
 
 import { describe, expect, it } from "vitest";
-import { connectStreamFromNode } from "./client-libraries/stream-node-worker.js";
-import { withStreamProcessor, type Snapshot } from "./stream-processor.js";
+import { connectStream } from "./node/connect.js";
+import { createStreamSubscription } from "./subscription.js";
+import { createProcessorRunner, type Snapshot } from "./processor-runner.js";
 // The SAME processor the DO (outbound) and the browser tab (inbound) run.
-import { echo, type EchoState } from "./demo-processor.js";
+import { echoTestProcessor } from "./processors/echo-test/implementation.js";
+import type { EchoTestState } from "./processors/echo-test/contract.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
@@ -15,24 +17,34 @@ const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
 describe("node-hosted stream processor (e2e)", () => {
   e2eIt("hosts echo in-process over an inbound subscription", async () => {
     const path = `node-echo-${crypto.randomUUID()}`;
-    await using connection = await connectStreamFromNode({ path, workerUrl });
+    await using connection = await connectStream({ url: toStreamWebSocketUrl(path) });
 
-    let saved: Snapshot<EchoState> | undefined;
-    await using _runner = await withStreamProcessor({
-      connection,
-      subscriptionKey: "node-echo",
-      processor: echo,
+    let saved: Snapshot<EchoTestState> | undefined;
+    const processorRunner = createProcessorRunner({
+      processor: echoTestProcessor,
       deps: undefined,
       storage: { load: () => saved, save: (snapshot) => void (saved = snapshot) },
+      stream: connection.stream,
     });
+    let handle: { unsubscribe(): void } | undefined;
+    await using subscription = createStreamSubscription({
+      subscriptionKey: "node-echo",
+      onDispose: () => handle?.unsubscribe(),
+    });
+    handle = await connection.stream.subscribe({
+      subscriptionKey: "node-echo",
+      replayAfterOffset: (await processorRunner.snapshot())?.offset ?? 0,
+      sink: subscription.sink,
+    });
+    await using _processing = processorRunner.run({ subscription });
 
-    await connection.rpc.append({ event: { type: "test.processor.input", payload: { path } } });
+    await connection.stream.append({ event: { type: "test.processor.input", payload: { path } } });
 
     // echo appends test.processor.output back into the stream; poll for it.
     const startedAt = Date.now();
     let outputs: number[] = [];
     while (Date.now() - startedAt < 4_000) {
-      const events = await connection.rpc.getEvents({});
+      const events = await connection.stream.getEvents({});
       outputs = events.filter((e) => e.type === "test.processor.output").map((e) => e.offset);
       if (outputs.length > 0) break;
       await new Promise((resolve) => setTimeout(resolve, 25));
@@ -43,16 +55,27 @@ describe("node-hosted stream processor (e2e)", () => {
 
   e2eIt("reconnects and resumes from its snapshot without reprocessing", async () => {
     const path = `node-resume-${crypto.randomUUID()}`;
-    let saved: Snapshot<EchoState> | undefined;
-    const storage = { load: () => saved, save: (s: Snapshot<EchoState>) => void (saved = s) };
+    let saved: Snapshot<EchoTestState> | undefined;
+    const storage = { load: () => saved, save: (s: Snapshot<EchoTestState>) => void (saved = s) };
 
     // Session 1: process one input, then drop the connection + runner.
     {
-      await using connection = await connectStreamFromNode({ path, workerUrl });
-      await using _runner = await withStreamProcessor({
-        connection, subscriptionKey: "resume", processor: echo, deps: undefined, storage,
+      await using connection = await connectStream({ url: toStreamWebSocketUrl(path) });
+      const processorRunner = createProcessorRunner({
+        processor: echoTestProcessor, deps: undefined, storage, stream: connection.stream,
       });
-      await connection.rpc.append({ event: { type: "test.processor.input", payload: { path } } });
+      let handle: { unsubscribe(): void } | undefined;
+      await using subscription = createStreamSubscription({
+        subscriptionKey: "resume",
+        onDispose: () => handle?.unsubscribe(),
+      });
+      handle = await connection.stream.subscribe({
+        subscriptionKey: "resume",
+        replayAfterOffset: (await processorRunner.snapshot())?.offset ?? 0,
+        sink: subscription.sink,
+      });
+      await using _processing = processorRunner.run({ subscription });
+      await connection.stream.append({ event: { type: "test.processor.input", payload: { path } } });
       await waitUntil(() => saved?.state.seen === 1, 5_000);
     }
     const offsetAfterFirst = saved?.offset ?? -1;
@@ -61,11 +84,22 @@ describe("node-hosted stream processor (e2e)", () => {
     // Session 2: fresh connection + fresh runner, SAME persisted snapshot. It must
     // resume (subscribe afterOffset = stored offset), not reprocess the first input.
     {
-      await using connection = await connectStreamFromNode({ path, workerUrl });
-      await using _runner = await withStreamProcessor({
-        connection, subscriptionKey: "resume", processor: echo, deps: undefined, storage,
+      await using connection = await connectStream({ url: toStreamWebSocketUrl(path) });
+      const processorRunner = createProcessorRunner({
+        processor: echoTestProcessor, deps: undefined, storage, stream: connection.stream,
       });
-      await connection.rpc.append({ event: { type: "test.processor.input", payload: { path } } });
+      let handle: { unsubscribe(): void } | undefined;
+      await using subscription = createStreamSubscription({
+        subscriptionKey: "resume",
+        onDispose: () => handle?.unsubscribe(),
+      });
+      handle = await connection.stream.subscribe({
+        subscriptionKey: "resume",
+        replayAfterOffset: (await processorRunner.snapshot())?.offset ?? 0,
+        sink: subscription.sink,
+      });
+      await using _processing = processorRunner.run({ subscription });
+      await connection.stream.append({ event: { type: "test.processor.input", payload: { path } } });
       await waitUntil(() => (saved?.state.seen ?? 0) === 2, 5_000);
     }
     expect(saved?.state.seen).toBe(2); // resumed from 1; second input counted exactly once
@@ -80,4 +114,12 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error("waitUntil timed out");
+}
+
+function toStreamWebSocketUrl(path: string) {
+  const url = new URL(workerUrl);
+  url.pathname = `/stream/${encodeURIComponent(path)}`;
+  if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol === "https:") url.protocol = "wss:";
+  return url.toString();
 }
