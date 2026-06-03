@@ -10,8 +10,10 @@ import {
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
 import {
   assertCoreStreamAppendAllowed,
+  buildChildStreamCreatedEvent,
   buildStreamPausedEvent,
   coreStreamProcessorContract,
+  getAncestorStreamPaths,
   shouldPauseCoreStreamAfterAppend,
   type CoreStreamState,
 } from "../../core-stream-processor.js";
@@ -308,6 +310,11 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     this.#writeCoreState(state);
     this.state = state;
 
+    for (const event of newEvents) {
+      if (event.type !== "events.iterate.com/stream/created") continue;
+      this.#propagateChildStreamCreated();
+    }
+
     if (shouldPauseCoreStreamAfterAppend(this.state)) {
       this.append({
         event: buildStreamPausedEvent({
@@ -327,6 +334,22 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     }
 
     return events;
+  }
+
+  #propagateChildStreamCreated() {
+    for (const ancestorPath of getAncestorStreamPaths(this.state.path)) {
+      const stream = this.env.STREAM.getByName(`${this.state.namespace}:${ancestorPath}`);
+      Promise.resolve(
+        stream.append({
+          event: buildChildStreamCreatedEvent({
+            parentPath: ancestorPath,
+            childPath: this.state.path,
+          }),
+        }),
+      ).catch((error: unknown) => {
+        console.error("failed to propagate child stream event", error);
+      });
+    }
   }
 
   getEvent(

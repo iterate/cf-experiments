@@ -42,6 +42,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     }),
     eventCount: z.number().int().min(0),
     maxOffset: z.number().int().min(0),
+    childPaths: z.array(z.string().trim().min(1)),
     paused: z.boolean(),
     pauseReason: z.string().nullable(),
     availableTokens: z.number(),
@@ -97,6 +98,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     },
     eventCount: 0,
     maxOffset: 0,
+    childPaths: [],
     paused: false,
     pauseReason: null,
     availableTokens: DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY,
@@ -126,6 +128,12 @@ export const coreStreamProcessorContract = defineProcessorContract({
         config: z.object({
           simulatedStorageSyncDelayMs: z.number().int().min(0),
         }),
+      }),
+    },
+    "events.iterate.com/stream/child-stream-created": {
+      description: "Records an immediate child stream under this stream.",
+      payloadSchema: z.object({
+        childPath: z.string().trim().min(1),
       }),
     },
     "events.iterate.com/stream/subscription-configured": {
@@ -191,6 +199,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "events.iterate.com/stream/created",
     "events.iterate.com/stream/woken",
     "events.iterate.com/stream/configured",
+    "events.iterate.com/stream/child-stream-created",
     "events.iterate.com/stream/subscription-configured",
     "events.iterate.com/stream/processor-registered",
     "events.iterate.com/stream/error-occurred",
@@ -268,6 +277,19 @@ export const coreStreamProcessorContract = defineProcessorContract({
             ...event.payload.config,
           },
         };
+
+      case "events.iterate.com/stream/child-stream-created": {
+        next = spendCircuitBreakerToken({ state, event, next });
+        const childPath = getImmediateChildPath({
+          parentPath: state.path,
+          childPath: event.payload.childPath,
+        });
+        if (childPath === null || next.childPaths.includes(childPath)) return next;
+        return {
+          ...next,
+          childPaths: [...next.childPaths, childPath],
+        };
+      }
 
       // events.iterate.com/stream/subscription-configured is used to configure outbound subscriptions
       case "events.iterate.com/stream/subscription-configured": {
@@ -362,6 +384,17 @@ export function buildStreamErrorOccurredEvent(args: {
   } as const;
 }
 
+export function buildChildStreamCreatedEvent(args: {
+  parentPath: string;
+  childPath: string;
+}) {
+  return {
+    type: "events.iterate.com/stream/child-stream-created",
+    idempotencyKey: `child-stream-created:${args.parentPath}:${args.childPath}`,
+    payload: { childPath: args.childPath },
+  } as const;
+}
+
 export function buildStreamPausedEvent(args: {
   reason: string;
   idempotencyKey?: string;
@@ -420,4 +453,30 @@ function spendCircuitBreakerToken<State extends CircuitBreakerFields>(args: {
     availableTokens: refilled - 1,
     lastRefillAtMs: createdAtMs,
   };
+}
+
+export function getAncestorStreamPaths(path: string): string[] {
+  if (path === "/") return [];
+  const segments = path.split("/").filter(Boolean);
+  const ancestors = ["/"];
+  for (let index = 1; index < segments.length; index += 1) {
+    ancestors.push(`/${segments.slice(0, index).join("/")}`);
+  }
+  return ancestors;
+}
+
+function getImmediateChildPath(args: {
+  parentPath: string;
+  childPath: string;
+}): string | null {
+  if (args.childPath === args.parentPath) return null;
+  if (args.parentPath === "/") {
+    const [firstSegment] = args.childPath.split("/").filter(Boolean);
+    return firstSegment === undefined ? null : `/${firstSegment}`;
+  }
+
+  const parentPrefix = `${args.parentPath}/`;
+  if (!args.childPath.startsWith(parentPrefix)) return null;
+  const [firstSegment] = args.childPath.slice(parentPrefix.length).split("/").filter(Boolean);
+  return firstSegment === undefined ? null : `${args.parentPath}/${firstSegment}`;
 }

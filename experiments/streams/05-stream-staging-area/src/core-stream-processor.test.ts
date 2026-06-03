@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   assertCoreStreamAppendAllowed,
+  buildChildStreamCreatedEvent,
   buildProcessorRegisteredEvent,
   buildStreamErrorOccurredEvent,
   buildStreamPausedEvent,
   buildStreamResumedEvent,
   coreStreamProcessorContract,
+  getAncestorStreamPaths,
   shouldPauseCoreStreamAfterAppend,
 } from "./core-stream-processor.js";
 
@@ -322,5 +324,29 @@ describe("core stream processor", () => {
     );
     expect(state.paused).toBe(false);
     expect(state.pauseReason).toBeNull();
+  });
+
+  it("keeps immediate child paths from child-stream-created events", () => {
+    let state = coreStreamProcessorContract.stateSchema.parse({
+      ...coreStreamProcessorContract.initialState,
+      path: "/a",
+    });
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 1,
+          createdAt: "2026-06-01T12:00:00.000Z",
+          ...buildChildStreamCreatedEvent({
+            parentPath: "/a",
+            childPath: "/a/b/c",
+          }),
+        },
+      }),
+    );
+
+    expect(state.childPaths).toEqual(["/a/b"]);
+    expect(getAncestorStreamPaths("/a/b/c")).toEqual(["/", "/a", "/a/b"]);
   });
 });
