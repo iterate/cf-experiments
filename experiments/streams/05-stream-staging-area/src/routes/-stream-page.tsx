@@ -334,24 +334,19 @@ function EventRows({
   streamStore: StreamBrowserStore;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
-  const scrolledToInitialEnd = useRef(false);
+  const settledInitialEndScroll = useRef(false);
   const previousEventCount = useRef(eventCount);
+  const userHasMovedAwayFromEnd = useRef(false);
   const [expandedOffsets, setExpandedOffsets] = useState(() => new Set<number>());
   const [scrollState, dispatchScrollState] = useReducer(
     (
       state,
       action:
-        | { type: "follow-end" }
-        | { type: "stop-following-end" }
         | { type: "clear-unread" }
         | { type: "add-unread"; count: number }
         | { type: "set-scroll-position"; scrollPosition: { isAtTop: boolean; isAtEnd: boolean } },
     ) => {
       switch (action.type) {
-        case "follow-end":
-          return { ...state, isFollowingEnd: true, unreadEventCount: 0 };
-        case "stop-following-end":
-          return state.isFollowingEnd ? { ...state, isFollowingEnd: false } : state;
         case "clear-unread":
           return state.unreadEventCount === 0 ? state : { ...state, unreadEventCount: 0 };
         case "add-unread":
@@ -363,11 +358,14 @@ function EventRows({
           return state.scrollPosition.isAtTop === action.scrollPosition.isAtTop &&
             state.scrollPosition.isAtEnd === action.scrollPosition.isAtEnd
             ? state
-            : { ...state, scrollPosition: action.scrollPosition };
+            : {
+                ...state,
+                scrollPosition: action.scrollPosition,
+                unreadEventCount: action.scrollPosition.isAtEnd ? 0 : state.unreadEventCount,
+              };
       }
     },
     {
-      isFollowingEnd: true,
       scrollPosition: { isAtTop: true, isAtEnd: true },
       unreadEventCount: 0,
     },
@@ -380,17 +378,15 @@ function EventRows({
     // If this grows older-history prepends later, switch this to a persisted row id.
     getItemKey: (index) => index,
     anchorTo: "end",
-    followOnAppend: "smooth",
+    followOnAppend: true,
     scrollEndThreshold: 80,
-    overscan: 8,
+    overscan: 6,
     onChange(instance) {
       const nextScrollPosition = {
         isAtTop: (instance.scrollOffset ?? 0) <= 4,
         isAtEnd: instance.isAtEnd(),
       };
-      if (nextScrollPosition.isAtEnd) {
-        dispatchScrollState({ type: "follow-end" });
-      }
+      if (nextScrollPosition.isAtEnd) userHasMovedAwayFromEnd.current = false;
       dispatchScrollState({ type: "set-scroll-position", scrollPosition: nextScrollPosition });
     },
   });
@@ -400,28 +396,31 @@ function EventRows({
     const appendedEventCount = Math.max(0, eventCount - previousEventCount.current);
     previousEventCount.current = eventCount;
 
-    if (!scrolledToInitialEnd.current) {
+    if (!settledInitialEndScroll.current) {
       if (eventCount === 0) return;
-      scrolledToInitialEnd.current = true;
       virtualizer.scrollToEnd();
       dispatchScrollState({ type: "clear-unread" });
+      if (virtualizer.isAtEnd()) {
+        settledInitialEndScroll.current = true;
+      }
       return;
     }
 
     if (appendedEventCount === 0) return;
 
-    // Let `followOnAppend` perform the pinned smooth scroll. This state only
-    // tracks unread events for the jump affordance when the user is reading history.
-    if (scrollState.isFollowingEnd || scrollState.scrollPosition.isAtEnd) {
-      dispatchScrollState({ type: "clear-unread" });
-    } else {
+    if (userHasMovedAwayFromEnd.current && !scrollState.scrollPosition.isAtEnd) {
       dispatchScrollState({ type: "add-unread", count: appendedEventCount });
+    } else {
+      dispatchScrollState({ type: "clear-unread" });
     }
-  }, [eventCount, scrollState.isFollowingEnd, scrollState.scrollPosition.isAtEnd, virtualizer]);
+  }, [eventCount, scrollState.scrollPosition.isAtEnd, virtualizer]);
 
   const showBottomFade = eventCount > 0 && !scrollState.scrollPosition.isAtEnd;
-  const showScrollToBottom =
-    eventCount > 0 && !scrollState.isFollowingEnd && !scrollState.scrollPosition.isAtEnd;
+  const showScrollToBottom = eventCount > 0 && !scrollState.scrollPosition.isAtEnd;
+
+  function stopFollowingEnd() {
+    userHasMovedAwayFromEnd.current = true;
+  }
 
   return (
     <div className="stream-page__feed">
@@ -433,14 +432,14 @@ function EventRows({
             : "stream-page__stream"
         }
         ref={parentRef}
-        onTouchStart={() => dispatchScrollState({ type: "stop-following-end" })}
+        onTouchStart={stopFollowingEnd}
         onPointerDown={(event) => {
           if (event.target === event.currentTarget) {
-            dispatchScrollState({ type: "stop-following-end" });
+            stopFollowingEnd();
           }
         }}
         onWheel={(event) => {
-          if (event.deltaY < 0) dispatchScrollState({ type: "stop-following-end" });
+          if (event.deltaY < 0) stopFollowingEnd();
         }}
       >
         {eventCount === 0 ? (
@@ -465,7 +464,7 @@ function EventRows({
                   className="stream-page__scroll-button"
                   type="button"
                   onClick={() => {
-                    dispatchScrollState({ type: "stop-following-end" });
+                    stopFollowingEnd();
                     virtualizer.scrollToIndex(0, { align: "start" });
                   }}
                 >
@@ -514,7 +513,8 @@ function EventRows({
                   }
                   type="button"
                   onClick={() => {
-                    dispatchScrollState({ type: "follow-end" });
+                    userHasMovedAwayFromEnd.current = false;
+                    dispatchScrollState({ type: "clear-unread" });
                     virtualizer.scrollToEnd();
                   }}
                 >
@@ -585,49 +585,40 @@ function EventRowWindow({
     rowsByVirtualizerIndex.delete(oldest);
   }
 
-  const firstVirtualItem = virtualItems[0];
-  if (firstVirtualItem === undefined) return null;
+  return virtualItems.map((virtualItem) => {
+    const event = rowsByVirtualizerIndex.get(virtualItem.index);
+    const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
 
-  return (
-    <div
-      className="stream-page__virtual-window"
-      style={{ transform: `translateY(${firstVirtualItem.start}px)` }}
-    >
-      {virtualItems.map((virtualItem) => {
-        const event = rowsByVirtualizerIndex.get(virtualItem.index);
-        const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
-
-        return (
-          <div
-            className="stream-page__virtual-row"
-            data-index={virtualItem.index}
-            key={virtualItem.key}
-            ref={measureElement}
-          >
-            {event === undefined ? (
-              <article className="stream-page__event-row stream-page__event-row--pending" />
-            ) : (
-              <article className="stream-page__event-row">
-                <button
-                  aria-expanded={isExpanded}
-                  className="stream-page__event-meta"
-                  type="button"
-                  onClick={() => onToggleOffset(event.offset)}
-                >
-                  <span>{event.offset}</span>
-                  <span>{event.type}</span>
-                  <time dateTime={event.created_at}>{event.created_at}</time>
-                </button>
-                {isExpanded ? (
-                  <pre className="stream-page__event-json">{event.raw_json}</pre>
-                ) : null}
-              </article>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
+    return (
+      <div
+        className="stream-page__virtual-row"
+        data-index={virtualItem.index}
+        key={virtualItem.key}
+        ref={measureElement}
+        style={{ transform: `translateY(${virtualItem.start}px)` }}
+      >
+        {event === undefined ? (
+          <article className="stream-page__event-row stream-page__event-row--pending" />
+        ) : (
+          <article className="stream-page__event-row">
+            <button
+              aria-expanded={isExpanded}
+              className="stream-page__event-meta"
+              type="button"
+              onClick={() => onToggleOffset(event.offset)}
+            >
+              <span>{event.offset}</span>
+              <span>{event.type}</span>
+              <time dateTime={event.created_at}>{event.created_at}</time>
+            </button>
+            {isExpanded ? (
+              <pre className="stream-page__event-json">{event.raw_json}</pre>
+            ) : null}
+          </article>
+        )}
+      </div>
+    );
+  });
 }
 
 function StreamSidebar({
@@ -872,7 +863,7 @@ function InsertEventsTool({
       }
     },
     {
-      insertEventCount: "10",
+      insertEventCount: "1000",
       insertBatchSize: "100",
       periodSeconds: "5",
       appendResponseMode: "await",

@@ -382,6 +382,15 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     };
   }
 
+  /**
+   * Wipes this stream's durable storage and aborts the current incarnation.
+   * The next request boots a fresh stream (new `created` + `woken` events).
+   */
+  reset(): void {
+    void this.ctx.storage.deleteAll();
+    this.kill();
+  }
+
   /** Kills the current Durable Object incarnation so experiments can observe restart behavior. */
   kill(): void {
     this.ctx.abort("kill requested");

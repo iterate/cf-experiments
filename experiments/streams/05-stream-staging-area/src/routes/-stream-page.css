@@ -300,15 +300,11 @@ body {
   width: 100%;
 }
 
-.stream-page__virtual-window {
+.stream-page__virtual-row {
   left: 0;
+  padding-bottom: 8px;
   position: absolute;
   top: 0;
-  width: 100%;
-}
-
-.stream-page__virtual-row {
-  padding-bottom: 8px;
   width: 100%;
 }
 
