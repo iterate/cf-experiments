@@ -6,7 +6,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { ClientOnly, Link } from "@tanstack/react-router";
+import { ClientOnly, useNavigate } from "@tanstack/react-router";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import {
   createStreamBrowserStore,
@@ -58,7 +58,11 @@ function HydratedStreamPage({ streamPath }: { streamPath: string }) {
 function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
   return (
     <main className="stream-page">
-      <StreamTopBar streamPath={streamPath} />
+      <StreamTopBar
+        sidebarOpen={false}
+        streamPath={streamPath}
+        onSidebarOpenChange={() => {}}
+      />
       <div className="stream-page__hydrate">
         <div className="stream-page__spinner" aria-hidden="true" />
         <span>SSR done, hydrating client</span>
@@ -126,11 +130,17 @@ function StreamPageLayout({
   databaseStatus: "pending" | "ok" | "error";
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
     <main className="stream-page">
-      <StreamTopBar key={`top:${streamPath}`} streamPath={streamPath} />
-      <div className="stream-page__body">
+      <StreamTopBar
+        key={`top:${streamPath}`}
+        sidebarOpen={sidebarOpen}
+        streamPath={streamPath}
+        onSidebarOpenChange={setSidebarOpen}
+      />
+      {sidebarOpen ? (
         <StreamSidebar
           eventCount={eventCount}
           key={`sidebar:${streamPath}`}
@@ -141,6 +151,8 @@ function StreamPageLayout({
           streamPath={streamPath}
           onSqliteWriteModeChange={onSqliteWriteModeChange}
         />
+      ) : null}
+      <div className="stream-page__body">
         <div className="stream-page__main">
           {!databaseReady ? (
             <StreamLoadingPanel
@@ -156,9 +168,10 @@ function StreamPageLayout({
               key={`events:${streamPath}:${snapshot.clearVersion}`}
               snapshot={snapshot}
               streamDatabase={streamDatabase}
+              streamPath={streamPath}
+              streamStore={streamStore}
             />
           )}
-          <StreamComposer key={`composer:${streamPath}`} streamStore={streamStore} />
         </div>
       </div>
     </main>
@@ -179,7 +192,16 @@ function StreamLoadingPanel({ message }: { message: string }) {
   );
 }
 
-function StreamTopBar({ streamPath }: { streamPath: string }) {
+function StreamTopBar({
+  streamPath,
+  sidebarOpen,
+  onSidebarOpenChange,
+}: {
+  streamPath: string;
+  sidebarOpen: boolean;
+  onSidebarOpenChange(open: boolean): void;
+}) {
+  const navigate = useNavigate();
   const [editedPath, setEditedPath] = useState<string | undefined>();
   const draftPath = editedPath ?? streamPath;
   const trimmedDraftPath = draftPath.trim();
@@ -189,35 +211,49 @@ function StreamTopBar({ streamPath }: { streamPath: string }) {
       : trimmedDraftPath.startsWith("/")
         ? trimmedDraftPath
         : `/${trimmedDraftPath}`;
-  const showGoToStream = normalizedDraftPath !== streamPath;
+  const pathChanged = normalizedDraftPath !== streamPath;
+
+  function goToDraftPath() {
+    if (!pathChanged) return;
+    if (normalizedDraftPath === "/") {
+      void navigate({ to: "/streams" });
+      return;
+    }
+    void navigate({
+      to: "/streams/$",
+      params: { _splat: normalizedDraftPath.slice(1) },
+    });
+  }
 
   return (
     <header className="stream-page__top-bar">
       <div className="stream-page__controls">
-        <label className="stream-page__label" htmlFor="stream-path">
-          Stream
-        </label>
         <input
+          aria-label="Stream path"
           className="stream-page__input"
           id="stream-path"
           value={draftPath}
           onChange={(event) => setEditedPath(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            goToDraftPath();
+          }}
         />
-        {showGoToStream ? (
-          normalizedDraftPath === "/" ? (
-            <Link className="stream-page__button" to="/streams">
-              Go to stream
-            </Link>
-          ) : (
-            <Link
-              className="stream-page__button"
-              to="/streams/$"
-              params={{ _splat: normalizedDraftPath.slice(1) }}
-            >
-              Go to stream
-            </Link>
-          )
-        ) : null}
+        <button
+          aria-controls="stream-sidebar"
+          aria-expanded={sidebarOpen}
+          aria-label={sidebarOpen ? "Hide tools" : "Show tools"}
+          className={
+            sidebarOpen
+              ? "stream-page__sidebar-toggle stream-page__sidebar-toggle--open"
+              : "stream-page__sidebar-toggle"
+          }
+          type="button"
+          onClick={() => onSidebarOpenChange(!sidebarOpen)}
+        >
+          <span aria-hidden>▼</span>
+        </button>
       </div>
     </header>
   );
@@ -227,10 +263,14 @@ function EventRows({
   streamDatabase,
   eventCount,
   snapshot,
+  streamPath,
+  streamStore,
 }: {
   streamDatabase: StreamBrowserDatabase;
   eventCount: number;
   snapshot: StreamBrowserSnapshot;
+  streamPath: string;
+  streamStore: StreamBrowserStore;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const scrolledToInitialEnd = useRef(false);
@@ -275,10 +315,12 @@ function EventRows({
     count: eventCount,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 40,
+    // This stream is append-only, so the virtual index is a stable item key.
+    // If this grows older-history prepends later, switch this to a persisted row id.
     getItemKey: (index) => index,
     anchorTo: "end",
-    followOnAppend: true,
-    scrollEndThreshold: 4,
+    followOnAppend: "smooth",
+    scrollEndThreshold: 80,
     overscan: 8,
     onChange(instance) {
       const nextScrollPosition = {
@@ -305,109 +347,132 @@ function EventRows({
       return;
     }
 
-    // TanStack Virtual owns the end measurement. This state is just the user's
-    // intent: keep following the live end until they deliberately move away.
-    if (scrollState.isFollowingEnd && eventCount > 0) {
-      virtualizer.scrollToEnd();
+    if (appendedEventCount === 0) return;
+
+    // Let `followOnAppend` perform the pinned smooth scroll. This state only
+    // tracks unread events for the jump affordance when the user is reading history.
+    if (scrollState.isFollowingEnd || scrollState.scrollPosition.isAtEnd) {
       dispatchScrollState({ type: "clear-unread" });
-    } else if (appendedEventCount > 0 && !scrollState.scrollPosition.isAtEnd) {
+    } else {
       dispatchScrollState({ type: "add-unread", count: appendedEventCount });
     }
   }, [eventCount, scrollState.isFollowingEnd, scrollState.scrollPosition.isAtEnd, virtualizer]);
 
+  const showBottomFade = eventCount > 0 && !scrollState.scrollPosition.isAtEnd;
+  const showScrollToBottom =
+    eventCount > 0 && !scrollState.isFollowingEnd && !scrollState.scrollPosition.isAtEnd;
+
   return (
-    <section
-      className="stream-page__stream"
-      aria-label="Stream events"
-      ref={parentRef}
-      onTouchStart={() => dispatchScrollState({ type: "stop-following-end" })}
-      onPointerDown={(event) => {
-        if (event.target === event.currentTarget) {
-          dispatchScrollState({ type: "stop-following-end" });
+    <div className="stream-page__feed">
+      <section
+        aria-label="Stream events"
+        className={
+          showBottomFade
+            ? "stream-page__stream stream-page__stream--fade-bottom"
+            : "stream-page__stream"
         }
-      }}
-      onWheel={(event) => {
-        if (event.deltaY < 0) dispatchScrollState({ type: "stop-following-end" });
-      }}
-    >
-      {eventCount === 0 ? (
-        <div className="stream-page__stream-placeholder">
-          {snapshot.connectionStatus === "subscribed" ? null : (
-            <div className="stream-page__spinner" aria-hidden="true" />
-          )}
-          <span>
-            {snapshot.connectionError === undefined
-              ? snapshot.connectionStatus === "subscribed"
-                ? "SQLite is ready; no events are stored locally yet"
-                : `SQLite is ready; stream connection is ${snapshot.connectionStatus}`
-              : `SQLite is ready; stream connection is ${snapshot.connectionStatus}: ${snapshot.connectionError}`}
-          </span>
-        </div>
-      ) : (
-        <>
-          {!scrollState.scrollPosition.isAtTop ? (
-            <div className="stream-page__scroll-affordance stream-page__scroll-affordance--top">
-              <button
-                aria-label="Scroll to top"
-                className="stream-page__scroll-button"
-                type="button"
-                onClick={() => {
-                  dispatchScrollState({ type: "stop-following-end" });
-                  virtualizer.scrollToIndex(0, { align: "start" });
-                }}
-              >
-                ↑
-              </button>
-            </div>
-          ) : null}
-          <div
-            className="stream-page__virtual-content"
-            style={{ height: virtualizer.getTotalSize() }}
-          >
-            <EventRowWindow
-              eventCount={eventCount}
-              expandedOffsets={expandedOffsets}
-              streamDatabase={streamDatabase}
-              virtualItems={virtualItems}
-              measureElement={virtualizer.measureElement}
-              onToggleOffset={(offset) => {
-                setExpandedOffsets((current) => {
-                  const next = new Set(current);
-                  if (next.has(offset)) {
-                    next.delete(offset);
-                  } else {
-                    next.add(offset);
-                  }
-                  return next;
-                });
-              }}
-            />
+        ref={parentRef}
+        onTouchStart={() => dispatchScrollState({ type: "stop-following-end" })}
+        onPointerDown={(event) => {
+          if (event.target === event.currentTarget) {
+            dispatchScrollState({ type: "stop-following-end" });
+          }
+        }}
+        onWheel={(event) => {
+          if (event.deltaY < 0) dispatchScrollState({ type: "stop-following-end" });
+        }}
+      >
+        {eventCount === 0 ? (
+          <div className="stream-page__stream-placeholder">
+            {snapshot.connectionStatus === "subscribed" ? null : (
+              <div className="stream-page__spinner" aria-hidden="true" />
+            )}
+            <span>
+              {snapshot.connectionError === undefined
+                ? snapshot.connectionStatus === "subscribed"
+                  ? "SQLite is ready; no events are stored locally yet"
+                  : `SQLite is ready; stream connection is ${snapshot.connectionStatus}`
+                : `SQLite is ready; stream connection is ${snapshot.connectionStatus}: ${snapshot.connectionError}`}
+            </span>
           </div>
-          {!scrollState.isFollowingEnd && !scrollState.scrollPosition.isAtEnd ? (
-            <div className="stream-page__scroll-affordance stream-page__scroll-affordance--bottom">
-              <div className="stream-page__bottom-affordance">
-                {scrollState.unreadEventCount > 0 ? (
-                  <output className="stream-page__unread-badge" aria-live="polite">
-                    {scrollState.unreadEventCount} new
-                  </output>
-                ) : null}
+        ) : (
+          <>
+            {!scrollState.scrollPosition.isAtTop ? (
+              <div className="stream-page__scroll-affordance stream-page__scroll-affordance--top">
                 <button
-                  aria-label="Scroll to bottom"
+                  aria-label="Scroll to top"
                   className="stream-page__scroll-button"
                   type="button"
                   onClick={() => {
-                    dispatchScrollState({ type: "follow-end" });
-                    virtualizer.scrollToEnd();
+                    dispatchScrollState({ type: "stop-following-end" });
+                    virtualizer.scrollToIndex(0, { align: "start", behavior: "smooth" });
                   }}
                 >
-                  ↓
+                  ↑
                 </button>
               </div>
+            ) : null}
+            <div
+              className="stream-page__virtual-content"
+              style={{ height: virtualizer.getTotalSize() }}
+            >
+              <EventRowWindow
+                eventCount={eventCount}
+                expandedOffsets={expandedOffsets}
+                streamDatabase={streamDatabase}
+                virtualItems={virtualItems}
+                measureElement={virtualizer.measureElement}
+                onToggleOffset={(offset) => {
+                  setExpandedOffsets((current) => {
+                    const next = new Set(current);
+                    if (next.has(offset)) {
+                      next.delete(offset);
+                    } else {
+                      next.add(offset);
+                    }
+                    return next;
+                  });
+                }}
+              />
             </div>
-          ) : null}
-        </>
-      )}
-    </section>
+          </>
+        )}
+      </section>
+      <div className="stream-page__feed-footer">
+        {showBottomFade ? (
+          <div className="stream-page__feed-fade">
+            <div className="stream-page__feed-fade-mask" aria-hidden />
+            {showScrollToBottom ? (
+              <div className="stream-page__scroll-affordance stream-page__scroll-affordance--in-fade">
+                <button
+                  aria-label="Scroll to bottom"
+                  className={
+                    scrollState.unreadEventCount > 0
+                      ? "stream-page__scroll-button stream-page__scroll-button--has-unread"
+                      : "stream-page__scroll-button"
+                  }
+                  type="button"
+                  onClick={() => {
+                    dispatchScrollState({ type: "follow-end" });
+                    virtualizer.scrollToEnd({ behavior: "smooth" });
+                  }}
+                >
+                  <span className="stream-page__scroll-button-arrow" aria-hidden>
+                    ↓
+                  </span>
+                  {scrollState.unreadEventCount > 0 ? (
+                    <span className="stream-page__scroll-button-unread" aria-live="polite">
+                      {scrollState.unreadEventCount} new
+                    </span>
+                  ) : null}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+        <StreamComposer key={`composer:${streamPath}`} streamStore={streamStore} />
+      </div>
+    </div>
   );
 }
 
@@ -459,40 +524,49 @@ function EventRowWindow({
     rowsByVirtualizerIndex.delete(oldest);
   }
 
-  return virtualItems.map((virtualItem) => {
-    const event = rowsByVirtualizerIndex.get(virtualItem.index);
-    const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
+  const firstVirtualItem = virtualItems[0];
+  if (firstVirtualItem === undefined) return null;
 
-    return (
-      <div
-        className="stream-page__virtual-row"
-        data-index={virtualItem.index}
-        key={virtualItem.key}
-        ref={measureElement}
-        style={{ transform: `translateY(${virtualItem.start}px)` }}
-      >
-        {event === undefined ? (
-          <article className="stream-page__event-row stream-page__event-row--pending" />
-        ) : (
-          <article className="stream-page__event-row">
-            <button
-              aria-expanded={isExpanded}
-              className="stream-page__event-meta"
-              type="button"
-              onClick={() => onToggleOffset(event.offset)}
-            >
-              <span>{event.offset}</span>
-              <span>{event.type}</span>
-              <time dateTime={event.created_at}>{event.created_at}</time>
-            </button>
-            {isExpanded ? (
-              <pre className="stream-page__event-json">{event.raw_json}</pre>
-            ) : null}
-          </article>
-        )}
-      </div>
-    );
-  });
+  return (
+    <div
+      className="stream-page__virtual-window"
+      style={{ transform: `translateY(${firstVirtualItem.start}px)` }}
+    >
+      {virtualItems.map((virtualItem) => {
+        const event = rowsByVirtualizerIndex.get(virtualItem.index);
+        const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
+
+        return (
+          <div
+            className="stream-page__virtual-row"
+            data-index={virtualItem.index}
+            key={virtualItem.key}
+            ref={measureElement}
+          >
+            {event === undefined ? (
+              <article className="stream-page__event-row stream-page__event-row--pending" />
+            ) : (
+              <article className="stream-page__event-row">
+                <button
+                  aria-expanded={isExpanded}
+                  className="stream-page__event-meta"
+                  type="button"
+                  onClick={() => onToggleOffset(event.offset)}
+                >
+                  <span>{event.offset}</span>
+                  <span>{event.type}</span>
+                  <time dateTime={event.created_at}>{event.created_at}</time>
+                </button>
+                {isExpanded ? (
+                  <pre className="stream-page__event-json">{event.raw_json}</pre>
+                ) : null}
+              </article>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function StreamSidebar({
@@ -513,7 +587,7 @@ function StreamSidebar({
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
   return (
-    <aside className="stream-page__sidebar">
+    <aside className="stream-page__sidebar" id="stream-sidebar">
       <SubscriptionTool
         eventCount={eventCount}
         snapshot={snapshot}
