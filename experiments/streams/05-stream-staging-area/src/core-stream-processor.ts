@@ -37,6 +37,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     path: z.string().trim().min(1),
     createdAt: z.string(),
     incarnationId: z.string().trim().min(1),
+    metadata: z.record(z.string(), z.unknown()),
     config: z.object({
       simulatedStorageSyncDelayMs: z.number().int().min(0).default(0).nullable(),
     }),
@@ -93,6 +94,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     path: "uninitialized",
     createdAt: "uninitialized",
     incarnationId: "uninitialized",
+    metadata: {},
     config: {
       simulatedStorageSyncDelayMs: 0,
     },
@@ -128,6 +130,12 @@ export const coreStreamProcessorContract = defineProcessorContract({
         config: z.object({
           simulatedStorageSyncDelayMs: z.number().int().min(0),
         }),
+      }),
+    },
+    "events.iterate.com/stream/metadata-updated": {
+      description: "Replaces stream metadata kept in core reduced state.",
+      payloadSchema: z.object({
+        metadata: z.record(z.string(), z.unknown()),
       }),
     },
     "events.iterate.com/stream/child-stream-created": {
@@ -199,6 +207,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "events.iterate.com/stream/created",
     "events.iterate.com/stream/woken",
     "events.iterate.com/stream/configured",
+    "events.iterate.com/stream/metadata-updated",
     "events.iterate.com/stream/child-stream-created",
     "events.iterate.com/stream/subscription-configured",
     "events.iterate.com/stream/processor-registered",
@@ -276,6 +285,13 @@ export const coreStreamProcessorContract = defineProcessorContract({
             ...next.config,
             ...event.payload.config,
           },
+        };
+
+      case "events.iterate.com/stream/metadata-updated":
+        next = spendCircuitBreakerToken({ state, event, next });
+        return {
+          ...next,
+          metadata: event.payload.metadata,
         };
 
       case "events.iterate.com/stream/child-stream-created": {
@@ -381,6 +397,17 @@ export function buildStreamErrorOccurredEvent(args: {
       message: args.message,
       ...(args.error === undefined ? {} : { error: args.error }),
     },
+  } as const;
+}
+
+export function buildStreamMetadataUpdatedEvent(args: {
+  metadata: Record<string, unknown>;
+  idempotencyKey?: string;
+}) {
+  return {
+    type: "events.iterate.com/stream/metadata-updated",
+    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+    payload: { metadata: args.metadata },
   } as const;
 }
 

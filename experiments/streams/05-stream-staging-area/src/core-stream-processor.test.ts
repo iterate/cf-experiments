@@ -4,6 +4,7 @@ import {
   buildChildStreamCreatedEvent,
   buildProcessorRegisteredEvent,
   buildStreamErrorOccurredEvent,
+  buildStreamMetadataUpdatedEvent,
   buildStreamPausedEvent,
   buildStreamResumedEvent,
   coreStreamProcessorContract,
@@ -348,5 +349,32 @@ describe("core stream processor", () => {
 
     expect(state.childPaths).toEqual(["/a/b"]);
     expect(getAncestorStreamPaths("/a/b/c")).toEqual(["/", "/a", "/a/b"]);
+  });
+
+  it("keeps stream metadata from metadata-updated events", () => {
+    let state = coreStreamProcessorContract.stateSchema.parse(
+      coreStreamProcessorContract.initialState,
+    );
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 1,
+          createdAt: "2026-06-01T12:00:00.000Z",
+          ...buildStreamMetadataUpdatedEvent({
+            metadata: {
+              title: "Demo stream",
+              tags: ["demo", "stream"],
+            },
+          }),
+        },
+      }),
+    );
+
+    expect(state.metadata).toEqual({
+      title: "Demo stream",
+      tags: ["demo", "stream"],
+    });
   });
 });
