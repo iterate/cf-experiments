@@ -193,13 +193,25 @@ export function createStreamBrowserStore(args: {
     subscriptionKey: string;
   }) {
     // Host the projector on the shared runner; the runner IS the subscription sink.
-    // The subscription must NOT depend on the projector's storage health: resume
-    // from "start" (offset -1) and rely on INSERT OR IGNORE for idempotency, so a
-    // slow/unavailable local DB can never block receiving events from the stream.
+    // Resume from the local SQLite mirror's max offset (the events table is the durable
+    // cursor) so a reconnect replays ONLY new events — not the whole stream. Without this,
+    // every reconnect (e.g. after "kill stream") re-subscribes at offset -1 and the DO
+    // replays all N events before the next one arrives, a delay that grows with stream size.
+    // On any DB read failure we fall back to undefined → offset -1 (full replay), so a
+    // slow/unavailable local DB still can't block receiving events.
     const runner = createProcessorRunner({
       processor: sqliteProjector,
       deps: { db: streamDatabase },
-      storage: { load: () => undefined, save: () => {} },
+      storage: {
+        load: async () => {
+          try {
+            return { state: {}, offset: await streamDatabase.maxOffset() };
+          } catch {
+            return undefined;
+          }
+        },
+        save: () => {},
+      },
       stream: streamPortFromRpc(election.connection.rpc),
     });
     const sink = new ProcessorSink((batch) => {
