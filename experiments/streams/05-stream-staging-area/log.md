@@ -62,6 +62,65 @@ First-party sources:
 
 ## 2026-06-03
 
+### Simplified the browser stream mirror around raw SQLite queries
+
+Reworked the stream page/browser mirror after reviewing primary docs for React external
+stores, TanStack Virtual, SQLite JSON/JSONB, wa-sqlite OPFSCoopSyncVFS, and TanStack Start
+routing. The browser now has a component-owned stream runtime: each mounted stream view owns
+its capnweb client, Web Locks leadership election, wa-sqlite worker connection, and blunt
+SQLite-query invalidation. There is no global per-stream runtime singleton and no local
+browser processor layer.
+
+The local browser DB is now one raw-events table. It stores the payload once as SQLite JSONB
+(`raw_jsonb`), derives `offset`, `type`, `idempotency_key`, and `created_at` as generated
+columns, and records `inserted_at` when the browser first stores the row. `local_index` is
+the ordinary zero-based primary key for TanStack Virtual. Today `local_index = offset - 1`;
+SQLite rejects gaps, rejects conflicting duplicate offsets, and ignores identical replay so
+`inserted_at` is stable. The stream page intentionally shows the two key SQL reads in code:
+`SELECT COUNT(*) AS count FROM events` and the visible `local_index` range query.
+
+Added `/split-stream?left=...&right=...` with two compact stream views that use the same
+stream/composer components. Mounting the same stream twice in one tab verifies the same
+leadership-election path as multiple tabs: one runtime subscribes/writes and the other
+follows the shared OPFS mirror.
+
+Added Playwright browser tests with `WORKER_URL` support. Without `WORKER_URL`, Playwright
+starts local Miniflare via `pnpm dev --host 127.0.0.1`; with `WORKER_URL`, the same tests run
+against a deployed worker.
+
+Expanded the suite to cover:
+- append + browser mirror update;
+- split view of the same stream;
+- split view of two different streams;
+- split view disposal/handoff when one same-stream pane is replaced with another stream;
+- multi-tab realtime update and writer handoff after the leader tab closes;
+- a 1500-event stream with TanStack Virtual bounded DOM rows and top/bottom scrolling;
+- raw SQLite download into a temporary folder, queried with `sqlite3`;
+- kill/reconnect (`woken` event appended);
+- reset plus stale-local-mirror discard.
+
+The deployed reset test exposed a real production-only race: `reset()` originally fired
+`ctx.storage.deleteAll()` and immediately called `ctx.abort()`. Miniflare behaved as if the
+delete completed; deployed Cloudflare preserved the old rows and appended offset 4. Fix:
+`await this.ctx.storage.deleteAll(); await this.ctx.storage.sync(); this.kill();`. This
+matches Cloudflare's storage docs: `deleteAll()` removes the SQLite-backed DO database, and
+`sync()` resolves once previous writes have been persisted before external effects proceed.
+
+Verification:
+- `pnpm --filter @cf-experiments/05-stream-staging-area typecheck`
+- `pnpm --filter @cf-experiments/05-stream-staging-area test`
+- `pnpm --filter @cf-experiments/05-stream-staging-area test:e2e`
+- `pnpm --filter @cf-experiments/05-stream-staging-area build`
+- `WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/05-stream-staging-area test:e2e` — 9/9 passed after deploy version `13ec62f6-71d9-4695-81e2-1017f7515f80`.
+- `pnpm --filter @cf-experiments/05-stream-staging-area exec -- npx react-doctor@latest --verbose --diff` — 98/100 ("Great"). Remaining warnings are an editable path draft initialized from route props and a false-positive `navigate()`-in-render warning for an event handler.
+
+First-party sources:
+- React `useSyncExternalStore`: <https://react.dev/reference/react/useSyncExternalStore>
+- TanStack Virtual: <https://tanstack.com/virtual/latest/docs/api/virtualizer>
+- Playwright `webServer` / `baseURL`: <https://playwright.dev/docs/test-webserver>
+- SQLite JSONB: <https://www.sqlite.org/json1.html>
+- Cloudflare Durable Object storage `deleteAll()` / `sync()`: <https://developers.cloudflare.com/durable-objects/api/storage-api/>
+
 ### Two more browser non-linearities (both size-dependent → now constant)
 
 1. **"kill stream" → slow `woken` on large streams.** On reconnect the browser re-subscribed

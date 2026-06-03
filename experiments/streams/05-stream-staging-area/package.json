@@ -8,6 +8,7 @@
     "preview": "vite preview",
     "deploy": "pnpm build && wrangler deploy",
     "test": "vitest run",
+    "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260601.1",
+    "@playwright/test": "^1.60.0",
     "@types/node": "^24.12.4",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",

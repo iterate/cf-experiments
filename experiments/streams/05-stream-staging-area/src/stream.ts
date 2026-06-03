@@ -348,17 +348,19 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    * present: the subscriber immediately receives a replay batch `[1, 2, 3]`, then one
    * batch per subsequent append (`[4]`, `[5]`, ...). Passing `afterOffset: 3` skips the
    * replay and starts at offset 4. Re-subscribing with the same key replaces the old
-   * connection. Call the returned `unsubscribe()` to stop delivery without closing the
-   * underlying capnweb session.
+   * connection. Omit `subscriptionKey` for an anonymous subscription; the stream assigns
+   * a random key and returns it. Call the returned `unsubscribe()` to stop delivery
+   * without closing the underlying capnweb session.
    */
   subscribe(args: {
-    subscriptionKey: string;
+    subscriptionKey?: string;
     sink: RpcStub<SubscriptionSink>;
     afterOffset?: number;
-  }): { unsubscribe(): void } {
+  }): { subscriptionKey: string; unsubscribe(): void } {
     // Type-filtered subscriptions belong here later. For now every subscription
     // observes the stream's full ordered event log after its offset boundary.
-    return this.#openConnection({ ...args, direction: "inbound" });
+    const subscriptionKey = args.subscriptionKey?.trim() || crypto.randomUUID();
+    return this.#openConnection({ ...args, subscriptionKey, direction: "inbound" });
   }
 
   runtimeState() {
@@ -386,8 +388,9 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    * Wipes this stream's durable storage and aborts the current incarnation.
    * The next request boots a fresh stream (new `created` + `woken` events).
    */
-  reset(): void {
-    void this.ctx.storage.deleteAll();
+  async reset(): Promise<void> {
+    await this.ctx.storage.deleteAll();
+    await this.ctx.storage.sync();
     this.kill();
   }
 
@@ -424,7 +427,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     sink: RpcStub<SubscriptionSink>;
     afterOffset?: number;
     onClose?: () => void;
-  }): { unsubscribe(): void } {
+  }): { subscriptionKey: string; unsubscribe(): void } {
     const subscriptionKey = args.subscriptionKey.trim();
     if (subscriptionKey.length === 0) throw new Error("subscriptionKey must not be blank.");
 
@@ -492,7 +495,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     sink.onRpcBroken(() => connection.close());
     connection.wake();
 
-    return { unsubscribe: () => connection.close() };
+    return { subscriptionKey, unsubscribe: () => connection.close() };
   }
 
   /** Fire-and-forget outbound reconciliation; never blocks the append path. */

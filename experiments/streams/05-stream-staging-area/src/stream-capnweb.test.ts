@@ -235,6 +235,52 @@ describe("stream capnweb protocol", () => {
     ]);
   });
 
+  e2eIt("assigns a subscription key when subscribe omits one", async () => {
+    const path = `stream-capnweb-anon-sub-${crypto.randomUUID()}`;
+    await using stream = await connectStream(path);
+
+    const sinkA = new TestSubscriptionSink();
+    const sinkB = new TestSubscriptionSink();
+    const first = await stream.rpc.subscribe({ sink: sinkA });
+    const second = await stream.rpc.subscribe({ sink: sinkB });
+
+    expect(first.subscriptionKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(second.subscriptionKey).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+    expect(first.subscriptionKey).not.toBe(second.subscriptionKey);
+
+    const runtime = await stream.rpc.runtimeState();
+    expect(runtime.runtime.connections[first.subscriptionKey]).toMatchObject({
+      direction: "inbound",
+    });
+    expect(runtime.runtime.connections[second.subscriptionKey]).toMatchObject({
+      direction: "inbound",
+    });
+
+    const appended = await stream.rpc.append({
+      event: {
+        type: "test.stream.capnweb-anon-sub",
+        payload: { path },
+      },
+    });
+    await waitFor(() => sinkA.batches.length === 1 && sinkB.batches.length === 1, 1_000);
+    expect(sinkA.batches.at(-1)).toEqual([appended]);
+    expect(sinkB.batches.at(-1)).toEqual([appended]);
+
+    first.unsubscribe();
+    await stream.rpc.append({
+      event: {
+        type: "test.stream.capnweb-anon-sub-after-unsub",
+        payload: { path },
+      },
+    });
+    await waitFor(() => sinkB.batches.length === 2, 1_000);
+    expect(sinkA.batches.length).toBe(1);
+  });
+
   e2eIt("runs a built-in outbound processor from subscription-configured", async () => {
     const path = `stream-capnweb-processor-${crypto.randomUUID()}`;
     const subscriptionKey = "echo";

@@ -9,10 +9,16 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as SplitStreamRouteImport } from './routes/split-stream'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as StreamsIndexRouteImport } from './routes/streams/index'
 import { Route as StreamsSplatRouteImport } from './routes/streams.$'
 
+const SplitStreamRoute = SplitStreamRouteImport.update({
+  id: '/split-stream',
+  path: '/split-stream',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -31,36 +37,47 @@ const StreamsSplatRoute = StreamsSplatRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/split-stream': typeof SplitStreamRoute
   '/streams/$': typeof StreamsSplatRoute
   '/streams/': typeof StreamsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/split-stream': typeof SplitStreamRoute
   '/streams/$': typeof StreamsSplatRoute
   '/streams': typeof StreamsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/split-stream': typeof SplitStreamRoute
   '/streams/$': typeof StreamsSplatRoute
   '/streams/': typeof StreamsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/streams/$' | '/streams/'
+  fullPaths: '/' | '/split-stream' | '/streams/$' | '/streams/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/streams/$' | '/streams'
-  id: '__root__' | '/' | '/streams/$' | '/streams/'
+  to: '/' | '/split-stream' | '/streams/$' | '/streams'
+  id: '__root__' | '/' | '/split-stream' | '/streams/$' | '/streams/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  SplitStreamRoute: typeof SplitStreamRoute
   StreamsSplatRoute: typeof StreamsSplatRoute
   StreamsIndexRoute: typeof StreamsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/split-stream': {
+      id: '/split-stream'
+      path: '/split-stream'
+      fullPath: '/split-stream'
+      preLoaderRoute: typeof SplitStreamRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -87,6 +104,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  SplitStreamRoute: SplitStreamRoute,
   StreamsSplatRoute: StreamsSplatRoute,
   StreamsIndexRoute: StreamsIndexRoute,
 }

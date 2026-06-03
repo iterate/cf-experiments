@@ -4,12 +4,13 @@ import type { StreamRpc, SubscriptionSink } from "../stream-types.js";
 
 export async function withStreamSubscription(args: {
   connection: { rpc: RpcStub<StreamRpc> };
-  subscriptionKey: string;
+  subscriptionKey?: string;
   afterOffset?: number;
   processEventBatch?: (events: StreamEvent[]) => void;
 }): Promise<
   AsyncDisposable &
     AsyncIterable<StreamEvent> & {
+      subscriptionKey: string;
       waitForEvent<T extends StreamEvent>(args: {
         predicate: (event: StreamEvent) => event is T;
         timeoutMs?: number;
@@ -23,7 +24,7 @@ export async function withStreamSubscription(args: {
     reject(error: unknown): void;
     timeout: ReturnType<typeof setTimeout>;
   }>();
-  let handle: { unsubscribe(): void } | undefined;
+  let handle: { subscriptionKey: string; unsubscribe(): void } | undefined;
   const sink = new ClientSubscriptionSink((events) => {
     try {
       args.processEventBatch?.(events);
@@ -53,6 +54,7 @@ export async function withStreamSubscription(args: {
   });
 
   const subscription = {
+    subscriptionKey: handle.subscriptionKey,
     waitForEvent<T extends StreamEvent>(waitArgs: {
       predicate: (event: StreamEvent) => event is T;
       timeoutMs?: number;

@@ -14,12 +14,10 @@ import {
   type StreamBrowserStore,
 } from "../client-libraries/stream-browser-store.js";
 import {
-  getStreamBrowserDatabase,
   type StreamBrowserDatabase,
-  type StreamDatabaseWriteMode,
   type StreamEventRow,
 } from "../client-libraries/stream-browser-db.js";
-import { useStreamEventCount, useStreamQuery } from "../client-libraries/use-stream-query.js";
+import { useStreamQuery } from "../client-libraries/use-stream-query.js";
 import "./-stream-page.css";
 
 export function StreamPage({ streamPath }: { streamPath: string }) {
@@ -30,74 +28,128 @@ export function StreamPage({ streamPath }: { streamPath: string }) {
   );
 }
 
+export function StreamCompactView({ streamPath }: { streamPath: string }) {
+  return (
+    <ClientOnly fallback={<StreamHydrationFallback streamPath={streamPath} />}>
+      <HydratedStreamCompactView streamPath={streamPath} />
+    </ClientOnly>
+  );
+}
+
 function HydratedStreamPage({ streamPath }: { streamPath: string }) {
-  const [sqliteWriteMode, setSqliteWriteMode] = useState<StreamDatabaseWriteMode>("batch");
+  const runtime = useStreamRuntime(streamPath);
+
+  return (
+    <StreamPageWithDatabase
+      snapshot={runtime.snapshot}
+      streamDatabase={runtime.streamDatabase}
+      streamStore={runtime.streamStore}
+      streamPath={streamPath}
+      databaseReady={runtime.countResult.status === "ok"}
+      databaseError={runtime.countResult.error}
+      databaseStatus={runtime.countResult.status}
+      eventCount={runtime.eventCount}
+    />
+  );
+}
+
+function HydratedStreamCompactView({ streamPath }: { streamPath: string }) {
+  const runtime = useStreamRuntime(streamPath);
+
+  return (
+    <section
+      className="stream-page__compact-view"
+      aria-label={`Stream ${streamPath}`}
+      data-stream-path={streamPath}
+    >
+      <div className="stream-page__compact-status">
+        <span className="stream-page__path-display">{streamPath}</span>
+        <output className="stream-page__state" data-testid="stream-status">{runtime.snapshot.connectionStatus}</output>
+        <output className="stream-page__state" data-testid="subscription-status">{runtime.snapshot.subscriptionStatus}</output>
+        <output className="stream-page__state" data-testid="event-count">{runtime.eventCount}</output>
+      </div>
+      {runtime.countResult.status !== "ok" ? (
+        <StreamLoadingPanel
+          message={
+            runtime.countResult.status === "error"
+              ? `sqlite DB error at ${runtime.streamDatabase.databasePath}: ${runtime.countResult.error?.message ?? "unknown error"}`
+              : `opening sqlite DB at ${runtime.streamDatabase.databasePath}`
+          }
+        />
+      ) : (
+        <EventRows
+          eventCount={runtime.eventCount}
+          key={`events:${streamPath}:${runtime.snapshot.clearVersion}`}
+          snapshot={runtime.snapshot}
+          streamDatabase={runtime.streamDatabase}
+          streamPath={streamPath}
+          streamStore={runtime.streamStore}
+        />
+      )}
+    </section>
+  );
+}
+
+function useStreamRuntime(streamPath: string) {
   const streamStore = useMemo(
-    () => createStreamBrowserStore({ sqliteWriteMode, streamPath }),
-    [sqliteWriteMode, streamPath],
+    () => createStreamBrowserStore({ streamPath }),
+    [streamPath],
   );
   const snapshot = useSyncExternalStore(
     streamStore.subscribe,
     streamStore.getSnapshot,
     streamStore.getServerSnapshot,
   );
-  const streamDatabase = useMemo(() => getStreamBrowserDatabase(streamPath), [streamPath]);
-
-  return (
-    <StreamPageWithDatabase
-      snapshot={snapshot}
-      sqliteWriteMode={sqliteWriteMode}
-      streamDatabase={streamDatabase}
-      streamStore={streamStore}
-      streamPath={streamPath}
-      onSqliteWriteModeChange={setSqliteWriteMode}
-    />
+  const streamDatabase = streamStore.streamDatabase;
+  const countResult = useStreamQuery(
+    streamDatabase,
+    `SELECT COUNT(*) AS count FROM events`,
   );
+  const eventCount = Number(countResult.data[0]?.count ?? 0);
+  return { countResult, eventCount, snapshot, streamDatabase, streamStore };
 }
 
 function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
   return (
-    <main className="stream-page">
+    <div className="stream-page__hydrate-frame">
       <div className="stream-page__hydrate">
         <div className="stream-page__spinner" aria-hidden="true" />
-        <span>SSR done, hydrating client</span>
+        <span>SSR done, hydrating client for {streamPath}</span>
       </div>
-    </main>
+    </div>
   );
 }
 
 function StreamPageWithDatabase({
   streamPath,
   snapshot,
-  sqliteWriteMode,
   streamDatabase,
   streamStore,
-  onSqliteWriteModeChange,
+  eventCount,
+  databaseReady,
+  databaseError,
+  databaseStatus,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
-  sqliteWriteMode: StreamDatabaseWriteMode;
   streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
-  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
+  eventCount: number;
+  databaseReady: boolean;
+  databaseError: Error | undefined;
+  databaseStatus: "pending" | "ok" | "error";
 }) {
-  // The live event count drives the virtualizer + tail-follow. It is special-cased in the
-  // db: advanced straight from the writer's change broadcast (no per-append SQL), and it
-  // doubles as the "db ready" signal.
-  const countResult = useStreamEventCount(streamDatabase);
 
   return (
     <StreamPageLayout
-      databaseReady={countResult.status === "ok"}
-      databaseError={countResult.error}
-      databaseStatus={countResult.status}
-      eventCount={countResult.count}
+      databaseReady={databaseReady}
+      databaseError={databaseError}
+      databaseStatus={databaseStatus}
+      eventCount={eventCount}
       snapshot={snapshot}
-      sqliteWriteMode={sqliteWriteMode}
       streamDatabase={streamDatabase}
       streamStore={streamStore}
       streamPath={streamPath}
-      onSqliteWriteModeChange={onSqliteWriteModeChange}
     />
   );
 }
@@ -105,25 +157,21 @@ function StreamPageWithDatabase({
 function StreamPageLayout({
   streamPath,
   snapshot,
-  sqliteWriteMode,
   streamDatabase,
   streamStore,
   eventCount,
   databaseReady,
   databaseError,
   databaseStatus,
-  onSqliteWriteModeChange,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
-  sqliteWriteMode: StreamDatabaseWriteMode;
   streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
   databaseReady: boolean;
   databaseError: Error | undefined;
   databaseStatus: "pending" | "ok" | "error";
-  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => globalThis.matchMedia("(min-width: 761px)").matches,
@@ -137,12 +185,10 @@ function StreamPageLayout({
           eventCount={eventCount}
           key={`sidebar:${streamPath}`}
           snapshot={snapshot}
-          sqliteWriteMode={sqliteWriteMode}
           streamDatabase={streamDatabase}
           streamStore={streamStore}
           streamPath={streamPath}
           onSidebarOpenChange={setSidebarOpen}
-          onSqliteWriteModeChange={onSqliteWriteModeChange}
         />
         <div
           className={
@@ -348,7 +394,7 @@ function StreamTopBar({
                 type="button"
                 onClick={() => goToDraftPath()}
               >
-                Go
+                Go to stream
               </button>
             </>
           ) : (
@@ -494,6 +540,7 @@ function EventRows({
     if (userHasMovedAwayFromEnd.current && !scrollState.scrollPosition.isAtEnd) {
       dispatchScrollState({ type: "add-unread", count: appendedEventCount });
     } else {
+      virtualizer.scrollToEnd();
       dispatchScrollState({ type: "clear-unread" });
     }
   }, [eventCount, scrollState.scrollPosition.isAtEnd, virtualizer]);
@@ -528,6 +575,7 @@ function EventRows({
       ) : null}
       <section
         aria-label="Stream events"
+        data-testid="stream-events"
         className={
           showBottomFade
             ? "stream-page__stream stream-page__stream--fade-bottom"
@@ -639,41 +687,31 @@ function EventRowWindow({
   measureElement: (node: Element | null) => void;
   onToggleOffset(offset: number): void;
 }) {
-  const rowCacheRef = useRef(new Map<number, StreamEventRow>());
   const firstIndex = virtualItems[0]?.index ?? 0;
-  // FIXED-size, bin-aligned window. Crucially the size does NOT track the live last index:
-  // if it did, every append would re-key the query, which restarts it empty and blanks the
-  // whole visible window for a frame (a flicker). Two bins wide so a viewport straddling a
-  // bin boundary, and tail growth within the bin, stay covered without re-keying — the key
-  // only changes once per PAGE rows of scrolling.
-  const PAGE = 1_000;
-  const pageStartIndex = Math.floor(firstIndex / PAGE) * PAGE;
-  const pageSize = 2 * PAGE;
-  const windowEndIndex = pageStartIndex + pageSize; // 1-based exclusive upper bound
-  // Append-only exploit: "tail" while the live end is inside this window (re-run on append to
-  // pick up new rows); "range" once scrolled back so the window sits entirely below future
-  // appends — those rows can never change, so it never re-runs.
-  const followsTail = eventCount <= windowEndIndex;
-  const rowQueryResult = useStreamQuery<StreamEventRow>(
+  const lastIndex = virtualItems.at(-1)?.index ?? -1;
+  // local_index is the dense, zero-based browser list position TanStack Virtual reads.
+  // Today it is offset - 1 and SQLite rejects gaps. If server-side TTL later ages out
+  // old offsets, this column can remain the local dense index while offset keeps its
+  // original stream identity.
+  const rowQueryResult = useStreamQuery(
     streamDatabase,
-    `SELECT virtual_index, offset, type, idempotency_key, created_at, raw_json
-     FROM events WHERE virtual_index >= ? ORDER BY virtual_index ASC LIMIT ?`,
-    [pageStartIndex + 1, pageSize],
-    followsTail ? { type: "tail" } : { type: "range", untilVirtualIndex: windowEndIndex },
+    `SELECT local_index, offset, type, idempotency_key, created_at, inserted_at, json_pretty(raw_jsonb) AS raw_json
+     FROM events
+     WHERE local_index >= ? AND local_index < ?
+     ORDER BY local_index ASC`,
+    [firstIndex, lastIndex + 1],
   );
-  // Retain rows we've already shown so the once-per-PAGE window shift repaints from cache
-  // instead of blanking while the next query loads. Reset on clear (EventRows remounts via
-  // its clearVersion key). Bounded so a long scroll session can't grow it without limit.
-  const rowsByVirtualizerIndex = rowCacheRef.current;
-  for (const row of rowQueryResult.data) rowsByVirtualizerIndex.set(row.virtual_index - 1, row);
-  while (rowsByVirtualizerIndex.size > 5 * PAGE) {
-    const oldest = rowsByVirtualizerIndex.keys().next().value;
-    if (oldest === undefined) break;
-    rowsByVirtualizerIndex.delete(oldest);
-  }
+  const rowsByLocalIndex = useMemo(() => {
+    const rows = new Map<number, StreamEventRow>();
+    for (const row of rowQueryResult.data) {
+      const event = streamEventRowFromSql(row);
+      if (event !== undefined) rows.set(event.local_index, event);
+    }
+    return rows;
+  }, [rowQueryResult.data]);
 
   return virtualItems.map((virtualItem) => {
-    const event = rowsByVirtualizerIndex.get(virtualItem.index);
+    const event = rowsByLocalIndex.get(virtualItem.index);
     const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
     const isLastEventRow = virtualItem.index === eventCount - 1;
 
@@ -702,6 +740,10 @@ function EventRowWindow({
             <button
               aria-expanded={isExpanded}
               className="stream-page__event-meta"
+              data-event-offset={event.offset}
+              data-event-type={event.type}
+              data-local-index={event.local_index}
+              data-testid="event-meta"
               type="button"
               onClick={() => onToggleOffset(event.offset)}
             >
@@ -719,26 +761,45 @@ function EventRowWindow({
   });
 }
 
+function streamEventRowFromSql(row: Record<string, unknown>): StreamEventRow | undefined {
+  if (
+    typeof row.local_index !== "number" ||
+    typeof row.offset !== "number" ||
+    typeof row.type !== "string" ||
+    typeof row.created_at !== "string" ||
+    typeof row.inserted_at !== "string" ||
+    typeof row.raw_json !== "string" ||
+    !(row.idempotency_key === null || typeof row.idempotency_key === "string")
+  ) {
+    return undefined;
+  }
+  return {
+    local_index: row.local_index,
+    offset: row.offset,
+    type: row.type,
+    idempotency_key: row.idempotency_key,
+    created_at: row.created_at,
+    inserted_at: row.inserted_at,
+    raw_json: row.raw_json,
+  };
+}
+
 function StreamSidebar({
   className,
   streamPath,
   snapshot,
-  sqliteWriteMode,
   streamDatabase,
   streamStore,
   eventCount,
   onSidebarOpenChange,
-  onSqliteWriteModeChange,
 }: {
   className?: string;
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
-  sqliteWriteMode: StreamDatabaseWriteMode;
   streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
   onSidebarOpenChange(open: boolean): void;
-  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
   return (
     <aside
@@ -753,10 +814,8 @@ function StreamSidebar({
         streamStore={streamStore}
       />
       <InsertEventsTool
-        sqliteWriteMode={sqliteWriteMode}
         streamStore={streamStore}
         streamPath={streamPath}
-        onSqliteWriteModeChange={onSqliteWriteModeChange}
       />
     </aside>
   );
@@ -791,6 +850,7 @@ function SubscriptionTool({
                   ? "stream-page__state stream-page__state--error"
                   : "stream-page__state"
               }
+              data-testid="stream-status"
             >
               {snapshot.connectionStatus}
             </output>
@@ -799,7 +859,7 @@ function SubscriptionTool({
         <div title="This tab's role in the Web Locks election. leader = the single writer (it subscribes to the stream and writes events into the shared local DB); follower = a reader that mirrors the leader's writes from the same on-disk DB; electing/idle = before a role is assigned.">
           <dt>Subscription</dt>
           <dd>
-            <output className="stream-page__state">{snapshot.subscriptionStatus}</output>
+            <output className="stream-page__state" data-testid="subscription-status">{snapshot.subscriptionStatus}</output>
           </dd>
         </div>
         {snapshot.connectionError === undefined ? null : (
@@ -815,7 +875,7 @@ function SubscriptionTool({
         <div title="Number of events stored in this tab's local SQLite mirror (one row per stream offset).">
           <dt>Events</dt>
           <dd>
-            <output className="stream-page__state">{eventCount}</output>
+            <output className="stream-page__state" data-testid="event-count">{eventCount}</output>
           </dd>
         </div>
         <div title="Whether the page is crossOriginIsolated (the COOP+COEP / SharedArrayBuffer mode). Deliberately false: wa-sqlite's OPFSCoopSyncVFS needs no isolation, and enabling it would re-introduce the SharedArrayBuffer OPFS deadlock. Not a problem — it's expected.">
@@ -943,14 +1003,10 @@ function formatByteSize(bytes: number) {
 
 function InsertEventsTool({
   streamPath,
-  sqliteWriteMode,
   streamStore,
-  onSqliteWriteModeChange,
 }: {
   streamPath: string;
-  sqliteWriteMode: StreamDatabaseWriteMode;
   streamStore: StreamBrowserStore;
-  onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
   const [insertState, dispatchInsertState] = useReducer(
     (
@@ -1131,21 +1187,6 @@ function InsertEventsTool({
           <option value="await">Await</option>
           <option value="background">Background</option>
           <option value="dispose">Dispose</option>
-        </select>
-      </label>
-      <label className="stream-page__field">
-        <span>SQLite writes</span>
-        <select
-          className="stream-page__input"
-          value={sqliteWriteMode}
-          onChange={(event) =>
-            onSqliteWriteModeChange(
-              event.currentTarget.value === "row" ? "row" : "batch",
-            )
-          }
-        >
-          <option value="batch">Batch</option>
-          <option value="row">Row at a time</option>
         </select>
       </label>
       <button

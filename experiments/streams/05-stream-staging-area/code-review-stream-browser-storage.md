@@ -4,6 +4,11 @@
 
 Reviewed `src/routes/-stream-page.tsx`, the browser stream storage modules it depends on, and the experiment instructions in `../../../README.md` and `README.md`.
 
+Update after implementation: the final patch follows this report's simplification direction,
+but uses SQLite JSONB (`raw_jsonb`) plus generated scalar columns instead of the early
+`raw_json TEXT` sketch below. It also keeps `local_index` as the zero-based TanStack Virtual
+position and makes SQLite reject offset gaps.
+
 Primary sources consulted:
 
 - React `useSyncExternalStore`, render purity, refs, `useMemo`, and `useLayoutEffect`: https://react.dev/reference/react/useSyncExternalStore, https://react.dev/reference/rules/components-and-hooks-must-be-pure, https://react.dev/learn/referencing-values-with-refs, https://react.dev/reference/react/useMemo, https://react.dev/reference/react/useLayoutEffect
@@ -251,16 +256,28 @@ Recommendation: update README after the architecture settles.
 1. Make `events.local_index` the virtualizer index.
    - Use `local_index INTEGER PRIMARY KEY`.
    - Use `offset INTEGER NOT NULL UNIQUE`.
+   - Add `inserted_at TEXT NOT NULL DEFAULT (datetime('now'))` to record when the browser mirror stored the row.
+   - Store `raw_jsonb BLOB NOT NULL` only; do not store JSON text twice.
+   - Treat `raw_jsonb` as the source of truth: `offset`, `type`, `created_at`, and `idempotency_key` must be derived from it and match it.
+   - Inspect JSONB through SQLite functions such as `json(raw_jsonb)` or `json_pretty(raw_jsonb)`.
    - `local_index` is zero-based and maps directly to TanStack Virtual item indexes.
    - `offset` is one-based and remains the durable stream cursor.
    - In the current experiment, enforce `local_index = offset - 1` and reject any offset gap.
+   - Use SQLite for the invariant: a table `CHECK (local_index = offset - 1)` plus a `BEFORE INSERT` trigger that aborts unless `NEW.offset = COALESCE(MAX(offset) + 1, 1)` or the insert is an identical replay of an existing row.
+   - For identical replay, compare canonical JSON text from JSONB (`json(existing.raw_jsonb) = json(NEW.raw_jsonb)`), not raw blob bytes.
+   - Identical replay rows should be ignored with `RAISE(IGNORE)` so the original `inserted_at` remains the first time the browser stored that event locally.
+   - Comment the trigger heavily: it allows idempotent replay, rejects conflicting duplicate offsets, and rejects offset gaps.
+   - Insert every delivered event. SQLite accepts continuous new rows, ignores identical replay rows, and aborts on gaps or conflicting duplicate offsets.
+   - Verify in the actual wa-sqlite worker that JSON functions are available before using generated columns or `json_extract()` in schema/inserts.
+   - This trigger is acceptable because it protects the append invariant; avoid triggers that maintain derived UI metadata.
    - Comment this clearly in TypeScript and SQL: `local_index` exists so the browser can keep a dense local list, including if server-side event TTL/aging later means local rows no longer map one-to-one to all historical stream offsets.
    - Do not call this column `virtual_index`; "virtual" already belongs to TanStack Virtual.
 
-2. Keep the schema basic, but keep browser processor state in the same per-stream DB.
-   - Keep `processor_state` in the per-stream SQLite file.
-   - Keep it plainly named and separate from the raw `events` table.
-   - Do not add metadata tables for UI count/cursor optimizations.
+2. Keep the schema basic and raw-event-only for now.
+   - Do not keep `processor_state` in this pass.
+   - Do not model the raw SQLite mirror as a browser processor.
+   - The subscription sink writes delivered batches directly into `events`.
+   - If local browser projections become real later, design a local processor runner explicitly.
 
 3. Make the stream component show the important SQL directly.
    - Total rows query:
@@ -276,11 +293,14 @@ Recommendation: update README after the architecture settles.
      ```
    - Re-run these queries when the DB changes.
    - Start with no `COUNT(*)` / `MAX(offset)` avoidance.
+   - Use a hybrid `StreamBrowserDatabase` API: generic query support for visible React SQL, explicit methods for writes/lifecycle (`insertEventBatch`, `maxOffset`, `clear`, `download`, `info`, `dispose`, `[Symbol.dispose]`).
+   - Mirror the `src/stream.ts` style: one clearly commented schema block and small methods with SQL visible inline.
 
-4. Delete bespoke reactive-query policy.
+4. Delete bespoke reactive-query and browser-processor policy.
    - Remove `StreamQueryScope`.
    - Remove tail/range invalidation.
    - Remove trigger-maintained `stream_meta`.
+   - Remove `browser.sqlite-projector`.
    - Make BroadcastChannel only mean "the database changed; rerun visible queries".
 
 5. Always write batches.
@@ -297,7 +317,12 @@ Recommendation: update README after the architecture settles.
    - A mounted stream view owns one stream client and one DB runtime.
    - On stream route change, disconnect the old stream client and close/terminate the old DB worker/channel.
    - Do not keep a global per-path DB singleton.
-   - Leave room for a future view to mount two independent stream runtimes side by side.
+   - Add `/split-stream?left=...&right=...` as a forcing-function route that mounts two independent stream views side by side.
+   - Allow the two sides to point at the same stream; both mounted runtimes should independently participate in leadership election, with only one subscriber/writer winning.
+   - Each split side renders path selection, connection/election status, the virtualized feed, and the composer.
+   - Keep DB download/clear/kill/bulk insert tools on the normal stream page.
+   - Share the same core stream feed and composer components between the normal page and split view.
+   - Let the normal page and split side use separate wrapper/layout components.
 
 8. Serialize SQLite worker operations.
    - Process worker messages through a one-at-a-time queue.

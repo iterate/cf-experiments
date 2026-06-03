@@ -1,20 +1,11 @@
-import type { RpcPromise } from "capnweb";
-import { z } from "zod";
+import { RpcTarget, type RpcPromise, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
-import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
-import {
-  createProcessorRunner,
-  implementProcessor,
-  ProcessorSink,
-  streamPortFromRpc,
-} from "../stream-processor.js";
+import type { SubscriptionSink, StreamRpc } from "../stream-types.js";
 import { acquireWriterRole, type WriterRole } from "./stream-leader.js";
 import { withStream, type StreamBrowserConnectionStatus } from "./stream-browser.js";
 import {
-  getStreamBrowserDatabase,
-  type StreamBrowserDatabase,
+  StreamBrowserDatabase,
   type StreamDatabaseInfo,
-  type StreamDatabaseWriteMode,
 } from "./stream-browser-db.js";
 
 export type StreamBrowserSnapshot = {
@@ -26,65 +17,41 @@ export type StreamBrowserSnapshot = {
   subscriptionStatus: "idle" | "electing" | "leader" | "follower";
   clearVersion: number;
   connectionError: string | undefined;
-  /** Events this tab's hosted processor has received from the stream (in-memory, not SQLite). */
   receivedEventCount: number;
   databaseInfo: StreamDatabaseInfo | undefined;
 };
 
 export type StreamBrowserStore = Disposable & {
+  readonly streamDatabase: StreamBrowserDatabase;
   appendBatch(args: { events: StreamEventInput[] }): RpcPromise<StreamEvent[]>;
   clearLocalDatabase(): Promise<void>;
   kill(): RpcPromise<void>;
+  reset(): RpcPromise<void>;
   getSnapshot(): StreamBrowserSnapshot;
   getServerSnapshot(): StreamBrowserSnapshot;
   subscribe(listener: () => void): () => void;
 };
 
-// The browser is just another host for the SAME processor model: it projects
-// every stream event into a local SQLite mirror. afterAppend is per-event and
-// fire-and-forget; the db layer (`write`) coalesces into one transaction per
-// delivered batch, so the batch/row write-mode optimization is preserved.
-const sqliteProjectorContract = defineProcessorContract({
-  slug: "browser.sqlite-projector",
-  version: "0.1.0",
-  description: "Projects every stream event into the local SQLite mirror.",
-  stateSchema: z.object({}),
-  initialState: {},
-  events: {},
-  consumes: ["*"],
-  emits: [],
-});
-
-const sqliteProjector = implementProcessor(
-  sqliteProjectorContract,
-  (deps: { db: StreamBrowserDatabase }) => ({
-    afterAppend({ event }) {
-      deps.db.write(event);
-    },
-  }),
-);
-
-/** Creates a lazy browser stream store for React's `useSyncExternalStore`. */
 export function createStreamBrowserStore(args: {
   streamPath: string;
-  sqliteWriteMode: StreamDatabaseWriteMode;
   onDispose?: () => void;
 }): StreamBrowserStore {
+  const streamDatabase = new StreamBrowserDatabase(args.streamPath);
+  const listeners = new Set<() => void>();
   let stream: ReturnType<typeof withStream> | undefined;
   let subscriptionHandle: { unsubscribe(): void } | undefined;
   let writerRole: WriterRole | undefined;
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let databaseInfoTimer: ReturnType<typeof setTimeout> | undefined;
-  const listeners = new Set<() => void>();
+  let disposeTimer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
+  let started = false;
   let receivedEventCount = 0;
-  const streamDatabase = getStreamBrowserDatabase(args.streamPath);
   const browserSubscriberStorageKey = "stream-browser-subscriber-id";
   const browserSubscriberId =
     localStorage.getItem(browserSubscriberStorageKey) ?? crypto.randomUUID();
   localStorage.setItem(browserSubscriberStorageKey, browserSubscriberId);
-  streamDatabase.setWriteMode(args.sqliteWriteMode);
   let snapshot: StreamBrowserSnapshot = {
     clearVersion: 0,
     connectionStatus: "connecting",
@@ -93,6 +60,11 @@ export function createStreamBrowserStore(args: {
     databaseInfo: undefined,
     subscriptionStatus: "idle",
   };
+
+  const offDatabaseChange = streamDatabase.onChange(() => {
+    if (disposed) return;
+    refreshDatabaseInfoSoon();
+  });
 
   function emitSnapshot() {
     for (const listener of listeners) listener();
@@ -105,8 +77,7 @@ export function createStreamBrowserStore(args: {
       emitSnapshot();
     }).catch((error: unknown) => {
       if (disposed) return;
-      const message = String((error as { message?: string } | undefined)?.message ?? error);
-      snapshot = { ...snapshot, connectionError: "local database error: " + message };
+      snapshot = { ...snapshot, connectionError: "local database error: " + errorMessage(error) };
       emitSnapshot();
     });
   }
@@ -118,21 +89,6 @@ export function createStreamBrowserStore(args: {
       refreshDatabaseInfo();
     }, 1_000);
   }
-
-  // Each committed write nudges a (debounced) db-size refresh. The rows themselves reach
-  // the UI through reactive queries (db.reactiveQuery), not this store — so there is no
-  // in-memory row cache to maintain here, and writer/reader tabs render identically.
-  const offInserted = streamDatabase.onInserted(() => {
-    if (disposed) return;
-    refreshDatabaseInfoSoon();
-  });
-  const offWriteError = streamDatabase.onWriteError((error) => {
-    // The subscription is intentionally independent of local SQLite health: a transient
-    // OPFS write hiccup (e.g. cooperative-lock contention with another tab's connection)
-    // must NOT make this tab resign the writer lock, or two tabs would thrash leadership.
-    // Events are still being received; the projector will catch up on the next batch.
-    console.error("Browser stream SQLite write failed", error);
-  });
 
   function reconnectAfter(connectionError: string) {
     if (disposed || reconnectTimer !== undefined) return;
@@ -154,6 +110,35 @@ export function createStreamBrowserStore(args: {
       reconnectTimer = undefined;
     }
     connect();
+  }
+
+  async function discardLocalMirror() {
+    await streamDatabase.clear();
+    await streamDatabase.compact();
+    receivedEventCount = 0;
+    snapshot = {
+      ...snapshot,
+      clearVersion: snapshot.clearVersion + 1,
+      databaseInfo: undefined,
+      receivedEventCount: 0,
+    };
+    emitSnapshot();
+    refreshDatabaseInfo();
+  }
+
+  async function reconcileLocalMirrorWithServer(rpc: RpcStub<StreamRpc>) {
+    const localMaxOffset = await streamDatabase.maxOffset();
+    if (localMaxOffset < 0) return;
+
+    const { state: serverState } = await rpc.runtimeState();
+    const serverMaxOffset = serverState.maxOffset;
+    if (serverMaxOffset >= localMaxOffset) return;
+
+    console.warn(
+      `[stream-browser ${args.streamPath}] Server stream has fewer events than the local SQLite mirror; discarding local database.`,
+      { streamPath: args.streamPath, serverMaxOffset, localMaxOffset },
+    );
+    await discardLocalMirror();
   }
 
   function connect() {
@@ -192,40 +177,6 @@ export function createStreamBrowserStore(args: {
     connection: ReturnType<typeof withStream>;
     subscriptionKey: string;
   }) {
-    // Host the projector on the shared runner; the runner IS the subscription sink.
-    // Resume from the local SQLite mirror's max offset (the events table is the durable
-    // cursor) so a reconnect replays ONLY new events — not the whole stream. Without this,
-    // every reconnect (e.g. after "kill stream") re-subscribes at offset -1 and the DO
-    // replays all N events before the next one arrives, a delay that grows with stream size.
-    // On any DB read failure we fall back to undefined → offset -1 (full replay), so a
-    // slow/unavailable local DB still can't block receiving events.
-    const runner = createProcessorRunner({
-      processor: sqliteProjector,
-      deps: { db: streamDatabase },
-      storage: {
-        load: async () => {
-          try {
-            return { state: {}, offset: await streamDatabase.maxOffset() };
-          } catch {
-            return undefined;
-          }
-        },
-        save: () => {},
-      },
-      stream: streamPortFromRpc(election.connection.rpc),
-    });
-    const sink = new ProcessorSink((batch) => {
-      receivedEventCount += batch.events.length;
-      (globalThis as unknown as { __receivedEventCount?: number }).__receivedEventCount = receivedEventCount;
-      snapshot = { ...snapshot, receivedEventCount };
-      emitSnapshot();
-      return runner.processEventBatch(batch);
-    });
-
-    // Web Locks elect exactly one writer tab. Until this tab wins the lock it is a reader
-    // (it still reads the shared OPFS db reactively, but does NOT subscribe or write). When
-    // it wins, it subscribes and hosts the projector; if it later closes, the lock releases
-    // and another tab takes over automatically.
     snapshot = { ...snapshot, subscriptionStatus: "electing" };
     emitSnapshot();
 
@@ -238,19 +189,21 @@ export function createStreamBrowserStore(args: {
 
     writerRole = acquireWriterRole(args.streamPath);
     void writerRole.whenWriter
-      .then(() => {
+      .then(async () => {
         clearTimeout(followerTimeout);
         if (disposed || stream !== election.connection) return undefined;
         snapshot = { ...snapshot, subscriptionStatus: "leader" };
         emitSnapshot();
-        return runner.afterOffset();
+        await reconcileLocalMirrorWithServer(election.connection.rpc);
+        const afterOffset = await streamDatabase.maxOffset();
+        return { afterOffset, sink: new BrowserMirrorSink({ streamDatabase, onStored }) };
       })
-      .then((afterOffset) => {
-        if (afterOffset === undefined || disposed || stream !== election.connection) return undefined;
+      .then((subscription) => {
+        if (subscription === undefined || disposed || stream !== election.connection) return undefined;
         return election.connection.rpc.subscribe({
           subscriptionKey: election.subscriptionKey,
-          sink,
-          afterOffset,
+          sink: subscription.sink,
+          afterOffset: subscription.afterOffset,
         });
       })
       .then((handle) => {
@@ -269,8 +222,14 @@ export function createStreamBrowserStore(args: {
         stopSubscriptionElection();
         stream?.[Symbol.dispose]();
         stream = undefined;
-        reconnectAfter(`subscribe failed: ${String(error)}`);
+        reconnectAfter(`subscribe failed: ${errorMessage(error)}`);
       });
+  }
+
+  function onStored(events: StreamEvent[]) {
+    receivedEventCount += events.length;
+    snapshot = { ...snapshot, receivedEventCount };
+    emitSnapshot();
   }
 
   function stopSubscriptionElection() {
@@ -280,6 +239,18 @@ export function createStreamBrowserStore(args: {
     writerRole = undefined;
     snapshot = { ...snapshot, subscriptionStatus: "idle" };
     if (!disposed) emitSnapshot();
+  }
+
+  function start() {
+    if (started || disposed) return;
+    started = true;
+    snapshot = { ...snapshot, connectionStatus: "subscribing" };
+    emitSnapshot();
+    refreshDatabaseInfo();
+    connectTimer = setTimeout(() => {
+      connectTimer = undefined;
+      connect();
+    }, 0);
   }
 
   function teardown() {
@@ -298,12 +269,24 @@ export function createStreamBrowserStore(args: {
     stopSubscriptionElection();
     stream?.[Symbol.dispose]();
     stream = undefined;
-    offInserted();
-    offWriteError();
+    offDatabaseChange();
+    streamDatabase.dispose();
     args.onDispose?.();
   }
 
+  function dispose() {
+    listeners.clear();
+    if (disposed) return;
+    if (disposeTimer !== undefined) {
+      clearTimeout(disposeTimer);
+      disposeTimer = undefined;
+    }
+    disposed = true;
+    teardown();
+  }
+
   return {
+    streamDatabase,
     appendBatch(appendArgs) {
       reconnectNow();
       if (stream === undefined) throw new Error("stream connection is disposed");
@@ -313,24 +296,18 @@ export function createStreamBrowserStore(args: {
       stopSubscriptionElection();
       stream?.[Symbol.dispose]();
       stream = undefined;
-      streamDatabase.clearPendingWrites();
-      snapshot = {
-        ...snapshot,
-        clearVersion: snapshot.clearVersion + 1,
-        databaseInfo: undefined,
-      };
-      emitSnapshot();
-      await streamDatabase.clear();
-      await streamDatabase.compact();
-      snapshot = { ...snapshot, databaseInfo: undefined };
-      emitSnapshot();
-      refreshDatabaseInfo();
+      await discardLocalMirror();
       reconnectNow();
     },
     kill() {
       reconnectNow();
       if (stream === undefined) throw new Error("stream connection is disposed");
       return stream.rpc.kill();
+    },
+    reset() {
+      reconnectNow();
+      if (stream === undefined) throw new Error("stream connection is disposed");
+      return stream.rpc.reset();
     },
     getSnapshot() {
       return snapshot;
@@ -339,31 +316,52 @@ export function createStreamBrowserStore(args: {
       return snapshot;
     },
     subscribe(listener) {
-      listeners.add(listener);
-      if (listeners.size === 1) {
-        disposed = false;
-        snapshot = { ...snapshot, connectionStatus: "subscribing" };
-        emitSnapshot();
-        refreshDatabaseInfo();
-        connectTimer = setTimeout(() => {
-          connectTimer = undefined;
-          connect();
-        }, 0);
+      if (disposeTimer !== undefined) {
+        clearTimeout(disposeTimer);
+        disposeTimer = undefined;
       }
+      listeners.add(listener);
+      start();
       return () => {
         listeners.delete(listener);
         if (listeners.size === 0 && !disposed) {
-          disposed = true;
-          teardown();
+          disposeTimer = setTimeout(() => {
+            disposeTimer = undefined;
+            if (listeners.size === 0) dispose();
+          }, 0);
         }
       };
     },
     [Symbol.dispose]() {
-      listeners.clear();
-      if (!disposed) {
-        disposed = true;
-        teardown();
-      }
+      dispose();
     },
   };
+}
+
+class BrowserMirrorSink extends RpcTarget implements SubscriptionSink {
+  #tail = Promise.resolve();
+  readonly #streamDatabase: StreamBrowserDatabase;
+  readonly #onStored: (events: StreamEvent[]) => void;
+
+  constructor(args: {
+    streamDatabase: StreamBrowserDatabase;
+    onStored(events: StreamEvent[]): void;
+  }) {
+    super();
+    this.#streamDatabase = args.streamDatabase;
+    this.#onStored = args.onStored;
+  }
+
+  processEventBatch(args: { events: StreamEvent[] }): undefined {
+    this.#tail = this.#tail.then(() => this.#store(args.events), () => this.#store(args.events));
+  }
+
+  async #store(events: StreamEvent[]) {
+    await this.#streamDatabase.insertEventBatch({ events });
+    this.#onStored(events);
+  }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }

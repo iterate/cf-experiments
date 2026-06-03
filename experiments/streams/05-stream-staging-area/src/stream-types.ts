@@ -38,10 +38,10 @@ export type StreamRpc = {
    * are planned, but not part of this first simplified storage shape.
    */
   subscribe(args: {
-    subscriptionKey: SubscriptionKey;
+    subscriptionKey?: SubscriptionKey;
     sink: RpcStub<SubscriptionSink>;
     afterOffset?: number;
-  }): { unsubscribe(): void };
+  }): { subscriptionKey: SubscriptionKey; unsubscribe(): void };
   runtimeState(): {
     state: CoreStreamState;
     runtime: {
@@ -50,7 +50,7 @@ export type StreamRpc = {
   };
   kill(): void;
   /** Clears all durable storage for this stream, then aborts the current incarnation. */
-  reset(): void;
+  reset(): Promise<void>;
   reduce(args: { event: StreamEvent; state?: CoreStreamState }): CoreStreamState;
 };
 

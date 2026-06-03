@@ -6,9 +6,9 @@
 // per-tab connections of every open tab, so each tab reads locally and only ONE tab
 // (elected via Web Locks on the main thread) writes.
 //
-// This worker is intentionally generic: it speaks `exec` / `batch` / `export`. All the
-// stream-specific schema and the reactive-query logic live on the main thread in
-// stream-browser-db.ts, so this file never needs to change as the schema evolves.
+// This worker is intentionally generic: it speaks `exec` / `batch` / `export`. The
+// stream-specific schema lives on the main thread in stream-browser-db.ts, where it is
+// easier to read next to the browser stream runtime.
 import SQLiteESMFactory from "@journeyapps/wa-sqlite/dist/wa-sqlite.mjs";
 import wasmUrl from "@journeyapps/wa-sqlite/dist/wa-sqlite.wasm?url";
 import { Factory } from "@journeyapps/wa-sqlite";
@@ -21,8 +21,7 @@ import {
 import { OPFSCoopSyncVFS } from "@journeyapps/wa-sqlite/src/examples/OPFSCoopSyncVFS.js";
 
 type Sqlite3 = ReturnType<typeof Factory>;
-// Matches wa-sqlite's SQLiteCompatibleType (blobs surface as Uint8Array or number[]). Our
-// schema only stores text/integer, but the row() return type can be any of these.
+// Matches wa-sqlite's SQLiteCompatibleType (blobs surface as Uint8Array or number[]).
 type SqlValue = string | number | bigint | Uint8Array | number[] | null;
 type Statement = { sql: string; params?: SqlValue[] };
 type Request =
@@ -44,13 +43,27 @@ async function open(path: string): Promise<void> {
   // the built-in "opfs"/"memory" VFS registration.
   sqlite3.vfs_register(vfs, false);
   databasePath = path;
-  db = await sqlite3.open_v2(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, VFS_NAME);
+  db = await openWithRetry(path);
   // NOTE: deliberately NO `PRAGMA busy_timeout`. OPFSCoopSyncVFS acquires its OPFS access
   // handle asynchronously and pushes that onto wa-sqlite's `retryOps`, which sqlite3.exec/
   // statements await and then retry — so the first lock resolves in ~one event-loop turn.
   // A busy_timeout would instead make SQLite's core spin synchronously (blocking the event
   // loop, so the async acquisition can't resolve) for the whole timeout — a ~5s stall on
   // first open. Cross-connection contention is handled by withBusyRetry instead.
+}
+
+async function openWithRetry(path: string): Promise<number> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= 25; attempt += 1) {
+    try {
+      if (sqlite3 === undefined) throw new Error("sqlite not initialised");
+      return await sqlite3.open_v2(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, VFS_NAME);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(50, 2 ** attempt)));
+    }
+  }
+  throw new Error(`sqlite3_open_v2 failed for ${path}: ${errorMessage(lastError)}`);
 }
 
 /** Runs one statement, collecting any result rows as plain objects. */
@@ -91,10 +104,19 @@ async function withBusyRetry<T>(run: () => Promise<T>): Promise<T> {
     try {
       return await run();
     } catch (error) {
-      if ((error as { code?: number })?.code !== SQLITE_BUSY || attempt >= 25) throw error;
+      if (!isBusyError(error) || attempt >= 25) throw error;
       await new Promise((resolve) => setTimeout(resolve, Math.min(50, 2 ** attempt)));
     }
   }
+}
+
+function isBusyError(error: unknown) {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === SQLITE_BUSY
+  );
 }
 
 async function exportFile(): Promise<ArrayBuffer> {
@@ -121,20 +143,28 @@ async function handle(request: Request): Promise<unknown> {
   }
 }
 
+let queue = Promise.resolve();
+
 self.onmessage = (event: MessageEvent<Request>) => {
   const request = event.data;
-  handle(request).then(
-    (result) => {
-      // ArrayBuffer results are transferred to avoid a copy on the way back.
-      const transfer = result instanceof ArrayBuffer ? [result] : [];
-      self.postMessage({ id: request.id, ok: true, result }, { transfer });
-    },
-    (error: unknown) => {
-      self.postMessage({
-        id: request.id,
-        ok: false,
-        error: String((error as { message?: string } | undefined)?.message ?? error),
-      });
-    },
-  );
+  queue = queue.then(() => respond(request), () => respond(request));
 };
+
+async function respond(request: Request) {
+  try {
+    const result = await handle(request);
+    // ArrayBuffer results are transferred to avoid a copy on the way back.
+    const transfer = result instanceof ArrayBuffer ? [result] : [];
+    self.postMessage({ id: request.id, ok: true, result }, { transfer });
+  } catch (error) {
+    self.postMessage({
+      id: request.id,
+      ok: false,
+      error: errorMessage(error),
+    });
+  }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
