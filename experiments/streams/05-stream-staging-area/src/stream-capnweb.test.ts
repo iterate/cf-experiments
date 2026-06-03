@@ -1,4 +1,6 @@
+import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { IncomingMessage } from "node:http";
+import type { Readable } from "node:stream";
 import { WebSocket as WsWebSocket, WebSocketServer } from "ws";
 import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
@@ -14,6 +16,11 @@ import { withStream } from "./client-libraries/stream-browser.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
+const cloudflaredE2eIt =
+  process.env.STREAM_STAGING_E2E === "true" &&
+  process.env.STREAM_STAGING_CLOUDFLARED_E2E === "true"
+    ? it
+    : it.skip;
 const externalRunnerPort = Number(process.env.STREAM_STAGING_EXTERNAL_RUNNER_PORT ?? 0);
 
 type WsMessage = {
@@ -414,6 +421,62 @@ describe("stream capnweb protocol", () => {
     expect(runner.batches.flat()).toContainEqual(appended);
   });
 
+  cloudflaredE2eIt(
+    "runs an external-url capnweb websocket processor through cloudflared",
+    async () => {
+      const path = `stream-capnweb-cloudflared-${crypto.randomUUID()}`;
+      const subscriptionKey = "cloudflared";
+      const headerValue = crypto.randomUUID();
+      const runner = new NodeStreamProcessorRunner();
+      await using runnerServer = await startNodeStreamProcessorRunnerServer({
+        port: externalRunnerPort,
+        runner,
+      });
+      await using tunnel = await startCloudflaredTunnel(runnerServer.url);
+      await using stream = await connectStream(path);
+
+      const configured = await stream.rpc.append({
+        event: {
+          type: "events.iterate.com/stream/subscription-configured",
+          idempotencyKey: `subscription:${subscriptionKey}`,
+          payload: {
+            subscriptionKey,
+            subscriber: {
+              type: "external-url",
+              transport: "capnweb-websocket",
+              url: tunnel.url,
+              headers: {
+                "x-stream-test": headerValue,
+              },
+            },
+          },
+        },
+      });
+
+      await waitFor(
+        () =>
+          runner.subscriptionConfiguredEvent?.offset === configured.offset &&
+          runner.streamRuntimeState?.state.path === path &&
+          runner.requestHeaders.some((headers) => headers.get("x-stream-test") === headerValue),
+        20_000,
+      );
+
+      const appended = await stream.rpc.append({
+        event: {
+          type: "test.processor.cloudflared-input",
+          payload: { path },
+        },
+      });
+
+      await waitFor(
+        () =>
+          runner.batches.some((batch) => batch.some((event) => event.offset === appended.offset)),
+        20_000,
+      );
+      expect(runner.batches.flat()).toContainEqual(appended);
+    },
+  );
+
   e2eIt("delivers event batches without subscriber-originated return traffic", async () => {
     const path = `stream-capnweb-wire-${crypto.randomUUID()}`;
     const sink = new TestSubscriptionSink();
@@ -533,6 +596,66 @@ function headersFromIncomingMessage(request: IncomingMessage) {
     }
   }
   return headers;
+}
+
+async function startCloudflaredTunnel(originUrl: string): Promise<
+  AsyncDisposable & {
+    url: string;
+  }
+> {
+  const child = spawn("cloudflared", ["tunnel", "--url", originUrl, "--no-autoupdate"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const output: string[] = [];
+  const url = await waitForCloudflaredUrl(child, output);
+  // Quick-tunnel DNS/edge routing can lag briefly after cloudflared prints the URL.
+  await new Promise((resolve) => setTimeout(resolve, 5_000));
+
+  return {
+    url,
+    async [Symbol.asyncDispose]() {
+      child.kill();
+      await new Promise<void>((resolve) => {
+        child.once("exit", () => resolve());
+        setTimeout(resolve, 1_000);
+      });
+    },
+  };
+}
+
+async function waitForCloudflaredUrl(
+  child: ChildProcessByStdio<null, Readable, Readable>,
+  output: string[],
+): Promise<string> {
+  const urlPattern = /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`timed out waiting for cloudflared URL:\n${output.join("")}`));
+    }, 20_000);
+
+    const onData = (data: Buffer) => {
+      const text = data.toString("utf8");
+      output.push(text);
+      const url = text.match(urlPattern)?.[0] ?? output.join("").match(urlPattern)?.[0];
+      if (url === undefined) return;
+      cleanup();
+      resolve(url);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(new Error(`cloudflared exited before URL (code=${code}, signal=${signal}):\n${output.join("")}`));
+    };
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.stdout.off("data", onData);
+      child.stderr.off("data", onData);
+      child.off("exit", onExit);
+    };
+
+    child.stdout.on("data", onData);
+    child.stderr.on("data", onData);
+    child.once("exit", onExit);
+  });
 }
 
 async function connectStream(path: string): Promise<
