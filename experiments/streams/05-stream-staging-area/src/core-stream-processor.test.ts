@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertCoreStreamAppendAllowed,
   buildProcessorRegisteredEvent,
   buildStreamErrorOccurredEvent,
+  buildStreamPausedEvent,
+  buildStreamResumedEvent,
   coreStreamProcessorContract,
+  shouldPauseCoreStreamAfterAppend,
 } from "./core-stream-processor.js";
 
 const reduce = coreStreamProcessorContract.reduce;
@@ -235,5 +239,88 @@ describe("core stream processor", () => {
     );
 
     expect(state).toMatchObject({ eventCount: 1, maxOffset: 1 });
+  });
+
+  it("tracks circuit breaker pause and resume state", () => {
+    let state = coreStreamProcessorContract.stateSchema.parse(
+      coreStreamProcessorContract.initialState,
+    );
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 1,
+          type: "events.iterate.com/stream/circuit-breaker-configured",
+          payload: { burstCapacity: 1, refillRatePerMinute: 1 },
+          createdAt: "2026-06-01T12:00:00.000Z",
+        },
+      }),
+    );
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 2,
+          type: "test.event",
+          payload: {},
+          createdAt: "2026-06-01T12:00:01.000Z",
+        },
+      }),
+    );
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 3,
+          type: "test.event",
+          payload: {},
+          createdAt: "2026-06-01T12:00:02.000Z",
+        },
+      }),
+    );
+
+    expect(shouldPauseCoreStreamAfterAppend(state)).toBe(true);
+
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 4,
+          createdAt: "2026-06-01T12:00:02.001Z",
+          ...buildStreamPausedEvent({ reason: "circuit breaker tripped" }),
+        },
+      }),
+    );
+    expect(state.paused).toBe(true);
+    expect(() =>
+      assertCoreStreamAppendAllowed({
+        event: { type: "test.event", payload: {} },
+        state,
+      }),
+    ).toThrow("stream paused");
+    expect(() =>
+      assertCoreStreamAppendAllowed({
+        event: buildStreamResumedEvent({ reason: "operator" }),
+        state,
+      }),
+    ).not.toThrow();
+
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 5,
+          createdAt: "2026-06-01T12:00:03.000Z",
+          ...buildStreamResumedEvent({ reason: "operator" }),
+        },
+      }),
+    );
+    expect(state.paused).toBe(false);
+    expect(state.pauseReason).toBeNull();
   });
 });

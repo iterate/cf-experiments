@@ -1,5 +1,16 @@
 import { z } from "zod";
 import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
+import type { StreamEventInput } from "@cf-experiments/shared/event";
+
+const DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY = 500;
+const DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE = 500;
+
+type CircuitBreakerFields = {
+  availableTokens: number;
+  lastRefillAtMs: number | null;
+  burstCapacity: number;
+  refillRatePerMinute: number;
+};
 
 const outboundSubscriberSchema = z.discriminatedUnion("type", [
   z.object({
@@ -31,6 +42,12 @@ export const coreStreamProcessorContract = defineProcessorContract({
     }),
     eventCount: z.number().int().min(0),
     maxOffset: z.number().int().min(0),
+    paused: z.boolean(),
+    pauseReason: z.string().nullable(),
+    availableTokens: z.number(),
+    lastRefillAtMs: z.number().int().min(0).nullable(),
+    burstCapacity: z.number().int().positive(),
+    refillRatePerMinute: z.number().int().positive(),
     processorsBySlug: z.record(
       z.string(),
       z.object({
@@ -80,6 +97,12 @@ export const coreStreamProcessorContract = defineProcessorContract({
     },
     eventCount: 0,
     maxOffset: 0,
+    paused: false,
+    pauseReason: null,
+    availableTokens: DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY,
+    lastRefillAtMs: null,
+    burstCapacity: DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY,
+    refillRatePerMinute: DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE,
     processorsBySlug: {},
     subscriptionsByKey: {},
   },
@@ -143,6 +166,25 @@ export const coreStreamProcessorContract = defineProcessorContract({
           .optional(),
       }),
     },
+    "events.iterate.com/stream/circuit-breaker-configured": {
+      description: "Configures the stream token-bucket circuit breaker.",
+      payloadSchema: z.object({
+        burstCapacity: z.number().int().positive(),
+        refillRatePerMinute: z.number().int().positive(),
+      }),
+    },
+    "events.iterate.com/stream/paused": {
+      description: "Records that the stream is paused and should reject ordinary appends.",
+      payloadSchema: z.object({
+        reason: z.string().trim().min(1).optional(),
+      }),
+    },
+    "events.iterate.com/stream/resumed": {
+      description: "Records that the stream has resumed accepting ordinary appends.",
+      payloadSchema: z.object({
+        reason: z.string().trim().min(1).optional(),
+      }),
+    },
   },
   consumes: [
     "*",
@@ -152,19 +194,50 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "events.iterate.com/stream/subscription-configured",
     "events.iterate.com/stream/processor-registered",
     "events.iterate.com/stream/error-occurred",
+    "events.iterate.com/stream/circuit-breaker-configured",
+    "events.iterate.com/stream/paused",
+    "events.iterate.com/stream/resumed",
   ],
   emits: [],
   reduce({ state, event }) {
     // All events increment the event count and max offset
-    const next = {
+    let next = {
       ...state,
       eventCount: state.eventCount + 1,
       maxOffset: event.offset,
     };
 
     switch (event.type) {
+      case "events.iterate.com/stream/circuit-breaker-configured":
+        return {
+          ...next,
+          burstCapacity: event.payload.burstCapacity,
+          refillRatePerMinute: event.payload.refillRatePerMinute,
+          availableTokens: event.payload.burstCapacity,
+          lastRefillAtMs: Date.parse(event.createdAt),
+        };
+
+      case "events.iterate.com/stream/paused":
+        return {
+          ...next,
+          paused: true,
+          pauseReason: event.payload.reason ?? null,
+          availableTokens: state.burstCapacity,
+          lastRefillAtMs: Date.parse(event.createdAt),
+        };
+
+      case "events.iterate.com/stream/resumed":
+        return {
+          ...next,
+          paused: false,
+          pauseReason: null,
+          availableTokens: state.burstCapacity,
+          lastRefillAtMs: Date.parse(event.createdAt),
+        };
+
       // events.iterate.com/stream/created will only ever happen once and is always the first event
       case "events.iterate.com/stream/created":
+        next = spendCircuitBreakerToken({ state, event, next });
         if (event.offset !== 1) {
           throw new Error(
             "events.iterate.com/stream/created must be the first event and have offset 1",
@@ -187,6 +260,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
 
       // events.iterate.com/stream/configured is used for runtime configuration of the stream
       case "events.iterate.com/stream/configured":
+        next = spendCircuitBreakerToken({ state, event, next });
         return {
           ...next,
           config: {
@@ -197,6 +271,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
 
       // events.iterate.com/stream/subscription-configured is used to configure outbound subscriptions
       case "events.iterate.com/stream/subscription-configured": {
+        next = spendCircuitBreakerToken({ state, event, next });
         return {
           ...next,
           subscriptionsByKey: {
@@ -207,6 +282,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
       }
 
       case "events.iterate.com/stream/processor-registered":
+        next = spendCircuitBreakerToken({ state, event, next });
         return {
           ...next,
           processorsBySlug: {
@@ -216,7 +292,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
         };
 
       default:
-        return next;
+        return spendCircuitBreakerToken({ state, event, next });
     }
   },
 });
@@ -284,4 +360,64 @@ export function buildStreamErrorOccurredEvent(args: {
       ...(args.error === undefined ? {} : { error: args.error }),
     },
   } as const;
+}
+
+export function buildStreamPausedEvent(args: {
+  reason: string;
+  idempotencyKey?: string;
+}) {
+  return {
+    type: "events.iterate.com/stream/paused",
+    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+    payload: { reason: args.reason },
+  } as const;
+}
+
+export function buildStreamResumedEvent(args: {
+  reason?: string;
+  idempotencyKey?: string;
+}) {
+  return {
+    type: "events.iterate.com/stream/resumed",
+    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+    payload: args.reason === undefined ? {} : { reason: args.reason },
+  } as const;
+}
+
+export function assertCoreStreamAppendAllowed(args: {
+  event: StreamEventInput;
+  state: CoreStreamState;
+}) {
+  if (!args.state.paused) return;
+  if (args.event.type === "events.iterate.com/stream/resumed") return;
+  if (args.event.type === "events.iterate.com/stream/error-occurred") return;
+  if (args.event.type === "events.iterate.com/stream/woken") return;
+  throw new Error(`stream paused: ${args.state.pauseReason ?? "circuit breaker open"}`);
+}
+
+export function shouldPauseCoreStreamAfterAppend(state: CoreStreamState) {
+  return !state.paused && state.availableTokens < 0;
+}
+
+function spendCircuitBreakerToken<State extends CircuitBreakerFields>(args: {
+  state: CircuitBreakerFields;
+  event: { createdAt: string };
+  next: State;
+}): State {
+  const createdAtMs = Date.parse(args.event.createdAt);
+  const refilled =
+    args.state.lastRefillAtMs === null
+      ? args.state.burstCapacity
+      : Math.min(
+          args.state.burstCapacity,
+          args.state.availableTokens +
+            (createdAtMs - args.state.lastRefillAtMs) *
+              (args.state.refillRatePerMinute / 60_000),
+        );
+
+  return {
+    ...args.next,
+    availableTokens: refilled - 1,
+    lastRefillAtMs: createdAtMs,
+  };
 }

@@ -8,7 +8,13 @@ import {
   type StreamEventInput,
 } from "@cf-experiments/shared/event";
 import { makeRpcTargetClass } from "@cf-experiments/shared/rpc-target";
-import { coreStreamProcessorContract, type CoreStreamState } from "../../core-stream-processor.js";
+import {
+  assertCoreStreamAppendAllowed,
+  buildStreamPausedEvent,
+  coreStreamProcessorContract,
+  shouldPauseCoreStreamAfterAppend,
+  type CoreStreamState,
+} from "../../core-stream-processor.js";
 import type {
   StreamProcessorRunnerRpc,
   StreamRpc,
@@ -279,6 +285,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
         throw new Error(`expected offset ${event.offset}, got ${input.offset}`);
       }
 
+      assertCoreStreamAppendAllowed({ event: input, state });
       state = this.reduce({ event, state });
       events.push(event);
       newEvents.push(event);
@@ -300,6 +307,15 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     this.#appendEventRows(newEvents);
     this.#writeCoreState(state);
     this.state = state;
+
+    if (shouldPauseCoreStreamAfterAppend(this.state)) {
+      this.append({
+        event: buildStreamPausedEvent({
+          idempotencyKey: `stream-paused:${newEvents.at(-1)?.offset ?? this.state.maxOffset}`,
+          reason: "circuit breaker tripped: burst rate limit exceeded",
+        }),
+      });
+    }
 
     // 3. Wake live delivery; reconcile only when subscription topology changed.
     // Append success is already decided above — this is pure post-commit fan-out.
