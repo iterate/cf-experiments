@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildProcessorRegisteredEvent,
+  buildStreamErrorOccurredEvent,
   coreStreamProcessorContract,
 } from "./core-stream-processor.js";
 
@@ -211,5 +212,28 @@ describe("core stream processor", () => {
         { type: "test.processor.output", description: "Output." },
       ],
     });
+  });
+
+  it("accepts stream error-occurred events", () => {
+    let state = coreStreamProcessorContract.stateSchema.parse(
+      coreStreamProcessorContract.initialState,
+    );
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 1,
+          createdAt: "2026-06-01T12:00:00.000Z",
+          ...buildStreamErrorOccurredEvent({
+            idempotencyKey: "processor-error:echo-test:1",
+            message: "Processor echo-test side effects failed at offset 1: boom",
+            error: { name: "Error", message: "boom" },
+          }),
+        },
+      }),
+    );
+
+    expect(state).toMatchObject({ eventCount: 1, maxOffset: 1 });
   });
 });

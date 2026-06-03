@@ -9,6 +9,7 @@ import {
   runProcessorReduce,
   type ProcessorState,
 } from "@cf-experiments/shared/stream-processors";
+import { buildStreamErrorOccurredEvent } from "./core-stream-processor.js";
 import type { StreamEventBatch, StreamSubscription } from "./subscription.js";
 import type {
   Processor,
@@ -166,9 +167,36 @@ export function createProcessorRunner<Contract extends RunnableContract<Contract
     const batch = reduceBatch(argsForBatch);
     if (batch === undefined) return;
 
-    await applySideEffects({ batch, streamMaxOffset: argsForBatch.streamMaxOffset });
+    try {
+      await applySideEffects({ batch, streamMaxOffset: argsForBatch.streamMaxOffset });
+    } catch (error) {
+      await appendProcessorError({ error, batch });
+      throw error;
+    }
     state = batch.state;
     await saveSnapshot({ state, offset: batch.checkpointOffset });
+  }
+
+  async function appendProcessorError(argsForError: {
+    error: unknown;
+    batch: ReducedBatch<Contract>;
+  }) {
+    const serializedError = serializeError(argsForError.error);
+    try {
+      await args.stream.append({
+        event: buildStreamErrorOccurredEvent({
+          idempotencyKey: [
+            "processor-error",
+            contract.slug,
+            String(argsForError.batch.checkpointOffset),
+          ].join(":"),
+          message: `Processor ${contract.slug} side effects failed at offset ${argsForError.batch.checkpointOffset}: ${serializedError.message}`,
+          error: serializedError,
+        }),
+      });
+    } catch (appendError) {
+      console.error("failed to append processor error event", appendError);
+    }
   }
 
   return {
@@ -222,4 +250,23 @@ function makeShouldApplySideEffects(anchor: ProcessorSideEffectAnchor | undefine
     if (!Number.isFinite(anchorTime) || !Number.isFinite(eventTime)) return false;
     return eventTime >= anchorTime - gracePeriodMs;
   };
+}
+
+function serializeError(error: unknown): { name?: string; message: string; stack?: string } {
+  if (error instanceof Error) {
+    return {
+      ...(error.name.trim() === "" ? {} : { name: error.name }),
+      message: error.message || String(error),
+      ...(typeof error.stack === "string" && error.stack.trim() !== ""
+        ? { stack: error.stack }
+        : {}),
+    };
+  }
+
+  try {
+    const message = JSON.stringify(error);
+    return { message: message == null ? String(error) : message };
+  } catch {
+    return { message: String(error) };
+  }
 }

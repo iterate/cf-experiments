@@ -129,6 +129,20 @@ export const coreStreamProcessorContract = defineProcessorContract({
         ),
       }),
     },
+    "events.iterate.com/stream/error-occurred": {
+      description: "Records a structured stream or processor runner error.",
+      payloadSchema: z.object({
+        message: z.string().trim().min(1),
+        error: z
+          .object({
+            name: z.string().trim().min(1).optional(),
+            message: z.string().trim().min(1),
+            code: z.string().trim().min(1).optional(),
+            stack: z.string().trim().min(1).optional(),
+          })
+          .optional(),
+      }),
+    },
   },
   consumes: [
     "*",
@@ -137,6 +151,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "events.iterate.com/stream/configured",
     "events.iterate.com/stream/subscription-configured",
     "events.iterate.com/stream/processor-registered",
+    "events.iterate.com/stream/error-occurred",
   ],
   emits: [],
   reduce({ state, event }) {
@@ -247,6 +262,26 @@ export function buildProcessorRegisteredEvent(args: {
           ? {}
           : { examples: [...event.examples] }),
       })),
+    },
+  } as const;
+}
+
+export function buildStreamErrorOccurredEvent(args: {
+  message: string;
+  error?: {
+    name?: string;
+    message: string;
+    code?: string;
+    stack?: string;
+  };
+  idempotencyKey?: string;
+}) {
+  return {
+    type: "events.iterate.com/stream/error-occurred",
+    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
+    payload: {
+      message: args.message,
+      ...(args.error === undefined ? {} : { error: args.error }),
     },
   } as const;
 }

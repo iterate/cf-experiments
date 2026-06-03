@@ -111,12 +111,23 @@ describe("failure conditions (in-process runner)", () => {
     const runner1 = createProcessorRunner({ processor: durable, deps: undefined, storage, stream });
     await expect(runner1.processEventBatch({ events: [input(1)], streamMaxOffset: 1 })).rejects.toThrow();
     expect(saved).toBeUndefined();
-    expect(committed).toHaveLength(0);
+    expect(committed).toMatchObject([
+      {
+        type: "events.iterate.com/stream/error-occurred",
+        idempotencyKey: "processor-error:echo-test:1",
+        payload: {
+          message: "Processor echo-test side effects failed at offset 1: transient failure before checkpoint",
+        },
+      },
+    ]);
 
     // Runner 2 (restart): the same event is re-delivered; this time the work succeeds.
     const runner2 = createProcessorRunner({ processor: durable, deps: undefined, storage, stream });
     await runner2.processEventBatch({ events: [input(1)], streamMaxOffset: 1 });
-    expect(committed).toHaveLength(1); // side effect happened exactly once, after retry
+    expect(committed).toMatchObject([
+      { type: "events.iterate.com/stream/error-occurred" },
+      { type: "test.processor.output", payload: { seen: 0 } },
+    ]);
     expect(saved?.offset).toBe(1);
     expect(attempts).toBe(2);
   });
