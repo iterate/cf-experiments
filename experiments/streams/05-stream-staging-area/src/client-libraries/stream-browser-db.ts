@@ -70,6 +70,7 @@ type RegisteredQuery = {
   scope: StreamQueryScope;
   snapshot: ReactiveQuerySnapshot<Record<string, SqlValue>>;
   started: boolean; // first subscribe kicks the initial run, so reactiveQuery() stays pure in render
+  gcTimer: ReturnType<typeof setTimeout> | undefined; // deferred cleanup once listeners hit 0
   readonly listeners: Set<() => void>;
   // Bound once per entry so useSyncExternalStore sees stable identities (no resubscribe loop).
   readonly handle: ReactiveQueryHandle<Record<string, SqlValue>>;
@@ -345,11 +346,16 @@ export class StreamBrowserDatabase {
       scope,
       snapshot: PENDING,
       started: false,
+      gcTimer: undefined,
       listeners: new Set(),
       handle: {
         getSnapshot: () => entry.snapshot,
         subscribe: (listener) => {
           entry.listeners.add(listener);
+          if (entry.gcTimer !== undefined) {
+            clearTimeout(entry.gcTimer);
+            entry.gcTimer = undefined;
+          }
           // Defer the first run to subscribe (React calls it after commit) so the
           // reactiveQuery() call in render has no async side effect.
           if (!entry.started) {
@@ -358,7 +364,16 @@ export class StreamBrowserDatabase {
           }
           return () => {
             entry.listeners.delete(listener);
-            if (entry.listeners.size === 0) this.#queries.delete(key);
+            if (entry.listeners.size > 0) return;
+            // Deferred cleanup. React StrictMode (and re-render churn) unsubscribes then
+            // immediately re-subscribes; deleting synchronously would orphan the in-flight
+            // result and make reactiveQuery() recreate the entry with a NEW handle next
+            // render — an infinite useSyncExternalStore re-subscribe loop that leaves the
+            // query stuck PENDING (placeholder rows forever). The re-subscribe above cancels
+            // this timer, so only a genuine unmount actually evicts the entry.
+            entry.gcTimer = setTimeout(() => {
+              if (entry.listeners.size === 0) this.#queries.delete(key);
+            }, 0);
           };
         },
       },
