@@ -19,6 +19,8 @@ export function componentForEventType(type: string): string | null {
       return "stream.created";
     case "events.iterate.com/stream/woken":
       return "stream.woken";
+    case "events.iterate.com/stream/child-stream-created":
+      return "stream.child-stream-created";
     default:
       return null;
   }

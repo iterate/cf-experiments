@@ -1,8 +1,10 @@
 // The "event-feed" sibling view: grouped feed_items from the browser-event-feed processor.
 // Consecutive events of the same type collapse into one row; specific-renderer types
-// (created/woken) always get their own singleton row. Uses the same virtualized tail-following
+// (created/woken/child-stream-created) always get their own singleton row with custom UI.
+// Uses the same virtualized tail-following
 // scroll shell as the raw-events view.
 
+import { Link } from "@tanstack/react-router";
 import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import {
@@ -31,6 +33,7 @@ type FeedItemRow = {
 const SPECIFIC_RENDERER_TYPES: Record<string, string> = {
   "stream.created": "events.iterate.com/stream/created",
   "stream.woken": "events.iterate.com/stream/woken",
+  "stream.child-stream-created": "events.iterate.com/stream/child-stream-created",
 };
 
 export function EventFeedView({ streamPath }: { streamPath: string }) {
@@ -91,7 +94,7 @@ function FeedItemRows({
   streamStore: StreamBrowserStore;
 }) {
   const topScrollAffordanceHeight = 48;
-  const estimatedFeedRowHeight = 38;
+  const estimatedFeedRowHeight = 44;
   const parentRef = useRef<HTMLDivElement>(null);
   const previousItemCount = useRef(itemCount);
   const settledInitialEndScroll = useRef(false);
@@ -207,6 +210,7 @@ function FeedItemRows({
               expandedLocalIndexes={expandedLocalIndexes}
               itemCount={itemCount}
               streamDatabase={streamDatabase}
+              streamPath={streamPath}
               virtualItems={virtualItems}
               measureElement={virtualizer.measureElement}
               onToggleLocalIndex={(localIndex) => {
@@ -305,6 +309,7 @@ function FeedRuntimeNotice({
 
 function FeedItemWindow({
   streamDatabase,
+  streamPath,
   virtualItems,
   expandedLocalIndexes,
   itemCount,
@@ -312,6 +317,7 @@ function FeedItemWindow({
   onToggleLocalIndex,
 }: {
   streamDatabase: StreamBrowserDatabase;
+  streamPath: string;
   virtualItems: VirtualItem[];
   expandedLocalIndexes: Set<number>;
   itemCount: number;
@@ -362,6 +368,7 @@ function FeedItemWindow({
             expanded={isExpanded}
             isLast={isLastFeedRow}
             row={row}
+            streamPath={streamPath}
             onToggle={() => onToggleLocalIndex(row.local_index)}
           />
         )}
@@ -374,14 +381,57 @@ function FeedItem({
   row,
   isLast,
   expanded,
+  streamPath,
   onToggle,
 }: {
   row: FeedItemRow;
   isLast: boolean;
   expanded: boolean;
+  streamPath: string;
   onToggle(): void;
 }) {
   const eventType = feedItemEventType(row);
+  const articleClass = isLast ? "min-w-0 overflow-hidden bg-white" : "relative min-w-0 overflow-hidden bg-white";
+
+  if (row.component === "stream.created") {
+    return (
+      <StreamLifecycleMarker
+        className={articleClass}
+        expanded={expanded}
+        kind="created"
+        offset={row.first_offset}
+        row={row}
+        onToggle={onToggle}
+      />
+    );
+  }
+
+  if (row.component === "stream.woken") {
+    return (
+      <StreamLifecycleMarker
+        className={articleClass}
+        expanded={expanded}
+        kind="woken"
+        offset={row.first_offset}
+        row={row}
+        onToggle={onToggle}
+      />
+    );
+  }
+
+  if (row.component === "stream.child-stream-created") {
+    return (
+      <ChildStreamCreatedFeedItem
+        className={articleClass}
+        currentStreamPath={streamPath}
+        eventType={eventType}
+        expanded={expanded}
+        row={row}
+        onToggle={onToggle}
+      />
+    );
+  }
+
   const offsetLabel =
     row.event_count === 1 ? String(row.first_offset) : `${row.first_offset}–${row.last_offset}`;
   const detailLabel =
@@ -395,7 +445,7 @@ function FeedItem({
       data-first-offset={row.first_offset}
       data-last-offset={row.last_offset}
       data-event-count={row.event_count}
-      className={isLast ? "min-w-0 overflow-hidden bg-white" : "relative min-w-0 overflow-hidden bg-white"}
+      className={articleClass}
     >
       <button
         aria-expanded={expanded}
@@ -408,16 +458,170 @@ function FeedItem({
         <span className="truncate">{eventType}</span>
         <span className="whitespace-nowrap text-[#667085]">{detailLabel}</span>
       </button>
-      {expanded ? (
-        <pre
-          className="m-0 overflow-auto whitespace-pre-wrap break-words p-2.5 font-mono text-[13px] leading-normal"
-          data-testid="feed-item-json"
-        >
-          {JSON.stringify(feedItemExpandedJson(row), null, 2)}
-        </pre>
-      ) : null}
+      {expanded ? <FeedItemJson row={row} /> : null}
     </article>
   );
+}
+
+function StreamLifecycleMarker({
+  className,
+  expanded,
+  kind,
+  offset,
+  row,
+  onToggle,
+}: {
+  className: string;
+  expanded: boolean;
+  kind: "created" | "woken";
+  offset: number;
+  row: FeedItemRow;
+  onToggle(): void;
+}) {
+  const label = kind === "created" ? "Durable object created" : "Durable object woke up";
+
+  return (
+    <article
+      className={className}
+      data-testid="feed-item"
+      data-component={row.component}
+      data-event-type={feedItemEventType(row)}
+      data-first-offset={row.first_offset}
+      data-last-offset={row.last_offset}
+      data-event-count={row.event_count}
+    >
+      <button
+        aria-expanded={expanded}
+        aria-label={`${label}, offset ${offset}`}
+        className="group relative flex w-full cursor-pointer items-center px-3 py-3"
+        data-testid="feed-lifecycle-marker"
+        data-kind={kind}
+        type="button"
+        onClick={onToggle}
+      >
+        <span aria-hidden className="absolute inset-x-3 top-1/2 h-px -translate-y-1/2 bg-violet-200" />
+        <span className="relative mx-auto bg-white px-3 text-[11px] font-medium tracking-wide text-violet-700">
+          {label}
+          <span className="ml-2 font-mono font-normal text-violet-500/80">#{offset}</span>
+        </span>
+      </button>
+      {expanded ? <FeedItemJson row={row} /> : null}
+    </article>
+  );
+}
+
+function ChildStreamCreatedFeedItem({
+  className,
+  currentStreamPath,
+  eventType,
+  expanded,
+  row,
+  onToggle,
+}: {
+  className: string;
+  currentStreamPath: string;
+  eventType: string;
+  expanded: boolean;
+  row: FeedItemRow;
+  onToggle(): void;
+}) {
+  const childPath = childStreamPathFromRow(row);
+  const childHref = streamPageHref(childPath);
+
+  return (
+    <article
+      className={className}
+      data-testid="feed-item"
+      data-component={row.component}
+      data-event-type={eventType}
+      data-first-offset={row.first_offset}
+      data-last-offset={row.last_offset}
+      data-event-count={row.event_count}
+    >
+      <div className="px-2.5 py-2">
+        <div className="flex items-start gap-2.5 rounded-lg border border-violet-100 bg-violet-50/60 px-3 py-2.5">
+          <span aria-hidden className="mt-0.5 text-sm leading-none text-violet-600">
+            ⎇
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-medium text-violet-950">Child stream created</p>
+            {childPath === undefined ? (
+              <p className="mt-1 font-mono text-[11px] text-violet-700/80">missing childPath in payload</p>
+            ) : (
+              <p className="mt-1 text-[11px] text-violet-800/90">
+                Under{" "}
+                <span className="font-mono text-violet-900">{currentStreamPath}</span>
+              </p>
+            )}
+            {childHref === undefined ? null : childHref.to === "/streams" ? (
+              <Link
+                className="mt-2 inline-flex items-center gap-1 font-mono text-xs text-violet-700 underline decoration-violet-300 underline-offset-2 hover:text-violet-900"
+                data-testid="feed-child-stream-link"
+                search={{ view: "browser-event-feed" }}
+                to="/streams"
+              >
+                Open {childPath}
+                <span aria-hidden>→</span>
+              </Link>
+            ) : (
+              <Link
+                className="mt-2 inline-flex items-center gap-1 font-mono text-xs text-violet-700 underline decoration-violet-300 underline-offset-2 hover:text-violet-900"
+                data-testid="feed-child-stream-link"
+                params={childHref.params}
+                search={{ view: "browser-event-feed" }}
+                to="/streams/$"
+              >
+                Open {childPath}
+                <span aria-hidden>→</span>
+              </Link>
+            )}
+          </div>
+          <button
+            aria-expanded={expanded}
+            aria-label="Toggle child stream event JSON"
+            className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-violet-600/80 hover:bg-violet-100/80"
+            data-testid="feed-item-meta"
+            type="button"
+            onClick={onToggle}
+          >
+            json
+          </button>
+        </div>
+      </div>
+      {expanded ? <FeedItemJson row={row} /> : null}
+    </article>
+  );
+}
+
+function FeedItemJson({ row }: { row: FeedItemRow }) {
+  return (
+    <pre
+      className="m-0 overflow-auto whitespace-pre-wrap break-words p-2.5 font-mono text-[13px] leading-normal"
+      data-testid="feed-item-json"
+    >
+      {JSON.stringify(feedItemExpandedJson(row), null, 2)}
+    </pre>
+  );
+}
+
+function childStreamPathFromRow(row: FeedItemRow): string | undefined {
+  const event = feedItemEvents(row)[0];
+  if (event === undefined) return undefined;
+  const payload = event.payload;
+  if (payload === null || typeof payload !== "object") return undefined;
+  const childPath = (payload as Record<string, unknown>).childPath;
+  return typeof childPath === "string" && childPath.length > 0 ? childPath : undefined;
+}
+
+function streamPageHref(streamPath: string | undefined):
+  | { to: "/streams"; params?: undefined }
+  | { to: "/streams/$"; params: { _splat: string } }
+  | undefined {
+  if (streamPath === undefined) return undefined;
+  if (streamPath === "/") return { to: "/streams" };
+  const splat = streamPath.replace(/^\//, "");
+  if (splat.length === 0) return undefined;
+  return { to: "/streams/$", params: { _splat: splat } };
 }
 
 function feedItemEventType(row: FeedItemRow) {

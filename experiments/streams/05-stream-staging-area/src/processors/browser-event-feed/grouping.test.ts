@@ -10,18 +10,21 @@ function event(offset: number, type: string): StreamEvent {
 
 const CREATED = "events.iterate.com/stream/created";
 const WOKEN = "events.iterate.com/stream/woken";
+const CHILD = "events.iterate.com/stream/child-stream-created";
 const DEBUG = "events.iterate.com/debug/random-event";
 
 describe("event-feed grouping", () => {
   it("writes specific-renderer events as their own singleton rows", () => {
     const e1 = event(1, CREATED);
     const e2 = event(2, WOKEN);
-    const { ops, endState } = planFeedOps(INITIAL_FEED_STATE, [e1, e2]);
+    const e3 = event(3, CHILD);
+    const { ops, endState } = planFeedOps(INITIAL_FEED_STATE, [e1, e2, e3]);
     expect(ops).toEqual([
       { kind: "insert", localIndex: 0, component: "stream.created", firstOffset: 1, lastOffset: 1, eventCount: 1, data: { events: [e1] } },
       { kind: "insert", localIndex: 1, component: "stream.woken", firstOffset: 2, lastOffset: 2, eventCount: 1, data: { events: [e2] } },
+      { kind: "insert", localIndex: 2, component: "stream.child-stream-created", firstOffset: 3, lastOffset: 3, eventCount: 1, data: { events: [e3] } },
     ]);
-    expect(endState).toEqual({ open: null, nextLocalIndex: 2 });
+    expect(endState).toEqual({ open: null, nextLocalIndex: 3 });
   });
 
   it("collapses a run of non-specific events of the same type into one group row that it keeps updating", () => {

@@ -717,6 +717,12 @@ test("event-feed view renders specific renderers as singletons and groups by typ
 
   await expect(page.locator("[data-testid='feed-item'][data-component='stream.created']")).toHaveCount(1);
   await expect(page.locator("[data-testid='feed-item'][data-component='stream.woken']")).toHaveCount(1);
+  await expect(page.locator("[data-testid='feed-lifecycle-marker'][data-kind='created']")).toContainText(
+    "Durable object created",
+  );
+  await expect(page.locator("[data-testid='feed-lifecycle-marker'][data-kind='woken']")).toContainText(
+    "Durable object woke up",
+  );
 
   await appendComposerEvent(page, { type: "events.iterate.com/debug/feed-a", payload: { v: 1 } });
   const groupA = page.locator("[data-testid='feed-item'][data-event-type='events.iterate.com/debug/feed-a']");

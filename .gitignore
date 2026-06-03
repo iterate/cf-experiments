@@ -5,3 +5,4 @@ dist/
 .DS_Store
 worker-configuration.d.ts
 .sqlfu/
+experiments/streams/05-stream-staging-area/example-app/test-results/

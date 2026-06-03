@@ -40,7 +40,7 @@ _Avoid_: pretty (renamed to event-feed); the `-browser` suffix form (slug is `br
 
 **Feed Item**:
 One row in `feed_items`, written by the `browser-event-feed` processor. Columns: `local_index` (dense 0-based PK, what TanStack Virtual indexes), `component` (the React component name to render), `first_offset` + `last_offset` (offset span), `event_count`, and `data` (a JSON blob holding whatever that component needs to render). Two cases per event:
-- the event's type **has a specific renderer** (e.g. `created` → `"stream.created"`, `woken` → `"stream.woken"`): write it as its OWN row (`event_count = 1`). A specific-renderer event also **closes** any open group.
+- the event's type **has a specific renderer** (e.g. `created` → `"stream.created"`, `woken` → `"stream.woken"`, `child-stream-created` → `"stream.child-stream-created"`): write it as its OWN row (`event_count = 1`). A specific-renderer event also **closes** any open group.
 - the event's type **has no specific renderer**: **upsert the open group** — extend the current group row (`event_count++`, `last_offset`, update `data`) if one is open, else insert a new group row (e.g. component `"group"`).
 So grouping only collapses *consecutive events lacking a specific renderer* into one group row; specific-renderer events are always singletons. The reduced `state` tracks whether the last row is an open, extendable group.
 _Avoid_: UI element, feed row, grouped event (use "Feed Item"); "group by component" (the rule is specific-renderer → own row, else upsert a group); typed render columns (render payload is the single `data` JSON blob)
