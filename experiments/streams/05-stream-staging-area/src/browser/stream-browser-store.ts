@@ -258,7 +258,7 @@ function createStreamRuntime(
 
   function connect() {
     if (stream !== undefined || disposed) return;
-    const streamUrl = new URL(`/stream/${encodeURIComponent(args.streamPath)}`, window.location.href);
+    const streamUrl = new URL(`/stream/${args.streamPath}`, window.location.href);
 
     void connectStream({
       url: streamUrl,

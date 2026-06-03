@@ -95,7 +95,6 @@ function FeedItemRows({
   const parentRef = useRef<HTMLDivElement>(null);
   const previousItemCount = useRef(itemCount);
   const settledInitialEndScroll = useRef(false);
-  const pendingTailScroll = useRef(false);
   const initialScrollOffset = useRef(
     itemCount > 50 ? topScrollAffordanceHeight + itemCount * estimatedFeedRowHeight : 0,
   );
@@ -136,42 +135,19 @@ function FeedItemRows({
   }, [itemCount, virtualizer]);
 
   useLayoutEffect(() => {
-    if (!pendingTailScroll.current) return;
-    pendingTailScroll.current = false;
-    virtualizer.scrollToEnd();
-    requestAnimationFrame(() => {
-      virtualizer.scrollToEnd();
-    });
-  }, [expandedLocalIndexes, itemCount, virtualizer]);
-
-  useLayoutEffect(() => {
     const appendedCount = itemCount - previousItemCount.current;
-    const wasAtEnd = scrollPosition.isAtEnd;
     previousItemCount.current = itemCount;
     if (appendedCount <= 0) {
       if (itemCount === 0) setNewItemCount(0);
       return;
     }
-    if (wasAtEnd) {
-      pendingTailScroll.current = true;
-      return;
+    if (!scrollPosition.isAtEnd) {
+      setNewItemCount((current) => current + appendedCount);
     }
-    setNewItemCount((current) => current + appendedCount);
   }, [itemCount, scrollPosition.isAtEnd]);
 
   useLayoutEffect(() => {
     if (scrollPosition.isAtEnd) setNewItemCount(0);
-  }, [scrollPosition.isAtEnd]);
-
-  useLayoutEffect(() => {
-    const composerChrome = document.querySelector("[data-testid='stream-composer-chrome']");
-    if (!(composerChrome instanceof HTMLElement)) return;
-
-    const resizeObserver = new ResizeObserver(() => {
-      if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
-    });
-    resizeObserver.observe(composerChrome);
-    return () => resizeObserver.disconnect();
   }, [scrollPosition.isAtEnd]);
 
   const showScrollToBottom = itemCount > 0 && !scrollPosition.isAtEnd;
@@ -198,62 +174,61 @@ function FeedItemRows({
       ) : null}
       <section
         aria-label="Event feed"
-        className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-white pr-4"
         data-testid="event-feed"
+        className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-white pr-4 [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
+        ref={parentRef}
       >
-        <section
-          className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
-          data-testid="event-feed-scroll"
-          ref={parentRef}
+        <div
+          className="sticky top-0 z-3 grid min-h-11 flex-none grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 border-b border-[#eef1f5] bg-white/95 pr-4 backdrop-blur-sm"
+          data-testid="feed-summary-bar"
         >
-          <div
-            className="sticky top-0 z-3 grid min-h-11 flex-none grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 border-b border-[#eef1f5] bg-white/95 pr-4 backdrop-blur-sm"
-            data-testid="feed-summary-bar"
-          >
-            <span className="text-xs font-semibold text-[#667085]">Event feed</span>
-            <output className="whitespace-nowrap font-mono text-xs text-[#667085]" data-testid="feed-item-count">
-              {itemCount.toLocaleString()} feed {itemCount === 1 ? "item" : "items"}
-            </output>
+          <span className="text-xs font-semibold text-[#667085]">Event feed</span>
+          <output className="whitespace-nowrap font-mono text-xs text-[#667085]" data-testid="feed-item-count">
+            {itemCount.toLocaleString()} feed {itemCount === 1 ? "item" : "items"}
+          </output>
+        </div>
+        <FeedRuntimeNotice itemCount={itemCount} snapshot={snapshot} />
+        {itemCount === 0 ? (
+          <div className="flex min-h-60 flex-1 items-center justify-center gap-2.5 text-sm text-slate-500">
+            {snapshot.connectionStatus === "subscribed" ? null : (
+              <div className="size-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
+            )}
+            <span>
+              {snapshot.connectionError === undefined
+                ? snapshot.connectionStatus === "subscribed"
+                  ? "No feed items yet"
+                  : `Stream connection is ${snapshot.connectionStatus}`
+                : `Stream connection is ${snapshot.connectionStatus}: ${snapshot.connectionError}`}
+            </span>
           </div>
-          <FeedRuntimeNotice itemCount={itemCount} snapshot={snapshot} />
-          {itemCount === 0 ? (
-            <div className="flex min-h-60 flex-1 items-center justify-center gap-2.5 text-sm text-slate-500">
-              {snapshot.connectionStatus === "subscribed" ? null : (
-                <div className="size-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
-              )}
-              <span>
-                {snapshot.connectionError === undefined
-                  ? snapshot.connectionStatus === "subscribed"
-                    ? "No feed items yet"
-                    : `Stream connection is ${snapshot.connectionStatus}`
-                  : `Stream connection is ${snapshot.connectionStatus}: ${snapshot.connectionError}`}
-              </span>
-            </div>
-          ) : (
-            <div className="relative w-full flex-1" style={{ minHeight: virtualizer.getTotalSize() }}>
-              <FeedItemWindow
-                expandedLocalIndexes={expandedLocalIndexes}
-                itemCount={itemCount}
-                streamDatabase={streamDatabase}
-                virtualItems={virtualItems}
-                measureElement={virtualizer.measureElement}
-                onToggleLocalIndex={(localIndex) => {
-                  if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
-                  setExpandedLocalIndexes((current) => {
-                    const next = new Set(current);
-                    if (next.has(localIndex)) {
-                      next.delete(localIndex);
-                    } else {
-                      next.add(localIndex);
-                    }
-                    return next;
-                  });
-                }}
-              />
-            </div>
-          )}
+        ) : (
+          <div className="relative w-full flex-1" style={{ minHeight: virtualizer.getTotalSize() }}>
+            <FeedItemWindow
+              expandedLocalIndexes={expandedLocalIndexes}
+              itemCount={itemCount}
+              streamDatabase={streamDatabase}
+              virtualItems={virtualItems}
+              measureElement={virtualizer.measureElement}
+              onToggleLocalIndex={(localIndex) => {
+                setExpandedLocalIndexes((current) => {
+                  const next = new Set(current);
+                  if (next.has(localIndex)) {
+                    next.delete(localIndex);
+                  } else {
+                    next.add(localIndex);
+                  }
+                  return next;
+                });
+              }}
+            />
+          </div>
+        )}
+        <div className="sticky bottom-0 z-[2] bg-white" data-testid="stream-composer-chrome">
           {showScrollToBottom ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex min-h-[72px] items-end justify-center pb-2.5">
+            <div
+              className="pointer-events-none absolute inset-x-0 top-0 z-10 flex min-h-[72px] -translate-y-full items-end justify-center pb-2.5"
+              data-testid="feed-scroll-to-bottom-affordance"
+            >
               <div className="absolute inset-0 bg-gradient-to-t from-white via-white/80 to-transparent" aria-hidden />
               <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 bottom-4">
                 <button
@@ -283,8 +258,6 @@ function FeedItemRows({
               </div>
             </div>
           ) : null}
-        </section>
-        <div className="flex-none bg-white" data-testid="stream-composer-chrome">
           <FeedComposer key={`composer:${streamPath}`} streamStore={streamStore} />
         </div>
       </section>

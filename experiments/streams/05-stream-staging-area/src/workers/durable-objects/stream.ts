@@ -17,13 +17,13 @@ import {
   type CircuitBreakerProcessorState,
 } from "../../processors/circuit-breaker/contract.js";
 import { getAncestorStreamPaths, coreProcessor } from "../../processors/core/implementation.js";
-import { coreProcessorContract } from "../../processors/core/contract.js";
+import { coreProcessorContract, type CoreProcessorState } from "../../processors/core/contract.js";
 import type { StreamProcessorRunnerRpc, StreamRpc, SubscriptionSink } from "../../types.js";
 
 export class Stream extends DurableObject<Env> implements StreamRpc {
   #state: StreamPersistedProcessorState;
   #coreProcessor = coreProcessor.build({
-    propagateChildStreamCreated: () => this.#propagateChildStreamCreated(),
+    propagateChildStreamCreated: (state) => this.#propagateChildStreamCreated(state),
   });
   #circuitBreakerProcessor = circuitBreakerProcessor.build({
     readStreamState: () => this.#state.core,
@@ -366,15 +366,15 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     return events;
   }
 
-  #propagateChildStreamCreated() {
-    for (const ancestorPath of getAncestorStreamPaths(this.#state.core.path)) {
-      const stream = this.env.STREAM.getByName(`${this.#state.core.namespace}:${ancestorPath}`);
+  #propagateChildStreamCreated(state: CoreProcessorState) {
+    for (const ancestorPath of getAncestorStreamPaths(state.path)) {
+      const stream = this.env.STREAM.getByName(`${state.namespace}:${ancestorPath}`);
       Promise.resolve(
         stream.append({
           event: {
             type: "events.iterate.com/stream/child-stream-created",
-            idempotencyKey: `child-stream-created:${ancestorPath}:${this.#state.core.path}`,
-            payload: { childPath: this.#state.core.path },
+            idempotencyKey: `child-stream-created:${ancestorPath}:${state.path}`,
+            payload: { childPath: state.path },
           },
         }),
       ).catch((error: unknown) => {

@@ -19,7 +19,7 @@ export function StreamStateView({ streamPath }: { streamPath: string }) {
     void (async () => {
       try {
         connection = await connectStream({
-          url: new URL(`/stream/${encodeURIComponent(streamPath)}`, window.location.href),
+          url: new URL(`/stream/${streamPath}`, window.location.href),
           onConnectionStatusChange: (next) => {
             if (!disposed) setStatus(next);
           },

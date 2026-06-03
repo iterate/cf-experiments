@@ -358,8 +358,7 @@ class BuiltinStreamSim {
   append(path: string, input: StreamEventInput, createdAtMs = 0): StreamEvent {
     const entry = this.#entry(path);
     const coreBuiltin = coreProcessor.build({
-      propagateChildStreamCreated: () => {
-        const coreState = entry.processorState.core;
+      propagateChildStreamCreated: (coreState) => {
         for (const ancestor of getAncestorStreamPaths(coreState.path)) {
           this.append(ancestor, {
             type: "events.iterate.com/stream/child-stream-created",

@@ -5,17 +5,17 @@
 
 import type { StreamEventInput } from "@cf-experiments/shared/event";
 import { implementBuiltinProcessor } from "../../processor.js";
-import { coreProcessorContract } from "./contract.js";
+import { coreProcessorContract, type CoreProcessorState } from "./contract.js";
 
 export const coreProcessor = implementBuiltinProcessor(
   coreProcessorContract,
-  (deps: { propagateChildStreamCreated: () => void }) => ({
+  (deps: { propagateChildStreamCreated: (state: CoreProcessorState) => void }) => ({
     beforeAppend({ event, state }) {
       assertStreamAppendAllowed({ event, state });
     },
-    afterAppend({ event }) {
+    afterAppend({ event, state }) {
       if (event.type !== "events.iterate.com/stream/created") return;
-      deps.propagateChildStreamCreated();
+      deps.propagateChildStreamCreated(state);
     },
   }),
 );

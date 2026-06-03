@@ -365,7 +365,7 @@ function StreamTopBar({
     }
     setEditingPath(false);
     if (normalizedDraftPath === "/") {
-      void navigate({ to: "/streams" });
+      void navigate({ to: "/streams", search: { view: "browser-raw-events" } });
       return;
     }
     void navigate({
@@ -491,7 +491,6 @@ function EventRows({
   const parentRef = useRef<HTMLDivElement>(null);
   const previousEventCount = useRef(eventCount);
   const settledInitialEndScroll = useRef(false);
-  const pendingTailScroll = useRef(false);
   const initialScrollOffset = useRef(
     eventCount > 50 ? topScrollAffordanceHeight + eventCount * estimatedEventRowHeight : 0,
   );
@@ -542,42 +541,19 @@ function EventRows({
   }, [eventCount, virtualizer]);
 
   useLayoutEffect(() => {
-    if (!pendingTailScroll.current) return;
-    pendingTailScroll.current = false;
-    virtualizer.scrollToEnd();
-    requestAnimationFrame(() => {
-      virtualizer.scrollToEnd();
-    });
-  }, [expandedOffsets, eventCount, virtualizer]);
-
-  useLayoutEffect(() => {
     const appendedCount = eventCount - previousEventCount.current;
-    const wasAtEnd = scrollPosition.isAtEnd;
     previousEventCount.current = eventCount;
     if (appendedCount <= 0) {
       if (eventCount === 0) setNewEventCount(0);
       return;
     }
-    if (wasAtEnd) {
-      pendingTailScroll.current = true;
-      return;
+    if (!scrollPosition.isAtEnd) {
+      setNewEventCount((current) => current + appendedCount);
     }
-    setNewEventCount((current) => current + appendedCount);
   }, [eventCount, scrollPosition.isAtEnd]);
 
   useLayoutEffect(() => {
     if (scrollPosition.isAtEnd) setNewEventCount(0);
-  }, [scrollPosition.isAtEnd]);
-
-  useLayoutEffect(() => {
-    const composerChrome = document.querySelector("[data-testid='stream-composer-chrome']");
-    if (!(composerChrome instanceof HTMLElement)) return;
-
-    const resizeObserver = new ResizeObserver(() => {
-      if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
-    });
-    resizeObserver.observe(composerChrome);
-    return () => resizeObserver.disconnect();
   }, [scrollPosition.isAtEnd]);
 
   const showScrollToBottom = eventCount > 0 && !scrollPosition.isAtEnd;
@@ -604,14 +580,10 @@ function EventRows({
       ) : null}
       <section
         aria-label="Stream events"
-        className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-white pr-4"
         data-testid="stream-events"
+        className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-white pr-4 [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
+        ref={parentRef}
       >
-        <section
-          className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
-          data-testid="stream-events-scroll"
-          ref={parentRef}
-        >
         <EventTypeFilterBar
           eventCount={eventCount}
           eventTypeFilter={eventTypeFilter}
@@ -649,7 +621,6 @@ function EventRows({
                 virtualItems={virtualItems}
                 measureElement={virtualizer.measureElement}
                 onToggleOffset={(offset) => {
-                  if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
                   setExpandedOffsets((current) => {
                     const next = new Set(current);
                     if (next.has(offset)) {
@@ -664,8 +635,12 @@ function EventRows({
             </div>
           </>
         )}
+        <div className="sticky bottom-0 z-[2] bg-white" data-testid="stream-composer-chrome">
           {showScrollToBottom ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex min-h-[72px] items-end justify-center pb-2.5">
+            <div
+              className="pointer-events-none absolute inset-x-0 top-0 z-10 flex min-h-[72px] -translate-y-full items-end justify-center pb-2.5"
+              data-testid="stream-scroll-to-bottom-affordance"
+            >
               <div className="absolute inset-0 bg-gradient-to-t from-white via-white/80 to-transparent" aria-hidden />
               <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 bottom-4">
                 <button
@@ -695,8 +670,6 @@ function EventRows({
               </div>
             </div>
           ) : null}
-        </section>
-        <div className="flex-none bg-white" data-testid="stream-composer-chrome">
           <StreamComposer key={`composer:${streamPath}`} streamStore={streamStore} />
         </div>
       </section>
@@ -970,11 +943,11 @@ function StreamSidebar({
         streamDatabase={streamDatabase}
         streamStore={streamStore}
       />
-      <StreamControlTool snapshot={snapshot} streamStore={streamStore} />
       <InsertEventsTool
         streamStore={streamStore}
         streamPath={streamPath}
       />
+      <StreamControlTool snapshot={snapshot} streamStore={streamStore} />
     </aside>
   );
 }
@@ -1524,7 +1497,7 @@ function InsertEventsTool({
   }
 
   return (
-    <section className="mt-4 grid gap-2 py-4 first:pt-0">
+    <section className="grid gap-2 border-t border-[#eef1f5] py-4">
       <h2 className="m-0 text-[11px] font-semibold uppercase tracking-[0.04em] text-[#98a2b3]">Insert events</h2>
       <label className="grid gap-1 text-[11px] font-medium text-[#667085]">
         <span>Count</span>

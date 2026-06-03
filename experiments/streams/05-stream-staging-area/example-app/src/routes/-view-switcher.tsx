@@ -11,21 +11,38 @@ export function ViewSwitcher({ streamPath, current }: { streamPath: string; curr
       className="flex flex-wrap gap-1 text-xs"
     >
       {STREAM_VIEWS.map(({ slug, label }) => (
-        <Link
-          key={slug}
-          to="/streams/$"
-          params={{ _splat: splat }}
-          search={{ view: slug }}
-          aria-current={slug === current ? "page" : undefined}
-          data-testid={`view-link-${slug}`}
-          className={
-            slug === current
-              ? "rounded-md bg-slate-900 px-2 py-1 font-medium text-white"
-              : "rounded-md px-2 py-1 text-slate-600 hover:bg-slate-100"
-          }
-        >
-          {label}
-        </Link>
+        streamPath === "/" ? (
+          <Link
+            key={slug}
+            to="/streams"
+            search={{ view: slug }}
+            aria-current={slug === current ? "page" : undefined}
+            data-testid={`view-link-${slug}`}
+            className={
+              slug === current
+                ? "rounded-md bg-slate-900 px-2 py-1 font-medium text-white"
+                : "rounded-md px-2 py-1 text-slate-600 hover:bg-slate-100"
+            }
+          >
+            {label}
+          </Link>
+        ) : (
+          <Link
+            key={slug}
+            to="/streams/$"
+            params={{ _splat: splat }}
+            search={{ view: slug }}
+            aria-current={slug === current ? "page" : undefined}
+            data-testid={`view-link-${slug}`}
+            className={
+              slug === current
+                ? "rounded-md bg-slate-900 px-2 py-1 font-medium text-white"
+                : "rounded-md px-2 py-1 text-slate-600 hover:bg-slate-100"
+            }
+          >
+            {label}
+          </Link>
+        )
       ))}
     </nav>
   );
