@@ -4,6 +4,7 @@ import type { SubscriptionSink, StreamRpc } from "../stream-types.js";
 import { acquireWriterRole, type WriterRole } from "./stream-leader.js";
 import { withStream, type StreamBrowserConnectionStatus } from "./stream-browser.js";
 import {
+  BROWSER_DB_SCHEMA_VERSION,
   StreamBrowserDatabase,
   type StreamDatabaseInfo,
 } from "./stream-browser-db.js";
@@ -77,6 +78,7 @@ export function createStreamBrowserStore(args: {
       emitSnapshot();
     }).catch((error: unknown) => {
       if (disposed) return;
+      console.error(`[stream-browser ${args.streamPath}] local database info refresh failed`, error);
       snapshot = { ...snapshot, connectionError: "local database error: " + errorMessage(error) };
       emitSnapshot();
     });
@@ -127,7 +129,17 @@ export function createStreamBrowserStore(args: {
   }
 
   async function reconcileLocalMirrorWithServer(rpc: RpcStub<StreamRpc>) {
-    const localMaxOffset = await streamDatabase.maxOffset();
+    const localSummary = await streamDatabase.eventSummary();
+    if (!localSummary.isContinuous) {
+      console.warn(
+        `[stream-browser ${args.streamPath}] Local SQLite mirror has non-continuous offsets; discarding local database.`,
+        { streamPath: args.streamPath, localSummary },
+      );
+      await discardLocalMirror();
+      return;
+    }
+
+    const localMaxOffset = localSummary.maxOffset ?? -1;
     if (localMaxOffset < 0) return;
 
     const { state: serverState } = await rpc.runtimeState();
@@ -187,7 +199,13 @@ export function createStreamBrowserStore(args: {
       }
     }, 250);
 
-    writerRole = acquireWriterRole(args.streamPath);
+    // Version the Web Lock by browser DB schema. Without this, an old deployed tab
+    // can keep the old writer lock after a new tab migrates/drops the shared OPFS
+    // table, leaving the new tab as a follower with an empty DB and no replay.
+    writerRole = acquireWriterRole({
+      compatibilityVersion: `browser-db-v${BROWSER_DB_SCHEMA_VERSION}`,
+      streamPath: args.streamPath,
+    });
     void writerRole.whenWriter
       .then(async () => {
         clearTimeout(followerTimeout);
@@ -196,7 +214,14 @@ export function createStreamBrowserStore(args: {
         emitSnapshot();
         await reconcileLocalMirrorWithServer(election.connection.rpc);
         const afterOffset = await streamDatabase.maxOffset();
-        return { afterOffset, sink: new BrowserMirrorSink({ streamDatabase, onStored }) };
+        return {
+          afterOffset,
+          sink: new BrowserMirrorSink({
+            streamDatabase,
+            onError: onMirrorWriteError,
+            onStored,
+          }),
+        };
       })
       .then((subscription) => {
         if (subscription === undefined || disposed || stream !== election.connection) return undefined;
@@ -219,6 +244,7 @@ export function createStreamBrowserStore(args: {
       .catch((error: unknown) => {
         clearTimeout(followerTimeout);
         if (disposed) return;
+        console.error(`[stream-browser ${args.streamPath}] subscribe failed`, error);
         stopSubscriptionElection();
         stream?.[Symbol.dispose]();
         stream = undefined;
@@ -229,6 +255,16 @@ export function createStreamBrowserStore(args: {
   function onStored(events: StreamEvent[]) {
     receivedEventCount += events.length;
     snapshot = { ...snapshot, receivedEventCount };
+    emitSnapshot();
+  }
+
+  function onMirrorWriteError(error: unknown) {
+    if (disposed) return;
+    console.error(`[stream-browser ${args.streamPath}] local mirror write failed`, error);
+    snapshot = {
+      ...snapshot,
+      connectionError: `local mirror write failed: ${errorMessage(error)}`,
+    };
     emitSnapshot();
   }
 
@@ -340,20 +376,48 @@ export function createStreamBrowserStore(args: {
 
 class BrowserMirrorSink extends RpcTarget implements SubscriptionSink {
   #tail = Promise.resolve();
+  #flushFrame: number | undefined;
+  #pendingEvents: StreamEvent[] = [];
   readonly #streamDatabase: StreamBrowserDatabase;
+  readonly #onError: (error: unknown) => void;
   readonly #onStored: (events: StreamEvent[]) => void;
 
   constructor(args: {
     streamDatabase: StreamBrowserDatabase;
+    onError(error: unknown): void;
     onStored(events: StreamEvent[]): void;
   }) {
     super();
     this.#streamDatabase = args.streamDatabase;
+    this.#onError = args.onError;
     this.#onStored = args.onStored;
   }
 
   processEventBatch(args: { events: StreamEvent[] }): undefined {
-    this.#tail = this.#tail.then(() => this.#store(args.events), () => this.#store(args.events));
+    this.#pendingEvents.push(...args.events);
+    this.#flushSoon();
+  }
+
+  #flushSoon() {
+    if (this.#flushFrame !== undefined) return;
+    // The server may deliver several batches inside one browser frame. Buffer
+    // them into one SQLite transaction so the local mirror remains high-throughput
+    // and TanStack Virtual sees one large append instead of same-turn count churn.
+    this.#flushFrame = requestAnimationFrame(() => {
+      this.#flushFrame = undefined;
+      const events = this.#pendingEvents;
+      this.#pendingEvents = [];
+      if (events.length === 0) return;
+      // Never let failed SQLite writes disappear into the fire-and-forget
+      // subscription path. A broken local mirror must be visible in both console
+      // and React state, otherwise followers can show an infinite empty spinner.
+      this.#tail = this.#tail
+        .then(() => this.#store(events), () => this.#store(events))
+        .catch((error: unknown) => {
+          this.#onError(error);
+        });
+      if (this.#pendingEvents.length > 0) this.#flushSoon();
+    });
   }
 
   async #store(events: StreamEvent[]) {

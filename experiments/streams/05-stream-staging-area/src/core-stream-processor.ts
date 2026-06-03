@@ -1,6 +1,22 @@
 import { z } from "zod";
 import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
 
+const outboundSubscriberSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("built-in"),
+    transport: z.literal("capnweb-websocket"),
+    processorSlug: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal("external-url"),
+    transport: z.literal("capnweb-websocket"),
+    url: z.url(),
+    headers: z.record(z.string(), z.string()).optional(),
+  }),
+  // TODO: Add dynamic-worker when a worker-name/entrypoint dialer exists.
+  // TODO: Add webhooks only if we want non-capnweb delivery semantics.
+]);
+
 export const coreStreamProcessorContract = defineProcessorContract({
   slug: "events.iterate.com/stream/core",
   version: "0.1.0",
@@ -23,24 +39,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
           type: z.literal("events.iterate.com/stream/subscription-configured"),
           payload: z.object({
             subscriptionKey: z.string().trim().min(1),
-            subscriber: z.discriminatedUnion("type", [
-              z.object({
-                type: z.literal("built-in"),
-                transport: z.literal("capnweb-websocket"),
-                processorSlug: z.string().trim().min(1),
-              }),
-              z.object({
-                type: z.literal("dynamic-worker"),
-                transport: z.literal("capnweb-websocket"),
-                workerName: z.string().trim().min(1),
-                entrypoint: z.string().trim().min(1),
-              }),
-              z.object({
-                type: z.literal("external-url"),
-                transport: z.literal("https-webhook"),
-                url: z.url(),
-              }),
-            ]),
+            subscriber: outboundSubscriberSchema,
           }),
           createdAt: z.string(),
         }),
@@ -85,24 +84,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
       description: "Configures or replaces an outbound subscription for this stream.",
       payloadSchema: z.object({
         subscriptionKey: z.string().trim().min(1),
-        subscriber: z.discriminatedUnion("type", [
-          z.object({
-            type: z.literal("built-in"),
-            transport: z.literal("capnweb-websocket"),
-            processorSlug: z.string().trim().min(1),
-          }),
-          z.object({
-            type: z.literal("dynamic-worker"),
-            transport: z.literal("capnweb-websocket"),
-            workerName: z.string().trim().min(1),
-            entrypoint: z.string().trim().min(1),
-          }),
-          z.object({
-            type: z.literal("external-url"),
-            transport: z.literal("https-webhook"),
-            url: z.url(),
-          }),
-        ]),
+        subscriber: outboundSubscriberSchema,
       }),
     },
   },

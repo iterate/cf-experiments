@@ -33,7 +33,7 @@ export class StreamProcessorRunner extends DurableObject {
   // that implements processEventBatch.
   // The Stream durable object helpfully shares the subscriptionConfiguredEvent with us,
   // so we can decide which stream processor implementation to use
-  subscribe(args: {
+  requestSubscription(args: {
     stream: RpcStub<StreamRpc>;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
     streamRuntimeState: { state: CoreStreamState };

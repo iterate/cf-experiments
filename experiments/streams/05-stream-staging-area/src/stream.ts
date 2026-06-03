@@ -513,7 +513,7 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
    *
    * What actually happens after appending a `subscription-configured` for key "echo":
    * reduced state now has `subscriptionsByKey.echo`, no connection exists for it, so
-   * this dials the `echo` runner DO over a websocket, handshakes via `runner.subscribe`,
+   * this dials the `echo` runner DO over a websocket, handshakes via `runner.requestSubscription`,
    * and `#openConnection`s the resulting sink as an outbound connection. On the next
    * boot the constructor's `#reconcile()` re-establishes that same connection from
    * persisted state with no new append needed.
@@ -534,18 +534,31 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
       // Reserve the key before any await so a concurrent reconcile can't dial twice.
       this.#connecting.add(subscriptionKey);
       try {
-        const processor = this.env.STREAM_PROCESSOR_RUNNER.getByName(
-          `${this.state.namespace}:${this.state.path}:${subscriptionKey}`,
-        );
-        const response = await processor.fetch(
-          new Request("https://stream-processor.local/", { headers: { Upgrade: "websocket" } }),
-        );
+        const subscriber = configured.latestConfiguredEvent.payload.subscriber;
+        let response: Response;
+        if (subscriber.type === "built-in") {
+          response = await this.env.STREAM_PROCESSOR_RUNNER.getByName(
+            `${this.state.namespace}:${this.state.path}:${subscriptionKey}`,
+          ).fetch(
+            new Request("https://stream-processor.local/", {
+              headers: { Upgrade: "websocket" },
+            }),
+          );
+        } else {
+          const headers = new Headers(subscriber.headers);
+          headers.set("Upgrade", "websocket");
+          response = await fetch(new Request(subscriber.url, { headers }));
+        }
         const webSocket = response.webSocket;
-        if (webSocket === null) throw new Error("expected stream processor websocket");
+        if (webSocket === null) {
+          throw new Error(
+            `expected stream processor websocket, got ${response.status} ${response.statusText}: ${await response.text()}`,
+          );
+        }
 
         webSocket.accept();
         const runner = newWebSocketRpcSession<StreamProcessorRunnerRpc>(webSocket);
-        const request = await runner.subscribe({
+        const request = await runner.requestSubscription({
           stream: new StreamRpcTarget(this),
           subscriptionConfiguredEvent: configured.latestConfiguredEvent,
           streamRuntimeState: this.runtimeState(),

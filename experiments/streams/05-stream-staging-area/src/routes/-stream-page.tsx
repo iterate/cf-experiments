@@ -37,7 +37,8 @@ export function StreamCompactView({ streamPath }: { streamPath: string }) {
 }
 
 function HydratedStreamPage({ streamPath }: { streamPath: string }) {
-  const runtime = useStreamRuntime(streamPath);
+  const [eventTypeFilter, setEventTypeFilter] = useState("");
+  const runtime = useStreamRuntime(streamPath, eventTypeFilter);
 
   return (
     <StreamPageWithDatabase
@@ -49,12 +50,17 @@ function HydratedStreamPage({ streamPath }: { streamPath: string }) {
       databaseError={runtime.countResult.error}
       databaseStatus={runtime.countResult.status}
       eventCount={runtime.eventCount}
+      eventTypeFilter={eventTypeFilter}
+      eventTypes={runtime.eventTypes}
+      totalEventCount={runtime.totalEventCount}
+      onEventTypeFilterChange={setEventTypeFilter}
     />
   );
 }
 
 function HydratedStreamCompactView({ streamPath }: { streamPath: string }) {
-  const runtime = useStreamRuntime(streamPath);
+  const [eventTypeFilter, setEventTypeFilter] = useState("");
+  const runtime = useStreamRuntime(streamPath, eventTypeFilter);
 
   return (
     <section
@@ -79,18 +85,22 @@ function HydratedStreamCompactView({ streamPath }: { streamPath: string }) {
       ) : (
         <EventRows
           eventCount={runtime.eventCount}
-          key={`events:${streamPath}:${runtime.snapshot.clearVersion}`}
+          eventTypeFilter={eventTypeFilter}
+          eventTypes={runtime.eventTypes}
+          key={`events:${streamPath}:${runtime.snapshot.clearVersion}:${eventTypeFilter}`}
           snapshot={runtime.snapshot}
           streamDatabase={runtime.streamDatabase}
           streamPath={streamPath}
           streamStore={runtime.streamStore}
+          totalEventCount={runtime.totalEventCount}
+          onEventTypeFilterChange={setEventTypeFilter}
         />
       )}
     </section>
   );
 }
 
-function useStreamRuntime(streamPath: string) {
+function useStreamRuntime(streamPath: string, eventTypeFilter: string) {
   const streamStore = useMemo(
     () => createStreamBrowserStore({ streamPath }),
     [streamPath],
@@ -101,12 +111,31 @@ function useStreamRuntime(streamPath: string) {
     streamStore.getServerSnapshot,
   );
   const streamDatabase = streamStore.streamDatabase;
-  const countResult = useStreamQuery(
+  const totalCountResult = useStreamQuery(
     streamDatabase,
     `SELECT COUNT(*) AS count FROM events`,
   );
+  const countResult = useStreamQuery(
+    streamDatabase,
+    eventTypeFilter === ""
+      ? `SELECT COUNT(*) AS count FROM events`
+      : `SELECT COUNT(*) AS count FROM events WHERE type = ?`,
+    eventTypeFilter === "" ? [] : [eventTypeFilter],
+  );
+  const eventTypesResult = useStreamQuery(
+    streamDatabase,
+    `SELECT type, COUNT(*) AS count
+     FROM events
+     GROUP BY type
+     ORDER BY type ASC`,
+  );
   const eventCount = Number(countResult.data[0]?.count ?? 0);
-  return { countResult, eventCount, snapshot, streamDatabase, streamStore };
+  const totalEventCount = Number(totalCountResult.data[0]?.count ?? 0);
+  const eventTypes = eventTypesResult.data.flatMap((row) => {
+    if (typeof row.type !== "string" || typeof row.count !== "number") return [];
+    return [{ count: row.count, type: row.type }];
+  });
+  return { countResult, eventCount, eventTypes, snapshot, streamDatabase, streamStore, totalEventCount };
 }
 
 function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
@@ -126,18 +155,26 @@ function StreamPageWithDatabase({
   streamDatabase,
   streamStore,
   eventCount,
+  eventTypeFilter,
+  eventTypes,
+  totalEventCount,
   databaseReady,
   databaseError,
   databaseStatus,
+  onEventTypeFilterChange,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
   streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
+  eventTypeFilter: string;
+  eventTypes: { count: number; type: string }[];
+  totalEventCount: number;
   databaseReady: boolean;
   databaseError: Error | undefined;
   databaseStatus: "pending" | "ok" | "error";
+  onEventTypeFilterChange(eventType: string): void;
 }) {
 
   return (
@@ -146,10 +183,14 @@ function StreamPageWithDatabase({
       databaseError={databaseError}
       databaseStatus={databaseStatus}
       eventCount={eventCount}
+      eventTypeFilter={eventTypeFilter}
+      eventTypes={eventTypes}
+      totalEventCount={totalEventCount}
       snapshot={snapshot}
       streamDatabase={streamDatabase}
       streamStore={streamStore}
       streamPath={streamPath}
+      onEventTypeFilterChange={onEventTypeFilterChange}
     />
   );
 }
@@ -160,18 +201,26 @@ function StreamPageLayout({
   streamDatabase,
   streamStore,
   eventCount,
+  eventTypeFilter,
+  eventTypes,
+  totalEventCount,
   databaseReady,
   databaseError,
   databaseStatus,
+  onEventTypeFilterChange,
 }: {
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
   streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
+  eventTypeFilter: string;
+  eventTypes: { count: number; type: string }[];
+  totalEventCount: number;
   databaseReady: boolean;
   databaseError: Error | undefined;
   databaseStatus: "pending" | "ok" | "error";
+  onEventTypeFilterChange(eventType: string): void;
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => globalThis.matchMedia("(min-width: 761px)").matches,
@@ -220,11 +269,15 @@ function StreamPageLayout({
           ) : (
             <EventRows
               eventCount={eventCount}
-              key={`events:${streamPath}:${snapshot.clearVersion}`}
+              eventTypeFilter={eventTypeFilter}
+              eventTypes={eventTypes}
+              key={`events:${streamPath}:${snapshot.clearVersion}:${eventTypeFilter}`}
               snapshot={snapshot}
               streamDatabase={streamDatabase}
               streamPath={streamPath}
               streamStore={streamStore}
+              totalEventCount={totalEventCount}
+              onEventTypeFilterChange={onEventTypeFilterChange}
             />
           )}
         </div>
@@ -428,133 +481,97 @@ function StreamTopBar({
 function EventRows({
   streamDatabase,
   eventCount,
+  eventTypeFilter,
+  eventTypes,
+  totalEventCount,
   snapshot,
   streamPath,
   streamStore,
+  onEventTypeFilterChange,
 }: {
   streamDatabase: StreamBrowserDatabase;
   eventCount: number;
+  eventTypeFilter: string;
+  eventTypes: { count: number; type: string }[];
+  totalEventCount: number;
   snapshot: StreamBrowserSnapshot;
   streamPath: string;
   streamStore: StreamBrowserStore;
+  onEventTypeFilterChange(eventType: string): void;
 }) {
   const topScrollAffordanceHeight = 48;
   const parentRef = useRef<HTMLDivElement>(null);
-  const footerRef = useRef<HTMLDivElement>(null);
-  const settledInitialEndScroll = useRef(false);
   const previousEventCount = useRef(eventCount);
-  const userHasMovedAwayFromEnd = useRef(false);
-  const [footerHeight, setFooterHeight] = useState(0);
+  const settledInitialEndScroll = useRef(false);
   const [expandedOffsets, setExpandedOffsets] = useState(() => new Set<number>());
-  const [scrollState, dispatchScrollState] = useReducer(
-    (
-      state,
-      action:
-        | { type: "clear-unread" }
-        | { type: "add-unread"; count: number }
-        | { type: "set-scroll-position"; scrollPosition: { isAtTop: boolean; isAtEnd: boolean } },
-    ) => {
-      switch (action.type) {
-        case "clear-unread":
-          return state.unreadEventCount === 0 ? state : { ...state, unreadEventCount: 0 };
-        case "add-unread":
-          return {
-            ...state,
-            unreadEventCount: state.unreadEventCount + action.count,
-          };
-        case "set-scroll-position":
-          return state.scrollPosition.isAtTop === action.scrollPosition.isAtTop &&
-            state.scrollPosition.isAtEnd === action.scrollPosition.isAtEnd
-            ? state
-            : {
-                ...state,
-                scrollPosition: action.scrollPosition,
-                unreadEventCount: action.scrollPosition.isAtEnd ? 0 : state.unreadEventCount,
-              };
-      }
-    },
-    {
-      scrollPosition: { isAtTop: true, isAtEnd: true },
-      unreadEventCount: 0,
-    },
-  );
+  const [newEventCount, setNewEventCount] = useState(0);
+  const [scrollPosition, setScrollPosition] = useState({ isAtTop: true, isAtEnd: true });
   const virtualizer = useVirtualizer({
     count: eventCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 40,
+    estimateSize: () => 38,
     // This stream is append-only, so the virtual index is a stable item key.
     // If this grows older-history prepends later, switch this to a persisted row id.
     getItemKey: (index) => index,
     anchorTo: "end",
     followOnAppend: true,
     paddingStart: topScrollAffordanceHeight,
-    paddingEnd: footerHeight,
     scrollEndThreshold: 80,
     overscan: 6,
+    // The official React chat example uses direct DOM updates. Without this,
+    // a tiny/non-scrollable list that receives a huge same-render append can
+    // scroll to the previous max offset and stop following the end.
+    directDomUpdates: true,
     onChange(instance) {
-      const scrollElement = parentRef.current;
-      const distanceFromEnd =
-        scrollElement === null
-          ? 0
-          : scrollElement.scrollHeight - scrollElement.clientHeight - scrollElement.scrollTop;
       const nextScrollPosition = {
         isAtTop: (instance.scrollOffset ?? 0) <= 4,
-        isAtEnd: distanceFromEnd <= 4 || !userHasMovedAwayFromEnd.current,
+        isAtEnd: instance.isAtEnd(),
       };
-      if (nextScrollPosition.isAtEnd) userHasMovedAwayFromEnd.current = false;
-      dispatchScrollState({ type: "set-scroll-position", scrollPosition: nextScrollPosition });
+      setScrollPosition((current) =>
+        current.isAtTop === nextScrollPosition.isAtTop &&
+          current.isAtEnd === nextScrollPosition.isAtEnd
+          ? current
+          : nextScrollPosition
+      );
     },
   });
   const virtualItems = virtualizer.getVirtualItems();
 
   useLayoutEffect(() => {
-    const footerElement = footerRef.current;
-    if (footerElement === null) return;
-
-    function updateFooterHeight(element: HTMLDivElement) {
-      setFooterHeight(Math.ceil(element.getBoundingClientRect().height));
-    }
-
-    updateFooterHeight(footerElement);
-    const resizeObserver = new ResizeObserver(() => updateFooterHeight(footerElement));
-    resizeObserver.observe(footerElement);
-    return () => resizeObserver.disconnect();
-  }, []);
+    if (settledInitialEndScroll.current || eventCount === 0) return;
+    settledInitialEndScroll.current = true;
+    virtualizer.scrollToEnd();
+  }, [eventCount, virtualizer]);
 
   useLayoutEffect(() => {
-    const appendedEventCount = Math.max(0, eventCount - previousEventCount.current);
+    const appendedCount = eventCount - previousEventCount.current;
     previousEventCount.current = eventCount;
-
-    if (!settledInitialEndScroll.current) {
-      if (eventCount === 0) return;
-      virtualizer.scrollToEnd();
-      dispatchScrollState({ type: "clear-unread" });
-      if (virtualizer.isAtEnd()) {
-        settledInitialEndScroll.current = true;
-      }
+    if (appendedCount <= 0) {
+      if (eventCount === 0) setNewEventCount(0);
       return;
     }
-
-    if (appendedEventCount === 0) return;
-
-    if (userHasMovedAwayFromEnd.current && !scrollState.scrollPosition.isAtEnd) {
-      dispatchScrollState({ type: "add-unread", count: appendedEventCount });
-    } else {
-      virtualizer.scrollToEnd();
-      dispatchScrollState({ type: "clear-unread" });
+    if (!scrollPosition.isAtEnd) {
+      setNewEventCount((current) => current + appendedCount);
     }
-  }, [eventCount, scrollState.scrollPosition.isAtEnd, virtualizer]);
+  }, [eventCount, scrollPosition.isAtEnd]);
 
-  const showBottomFade = eventCount > 0 && !scrollState.scrollPosition.isAtEnd;
-  const showScrollToBottom = eventCount > 0 && !scrollState.scrollPosition.isAtEnd;
-  const showScrollToTop = eventCount > 0 && !scrollState.scrollPosition.isAtTop;
+  useLayoutEffect(() => {
+    if (scrollPosition.isAtEnd) setNewEventCount(0);
+  }, [scrollPosition.isAtEnd]);
 
-  function stopFollowingEnd() {
-    userHasMovedAwayFromEnd.current = true;
-  }
+  const showScrollToBottom = eventCount > 0 && !scrollPosition.isAtEnd;
+  const showScrollToTop = eventCount > 0 && !scrollPosition.isAtTop;
 
   return (
     <div className="stream-page__feed">
+      <EventTypeFilterBar
+        eventCount={eventCount}
+        eventTypeFilter={eventTypeFilter}
+        eventTypes={eventTypes}
+        totalEventCount={totalEventCount}
+        onEventTypeFilterChange={onEventTypeFilterChange}
+      />
+      <StreamRuntimeNotice eventCount={eventCount} snapshot={snapshot} />
       {showScrollToTop ? (
         <div className="stream-page__feed-top-fade">
           <div className="stream-page__feed-top-fade-mask" aria-hidden />
@@ -564,7 +581,6 @@ function EventRows({
               className="stream-page__scroll-button"
               type="button"
               onClick={() => {
-                stopFollowingEnd();
                 virtualizer.scrollToOffset(0);
               }}
             >
@@ -576,21 +592,8 @@ function EventRows({
       <section
         aria-label="Stream events"
         data-testid="stream-events"
-        className={
-          showBottomFade
-            ? "stream-page__stream stream-page__stream--fade-bottom"
-            : "stream-page__stream"
-        }
+        className="stream-page__stream"
         ref={parentRef}
-        onTouchStart={stopFollowingEnd}
-        onPointerDown={(event) => {
-          if (event.target === event.currentTarget) {
-            stopFollowingEnd();
-          }
-        }}
-        onWheel={(event) => {
-          if (event.deltaY < 0) stopFollowingEnd();
-        }}
       >
         {eventCount === 0 ? (
           <div className="stream-page__stream-placeholder">
@@ -598,7 +601,9 @@ function EventRows({
               <div className="stream-page__spinner" aria-hidden="true" />
             )}
             <span>
-              {snapshot.connectionError === undefined
+              {eventTypeFilter !== ""
+                ? "SQLite is ready; no events match the selected event type"
+                : snapshot.connectionError === undefined
                 ? snapshot.connectionStatus === "subscribed"
                   ? "SQLite is ready; no events are stored locally yet"
                   : `SQLite is ready; stream connection is ${snapshot.connectionStatus}`
@@ -613,6 +618,7 @@ function EventRows({
             >
               <EventRowWindow
                 eventCount={eventCount}
+                eventTypeFilter={eventTypeFilter}
                 expandedOffsets={expandedOffsets}
                 streamDatabase={streamDatabase}
                 virtualItems={virtualItems}
@@ -632,44 +638,123 @@ function EventRows({
             </div>
           </>
         )}
-      </section>
-      <div className="stream-page__feed-footer" ref={footerRef}>
-        {showBottomFade ? (
-          <div className="stream-page__feed-fade">
-            <div className="stream-page__feed-fade-mask" aria-hidden />
-            {showScrollToBottom ? (
+        <div className="stream-page__feed-footer">
+          {showScrollToBottom ? (
+            <div className="stream-page__feed-fade">
+              <div className="stream-page__feed-fade-mask" aria-hidden />
               <div className="stream-page__scroll-affordance stream-page__scroll-affordance--in-fade">
                 <button
-                  aria-label="Scroll to bottom"
+                  aria-label={
+                    newEventCount === 0
+                      ? "Scroll to bottom"
+                      : `Scroll to bottom, ${newEventCount} new ${
+                          newEventCount === 1 ? "event" : "events"
+                        }`
+                  }
                   className={
-                    scrollState.unreadEventCount > 0
-                      ? "stream-page__scroll-button stream-page__scroll-button--has-unread"
-                      : "stream-page__scroll-button"
+                    newEventCount === 0
+                      ? "stream-page__scroll-button"
+                      : "stream-page__scroll-button stream-page__scroll-button--with-count"
                   }
                   type="button"
                   onClick={() => {
-                    userHasMovedAwayFromEnd.current = false;
-                    dispatchScrollState({ type: "clear-unread" });
+                    setNewEventCount(0);
                     virtualizer.scrollToEnd();
                   }}
                 >
-                  <span className="stream-page__scroll-button-arrow" aria-hidden>
-                    ↓
-                  </span>
-                  {scrollState.unreadEventCount > 0 ? (
-                    <span className="stream-page__scroll-button-unread" aria-live="polite">
-                      {scrollState.unreadEventCount} new
-                    </span>
-                  ) : null}
+                  <span className="stream-page__scroll-button-arrow">↓</span>
+                  {newEventCount === 0 ? null : (
+                    <span className="stream-page__scroll-button-count">{newEventCount}</span>
+                  )}
                 </button>
               </div>
-            ) : null}
-          </div>
-        ) : null}
-        <StreamComposer key={`composer:${streamPath}`} streamStore={streamStore} />
-      </div>
+            </div>
+          ) : null}
+          <StreamComposer key={`composer:${streamPath}`} streamStore={streamStore} />
+        </div>
+      </section>
     </div>
   );
+}
+
+function EventTypeFilterBar({
+  eventCount,
+  eventTypeFilter,
+  eventTypes,
+  totalEventCount,
+  onEventTypeFilterChange,
+}: {
+  eventCount: number;
+  eventTypeFilter: string;
+  eventTypes: { count: number; type: string }[];
+  totalEventCount: number;
+  onEventTypeFilterChange(eventType: string): void;
+}) {
+  const totalLabel = `${totalEventCount.toLocaleString()} total ${
+    totalEventCount === 1 ? "event" : "events"
+  }`;
+  const filteredLabel = `${eventCount.toLocaleString()} filtered ${
+    eventCount === 1 ? "event" : "events"
+  }`;
+
+  return (
+    <div className="stream-page__filter-bar">
+      <label className="stream-page__filter-field">
+        <span>Event type</span>
+        <select
+          aria-label="Event type filter"
+          className="stream-page__input stream-page__filter-select"
+          value={eventTypeFilter}
+          onChange={(event) => onEventTypeFilterChange(event.currentTarget.value)}
+        >
+          <option value="">All event types</option>
+          {eventTypes.map((eventType) => (
+            <option key={eventType.type} value={eventType.type}>
+              {eventType.type} ({eventType.count})
+            </option>
+          ))}
+        </select>
+      </label>
+      <output className="stream-page__filter-count" data-testid="filter-count">
+        {eventTypeFilter === "" ? totalLabel : `${filteredLabel} / ${totalLabel}`}
+      </output>
+    </div>
+  );
+}
+
+function StreamRuntimeNotice({
+  eventCount,
+  snapshot,
+}: {
+  eventCount: number;
+  snapshot: StreamBrowserSnapshot;
+}) {
+  if (snapshot.connectionError !== undefined) {
+    return (
+      <div className="stream-page__notice stream-page__notice--error" data-testid="stream-error" role="alert">
+        <strong>Stream error</strong>
+        <span>{snapshot.connectionError}</span>
+      </div>
+    );
+  }
+
+  if (eventCount === 0 && snapshot.subscriptionStatus === "follower") {
+    // This is the exact failure shape seen after a deploy with stale tabs:
+    // the tab is connected but intentionally not subscribing, and its local
+    // SQLite mirror is empty. Surface it loudly instead of showing only a
+    // spinner, because there may be no exception in this tab's console.
+    return (
+      <div className="stream-page__notice stream-page__notice--warning" data-testid="stream-warning" role="status">
+        <strong>Follower with empty SQLite mirror</strong>
+        <span>
+          This tab is waiting for the elected writer tab to mirror events into local SQLite.
+          Reload or close older tabs if this does not resolve.
+        </span>
+      </div>
+    );
+  }
+
+  return null;
 }
 
 function EventRowWindow({
@@ -677,6 +762,7 @@ function EventRowWindow({
   virtualItems,
   expandedOffsets,
   eventCount,
+  eventTypeFilter,
   measureElement,
   onToggleOffset,
 }: {
@@ -684,31 +770,65 @@ function EventRowWindow({
   virtualItems: VirtualItem[];
   expandedOffsets: Set<number>;
   eventCount: number;
+  eventTypeFilter: string;
   measureElement: (node: Element | null) => void;
   onToggleOffset(offset: number): void;
 }) {
   const firstIndex = virtualItems[0]?.index ?? 0;
   const lastIndex = virtualItems.at(-1)?.index ?? -1;
+  const windowSize = Math.max(0, lastIndex - firstIndex + 1);
   // local_index is the dense, zero-based browser list position TanStack Virtual reads.
   // Today it is offset - 1 and SQLite rejects gaps. If server-side TTL later ages out
   // old offsets, this column can remain the local dense index while offset keeps its
   // original stream identity.
+  //
+  // With no filter, the virtual index and local_index are the same. With an event-type
+  // filter, TanStack Virtual indexes the filtered list, so SQLite walks the
+  // events_type_local_index index in local order and returns LIMIT/OFFSET rows from
+  // that filtered list.
   const rowQueryResult = useStreamQuery(
     streamDatabase,
-    `SELECT local_index, offset, type, idempotency_key, created_at, inserted_at, json_pretty(raw_jsonb) AS raw_json
-     FROM events
-     WHERE local_index >= ? AND local_index < ?
-     ORDER BY local_index ASC`,
-    [firstIndex, lastIndex + 1],
+    eventTypeFilter === ""
+      ? `SELECT local_index AS virtual_index, '' AS query_event_type,
+           local_index, offset, type, idempotency_key, created_at, inserted_at, json_pretty(raw_jsonb) AS raw_json
+         FROM events
+         WHERE local_index >= ? AND local_index < ?
+         ORDER BY local_index ASC`
+      : `SELECT ? + ROW_NUMBER() OVER (ORDER BY local_index) - 1 AS virtual_index,
+           ? AS query_event_type,
+           local_index, offset, type, idempotency_key, created_at, inserted_at, raw_json
+         FROM (
+           SELECT local_index, offset, type, idempotency_key, created_at, inserted_at, json_pretty(raw_jsonb) AS raw_json
+           FROM events
+           WHERE type = ?
+           ORDER BY local_index ASC
+           LIMIT ? OFFSET ?
+         )
+         ORDER BY local_index ASC`,
+    eventTypeFilter === ""
+      ? [firstIndex, lastIndex + 1]
+      : [firstIndex, eventTypeFilter, eventTypeFilter, windowSize, firstIndex],
   );
   const rowsByLocalIndex = useMemo(() => {
     const rows = new Map<number, StreamEventRow>();
     for (const row of rowQueryResult.data) {
       const event = streamEventRowFromSql(row);
-      if (event !== undefined) rows.set(event.local_index, event);
+      if (
+        event !== undefined &&
+        row.query_event_type === eventTypeFilter &&
+        typeof row.virtual_index === "number"
+      ) {
+        rows.set(row.virtual_index, event);
+      }
     }
     return rows;
-  }, [rowQueryResult.data]);
+  }, [eventTypeFilter, rowQueryResult.data]);
+  const markedFirstRowDraw = useRef(false);
+  useLayoutEffect(() => {
+    if (markedFirstRowDraw.current || rowsByLocalIndex.size === 0) return;
+    markedFirstRowDraw.current = true;
+    performance.mark("stream:first-event-row");
+  }, [rowsByLocalIndex.size]);
 
   return virtualItems.map((virtualItem) => {
     const event = rowsByLocalIndex.get(virtualItem.index);
@@ -724,7 +844,7 @@ function EventRowWindow({
         }
         data-index={virtualItem.index}
         key={virtualItem.key}
-        ref={measureElement}
+        ref={event === undefined ? undefined : measureElement}
         style={{ transform: `translateY(${virtualItem.start}px)` }}
       >
         {event === undefined ? (
@@ -1077,17 +1197,13 @@ function InsertEventsTool({
                 { length: Math.min(batchSize, count - startIndex) },
                 (_, indexInBatch) => {
                   const index = startIndex + indexInBatch;
-                  return {
-                    type: "events.iterate.com/debug/random-event",
-                    payload: {
-                      streamPath,
-                      index,
-                      count,
-                      batchIndex,
-                      batchSize,
-                      value: crypto.randomUUID(),
-                    },
-                  };
+                  return randomStreamEventInput({
+                    batchIndex,
+                    batchSize,
+                    count,
+                    index,
+                    streamPath,
+                  });
                 },
               ),
             });
@@ -1202,7 +1318,117 @@ function InsertEventsTool({
   );
 }
 
+function randomStreamEventInput(args: {
+  batchIndex: number;
+  batchSize: number;
+  count: number;
+  index: number;
+  streamPath: string;
+}) {
+  const randomValues = new Uint32Array(3);
+  crypto.getRandomValues(randomValues);
+  const random = randomValues[0] ?? 0;
+  const suffix = `${args.index}-${crypto.randomUUID().slice(0, 8)}`;
+  const actors = ["Ada", "Grace", "Linus", "Margaret", "Katherine", "Dennis"];
+  const nouns = ["invoice", "deployment", "workspace", "artifact", "subscription", "trace"];
+  const adjectives = ["urgent", "draft", "verified", "archived", "reviewed", "blocked"];
+  const actor = actors[random % actors.length] ?? "Ada";
+  const noun = nouns[(randomValues[1] ?? 0) % nouns.length] ?? "artifact";
+  const adjective = adjectives[(randomValues[2] ?? 0) % adjectives.length] ?? "reviewed";
+  const eventTypes = [
+    "events.iterate.com/core/metadata-updated",
+    "events.iterate.com/core/child-stream-created",
+    "events.iterate.com/core/error-occurred",
+    "events.iterate.com/core/circuit-breaker-configured",
+    "events.iterate.com/core/paused",
+    "events.iterate.com/core/resumed",
+    "https://events.iterate.com/manual-event-appended",
+  ];
+  const type = eventTypes[random % eventTypes.length] ?? "https://events.iterate.com/manual-event-appended";
+  const debug = {
+    batchIndex: args.batchIndex,
+    batchSize: args.batchSize,
+    count: args.count,
+    generatedAt: new Date().toISOString(),
+    index: args.index,
+    streamPath: args.streamPath,
+  };
+
+  if (type === "events.iterate.com/core/metadata-updated") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        description: `${actor} marked the ${noun} as ${adjective}.`,
+        labels: [adjective, noun],
+        title: `${adjective} ${noun}`,
+        updatedBy: actor,
+      },
+    };
+  }
+
+  if (type === "events.iterate.com/core/child-stream-created") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        childStreamPath: `${args.streamPath}/children/${suffix}`,
+        createdBy: actor,
+        reason: `follow-up for ${noun}`,
+      },
+    };
+  }
+
+  if (type === "events.iterate.com/core/error-occurred") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        errorId: crypto.randomUUID(),
+        failedEventType: "https://events.iterate.com/manual-event-appended",
+        message: `${actor} could not process ${adjective} ${noun}.`,
+        severity: random % 3 === 0 ? "high" : random % 3 === 1 ? "medium" : "low",
+      },
+    };
+  }
+
+  if (type === "events.iterate.com/core/circuit-breaker-configured") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        burstCapacity: 50 + (random % 500),
+        configuredBy: actor,
+        refillRatePerMinute: 10 + (random % 90),
+      },
+    };
+  }
+
+  if (type === "events.iterate.com/core/paused" || type === "events.iterate.com/core/resumed") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        actor,
+        reason: `${adjective} ${noun} maintenance`,
+      },
+    };
+  }
+
+  return {
+    type,
+    payload: {
+      ...debug,
+      actor,
+      body: `${actor} appended a ${adjective} note about the ${noun}.`,
+      id: crypto.randomUUID(),
+      tags: [noun, adjective],
+    },
+  };
+}
+
 function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [composerText, setComposerText] = useState(() =>
     JSON.stringify(
       {
@@ -1216,6 +1442,13 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
     ),
   );
   const [appendState, setAppendState] = useState<"idle" | "appending" | "done" | "error">("idle");
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (textarea === null) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${textarea.scrollHeight}px`;
+  }, [composerText]);
 
   async function appendComposerEvent() {
     setAppendState("appending");
@@ -1236,18 +1469,42 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
         <textarea
           aria-label="Event JSON"
           className="stream-page__textarea"
+          ref={textareaRef}
           spellCheck={false}
           value={composerText}
-          onChange={(event) => setComposerText(event.currentTarget.value)}
+          onChange={(event) => {
+            setAppendState("idle");
+            setComposerText(event.currentTarget.value);
+          }}
         />
+        {appendState === "idle" ? null : (
+          <output
+            aria-live="polite"
+            className={
+              appendState === "error"
+                ? "stream-page__composer-state stream-page__composer-state--error"
+                : "stream-page__composer-state"
+            }
+          >
+            {appendState === "appending" ? "appending" : appendState === "done" ? "appended" : "error"}
+          </output>
+        )}
         <button
           aria-label={
             appendState === "error" ? "Append failed; retry append event" : "Append event"
           }
-          title={appendState === "appending" ? "Appending" : "Append event"}
+          title={
+            appendState === "appending"
+              ? "Appending"
+              : appendState === "done"
+                ? "Appended"
+                : "Append event"
+          }
           className={
             appendState === "error"
               ? "stream-page__composer-submit stream-page__composer-submit--error"
+              : appendState === "done"
+                ? "stream-page__composer-submit stream-page__composer-submit--done"
               : "stream-page__composer-submit"
           }
           disabled={appendState === "appending"}

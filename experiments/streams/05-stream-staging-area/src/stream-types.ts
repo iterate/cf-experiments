@@ -78,7 +78,7 @@ export type StreamProcessorRunnerRuntimeState = {
 };
 
 export type StreamProcessorRunnerRpc = SubscriptionSink & {
-  subscribe(args: {
+  requestSubscription(args: {
     stream: RpcStub<StreamRpc>;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
     streamRuntimeState: { state: CoreStreamState };

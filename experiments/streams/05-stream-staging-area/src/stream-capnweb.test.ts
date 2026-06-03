@@ -1,12 +1,20 @@
+import type { IncomingMessage } from "node:http";
+import { WebSocket as WsWebSocket, WebSocketServer } from "ws";
 import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { describe, expect, it } from "vitest";
-import type { StreamRpc, SubscriptionSink } from "./stream-types.js";
+import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
+import type {
+  StreamProcessorRunnerRpc,
+  StreamRpc,
+  SubscriptionSink,
+} from "./stream-types.js";
 import { connectStreamProcessorRunnerFromNode } from "./client-libraries/stream-node-worker.js";
 import { withStream } from "./client-libraries/stream-browser.js";
 
 const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
 const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
+const externalRunnerPort = Number(process.env.STREAM_STAGING_EXTERNAL_RUNNER_PORT ?? 0);
 
 type WsMessage = {
   direction: "out" | "in";
@@ -18,6 +26,34 @@ class TestSubscriptionSink extends RpcTarget implements SubscriptionSink {
 
   processEventBatch(args: { events: StreamEvent[] }): undefined {
     this.batches.push(args.events);
+  }
+}
+
+class NodeStreamProcessorRunner extends RpcTarget implements StreamProcessorRunnerRpc {
+  readonly requestHeaders: Headers[] = [];
+  readonly batches: StreamEvent[][] = [];
+  subscriptionConfiguredEvent: SubscriptionConfiguredEvent | undefined;
+  streamRuntimeState: { state: CoreStreamState } | undefined;
+
+  requestSubscription(args: {
+    stream: RpcStub<StreamRpc>;
+    subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
+    streamRuntimeState: { state: CoreStreamState };
+  }): { sink: SubscriptionSink; afterOffset?: number } {
+    this.subscriptionConfiguredEvent = args.subscriptionConfiguredEvent;
+    this.streamRuntimeState = args.streamRuntimeState;
+    return { sink: this };
+  }
+
+  processEventBatch(args: { events: StreamEvent[] }): undefined {
+    this.batches.push(args.events);
+  }
+
+  runtimeState() {
+    return {
+      processorSlug: undefined,
+      snapshot: undefined,
+    };
   }
 }
 
@@ -327,6 +363,57 @@ describe("stream capnweb protocol", () => {
     }, 1_000);
   });
 
+  e2eIt("runs an external-url capnweb websocket processor from a node server", async () => {
+    const path = `stream-capnweb-node-runner-${crypto.randomUUID()}`;
+    const subscriptionKey = "node-runner";
+    const headerValue = crypto.randomUUID();
+    const runner = new NodeStreamProcessorRunner();
+    await using runnerServer = await startNodeStreamProcessorRunnerServer({
+      port: externalRunnerPort,
+      runner,
+    });
+    await using stream = await connectStream(path);
+
+    const configured = await stream.rpc.append({
+      event: {
+        type: "events.iterate.com/stream/subscription-configured",
+        idempotencyKey: `subscription:${subscriptionKey}`,
+        payload: {
+          subscriptionKey,
+          subscriber: {
+            type: "external-url",
+            transport: "capnweb-websocket",
+            url: runnerServer.url,
+            headers: {
+              "x-stream-test": headerValue,
+            },
+          },
+        },
+      },
+    });
+
+    await waitFor(
+      () =>
+        runner.subscriptionConfiguredEvent?.offset === configured.offset &&
+        runner.streamRuntimeState?.state.path === path &&
+        runner.requestHeaders.some((headers) => headers.get("x-stream-test") === headerValue),
+      10_000,
+    );
+
+    const appended = await stream.rpc.append({
+      event: {
+        type: "test.processor.node-runner-input",
+        payload: { path },
+      },
+    });
+
+    await waitFor(
+      () => runner.batches.some((batch) => batch.some((event) => event.offset === appended.offset)),
+      10_000,
+    );
+    expect(runner.batches.flat()).toContainEqual(appended);
+  });
+
   e2eIt("delivers event batches without subscriber-originated return traffic", async () => {
     const path = `stream-capnweb-wire-${crypto.randomUUID()}`;
     const sink = new TestSubscriptionSink();
@@ -390,6 +477,64 @@ describe("stream capnweb protocol", () => {
   });
 });
 
+async function startNodeStreamProcessorRunnerServer(args: {
+  port: number;
+  runner: NodeStreamProcessorRunner;
+}): Promise<
+  AsyncDisposable & {
+    url: string;
+  }
+> {
+  const sessions = new Set<Disposable>();
+  const server = new WebSocketServer({
+    host: "127.0.0.1",
+    port: args.port,
+  });
+
+  server.on("connection", (socket: WsWebSocket, request: IncomingMessage) => {
+    args.runner.requestHeaders.push(headersFromIncomingMessage(request));
+    const session = newWebSocketRpcSession(socket as unknown as globalThis.WebSocket, args.runner);
+    sessions.add(session);
+    socket.once("close", () => {
+      sessions.delete(session);
+      session[Symbol.dispose]();
+    });
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error(`unexpected WebSocket server address: ${String(address)}`);
+  }
+
+  return {
+    url: `http://127.0.0.1:${address.port}/`,
+    async [Symbol.asyncDispose]() {
+      for (const session of sessions) session[Symbol.dispose]();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
+    },
+  };
+}
+
+function headersFromIncomingMessage(request: IncomingMessage) {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(request.headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) headers.append(name, item);
+    } else {
+      headers.set(name, value);
+    }
+  }
+  return headers;
+}
+
 async function connectStream(path: string): Promise<
   AsyncDisposable & {
     rpc: RpcStub<StreamRpc>;
@@ -399,7 +544,7 @@ async function connectStream(path: string): Promise<
   const wsMessages: WsMessage[] = [];
   const webSocket = newRecordingWebSocket(toStreamWebSocketUrl(path), wsMessages);
   await waitForWebSocketOpen(webSocket);
-  const rpc = newWebSocketRpcSession<StreamRpc>(webSocket);
+  const rpc = newWebSocketRpcSession<StreamRpc>(webSocket as unknown as globalThis.WebSocket);
 
   return {
     rpc,

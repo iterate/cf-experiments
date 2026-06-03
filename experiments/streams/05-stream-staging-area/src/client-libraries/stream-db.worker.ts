@@ -54,13 +54,18 @@ async function open(path: string): Promise<void> {
 
 async function openWithRetry(path: string): Promise<number> {
   let lastError: unknown;
-  for (let attempt = 0; attempt <= 25; attempt += 1) {
+  for (let attempt = 0; attempt <= 60; attempt += 1) {
     try {
       if (sqlite3 === undefined) throw new Error("sqlite not initialised");
       return await sqlite3.open_v2(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, VFS_NAME);
     } catch (error) {
       lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, Math.min(50, 2 ** attempt)));
+      // In split views a disposed OPFSCoopSyncVFS connection can still be handing off
+      // its access handle while the replacement pane opens another DB. wa-sqlite can
+      // surface that as transient OPFS "file or directory could not be found"; retry
+      // open long enough to avoid turning the handoff into a permanent loading error.
+      // The split-view disposal Playwright spec repeats this race.
+      await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * 2 ** attempt)));
     }
   }
   throw new Error(`sqlite3_open_v2 failed for ${path}: ${errorMessage(lastError)}`);

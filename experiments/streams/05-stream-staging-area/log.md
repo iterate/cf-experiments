@@ -62,6 +62,112 @@ First-party sources:
 
 ## 2026-06-03
 
+### Fixed stale browser writer lock after deploy/schema changes
+
+Observed a deployed-profile failure where `/streams/` showed `connected`, `follower`,
+`Events: 0`, and `Storage: opfs`, while a fresh incognito profile worked. The likely cause
+was a stale old tab still holding the old unversioned Web Lock (`stream-writer:/`) after a
+new deployment/schema bump. A newly loaded tab could migrate/drop the shared OPFS table, then
+sit forever as a follower with an empty DB because the old tab still held the writer lock and
+never replayed history into the migrated table.
+
+Changed browser writer election to include the browser DB compatibility version in the lock
+name. Fresh code now takes a fresh lock such as `stream-writer:browser-db-v4:/...` and
+subscribes immediately. Same-profile tabs still use the same stream `subscriptionKey`, so the
+Durable Object replaces the stale browser connection and keeps one live browser subscriber.
+
+Also hardened the wa-sqlite OPFS open path: split-view replacement exposed a transient OPFS
+"file or directory could not be found" during cooperative handle handoff. The worker now
+retries initial open long enough for that handoff instead of turning it into a permanent DB
+error panel.
+
+Added Playwright coverage for a fresh runtime taking over while a legacy unversioned writer
+lock is deliberately held.
+
+Follow-up: added explicit error/warning surfaces in the feed. A local SQLite query failure
+now logs SQL + params to the console, local mirror write failures log and update
+`connectionError`, and the feed renders a visible error banner for any stream runtime error.
+The exact stuck state reported in the browser (`follower` + empty local SQLite mirror) now
+renders a warning banner instead of only showing a spinner.
+
+### Made random bulk inserts varied and filterable
+
+The sidebar "Stream random events" tool now emits a mix of Iterate-inspired event types
+(`events.iterate.com/core/metadata-updated`, `child-stream-created`, `error-occurred`,
+`circuit-breaker-configured`, `paused`, `resumed`, and
+`https://events.iterate.com/manual-event-appended`) with varied inspectable payloads. This
+makes large-stream/filter testing less monotonous without adding a fake-data dependency.
+
+The filter bar now shows total local events when unfiltered and `N filtered / M total` when
+an event type is selected.
+
+Verification:
+- local `pnpm typecheck`
+- local `pnpm test:e2e`: `21 passed`
+- deployed version `2d44d39c-1f9f-4b6f-8fb1-7e6e53794ca7`
+- deployed `WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev pnpm test:e2e`: `21 passed`
+
+### Added an indexed browser-side event type filter
+
+Added a minimal event-type filter above the stream feed. The stream page still keeps the
+important SQL visible in the component: the count query is either `SELECT COUNT(*) FROM
+events` or `... WHERE type = ?`, and the visible TanStack Virtual range query uses the
+ordinary `local_index` window until a type is selected. Filtered windows walk a new SQLite
+index on `(type, local_index)`, preserving stream order without adding another local
+projection table.
+
+Schema version bumped to `4`; no backwards compatibility because this is still a proof of
+concept and stale browser mirrors are disposable.
+
+Verification:
+- local `pnpm typecheck`
+- local `pnpm test:e2e`: `18 passed`
+- deployed version `15f4eec7-9db0-483a-8d0f-c7636ffcff3e`
+- deployed `WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev pnpm test:e2e`: `18 passed`
+
+### Fixed stream feed scroll stutter with a TanStack Virtual repro
+
+Built `/virtual-repro` as a small TanStack Virtual chat-list harness to isolate the stream
+feed's scroll jumps from SQLite, capnweb, the composer, and the stream page chrome. The
+minimal repro showed:
+- A tiny/non-scrollable list (`2` rows) that receives one huge append follows the tail when
+  `directDomUpdates: true` is enabled, matching the official React chat example.
+- Several same-turn/microtask appends can still leave the viewport stuck far from the end.
+- The same chunks spaced by `requestAnimationFrame` follow correctly.
+- Normal and overlaid footer variants are not the root cause once appends are frame-spaced.
+
+The stream page now keeps the event virtualizer close to the documented chat setup:
+`anchorTo: "end"`, `followOnAppend: true`, `directDomUpdates: true`, fixed 38px collapsed
+row estimates, no measured footer padding, and much less local scroll state. Pending rows are
+not measured into TanStack Virtual's size cache. The browser subscriber buffers delivered
+server batches into one SQLite transaction per animation frame, so the mirror still writes
+large batches efficiently while the UI sees one append per paint instead of same-turn count
+churn.
+
+Verification:
+- local `pnpm --filter @cf-experiments/05-stream-staging-area test:e2e`: `13 passed`
+- deployed version `5c0f6e53-b250-423d-a0f5-8ed4b51e7cd9`
+- deployed `WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev pnpm --filter @cf-experiments/05-stream-staging-area test:e2e`: `13 passed`
+
+Follow-up: the composer now lives inside the native stream scroller but uses `position:
+sticky; bottom: 0`, so the scrollbar still runs to the bottom of the viewport beside the
+composer while the composer stays visible when scrolling up from a long stream. The
+Playwright suite now asserts this directly by scrolling upward from the tail and checking the
+composer remains pinned to the scroller bottom.
+
+Follow-up: restored the bottom affordance unread badge. `EventRows` tracks only local view
+state: when `eventCount` increases while TanStack Virtual says the view is not at the end, it
+adds that delta to the badge; reaching or clicking the tail clears it. Added Playwright
+coverage for the simple one-event case and a stress case: seed 100 rows, scroll away from the
+tail, append 5,000 rows over 5 seconds while jitter-scrolling older rows without entering the
+end threshold, and assert the affordance ends at `5,000 new events`.
+
+Verification:
+- local `pnpm typecheck`
+- local `pnpm test:e2e`: `16 passed`
+- deployed version `352e53eb-831f-437f-9549-41ee5a61c59b`
+- deployed `WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev pnpm test:e2e`: `14 passed`
+
 ### Simplified the browser stream mirror around raw SQLite queries
 
 Reworked the stream page/browser mirror after reviewing primary docs for React external

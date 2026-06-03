@@ -143,7 +143,7 @@ importers:
         version: 24.12.4
       captun:
         specifier: ^0.0.3
-        version: 0.0.3(@types/node@24.12.4)(valibot@1.4.1(typescript@5.9.3))(ws@8.20.1)
+        version: 0.0.3(@types/node@24.12.4)(valibot@1.4.1(typescript@5.9.3))(ws@8.21.0)
       vitest:
         specifier: ^4.1.7
         version: 4.1.7(@types/node@24.12.4)(vite@8.0.16(@types/node@24.12.4)(esbuild@0.27.3)(jiti@2.7.0))
@@ -161,19 +161,19 @@ importers:
         version: 1.14.3
       '@orpc/openapi':
         specifier: ^1.14.3
-        version: 1.14.3(ws@8.20.1)
+        version: 1.14.3(ws@8.21.0)
       '@orpc/server':
         specifier: ^1.14.3
-        version: 1.14.3(ws@8.20.1)
+        version: 1.14.3(ws@8.21.0)
       '@orpc/zod':
         specifier: ^1.14.3
-        version: 1.14.3(@orpc/contract@1.14.3)(@orpc/server@1.14.3(ws@8.20.1))(ws@8.20.1)(zod@4.4.3)
+        version: 1.14.3(@orpc/contract@1.14.3)(@orpc/server@1.14.3(ws@8.21.0))(ws@8.21.0)(zod@4.4.3)
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
       trpc-cli:
         specifier: ^0.14.1
-        version: 0.14.1(@orpc/server@1.14.3(ws@8.20.1))(valibot@1.4.1(typescript@5.9.3))(zod@4.4.3)
+        version: 0.14.1(@orpc/server@1.14.3(ws@8.21.0))(valibot@1.4.1(typescript@5.9.3))(zod@4.4.3)
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -195,7 +195,7 @@ importers:
         version: 1.14.3
       '@orpc/experimental-durable-iterator':
         specifier: 1.14.3
-        version: 1.14.3(react@19.2.6)(typescript@5.9.3)(ws@8.20.1)
+        version: 1.14.3(react@19.2.6)(typescript@5.9.3)(ws@8.21.0)
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
@@ -267,8 +267,8 @@ importers:
         specifier: ^1.168.18
         version: 1.168.18(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(vite@8.0.16(@types/node@24.12.4)(esbuild@0.27.3)(jiti@2.7.0))
       '@tanstack/react-virtual':
-        specifier: ^3.13.26
-        version: 3.13.26(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+        specifier: ^3.14.2
+        version: 3.14.2(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
       capnweb:
         specifier: ^0.8.0
         version: 0.8.0
@@ -297,6 +297,9 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.15)
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       '@vitejs/plugin-react':
         specifier: ^6.0.2
         version: 6.0.2(vite@8.0.16(@types/node@24.12.4)(esbuild@0.27.3)(jiti@2.7.0))
@@ -309,6 +312,9 @@ importers:
       wrangler:
         specifier: ^4.95.0
         version: 4.95.0(@cloudflare/workers-types@4.20260601.1)
+      ws:
+        specifier: ^8.21.0
+        version: 8.21.0
 
   packages/shared:
     dependencies:
@@ -1562,8 +1568,8 @@ packages:
       react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
       react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
 
-  '@tanstack/react-virtual@3.13.26':
-    resolution: {integrity: sha512-DosdgjOxCLahkn0o+ilmZYwEjo1glfMGuRT/j3PQ18yr5XqA8N/BCaL9IJ3B5TRl+nnzyK2IOFgAILwzN3a9xQ==}
+  '@tanstack/react-virtual@3.14.2':
+    resolution: {integrity: sha512-IpWnmCLvuymRfeeLNVXIzNEYBFLpd3drVIS91sqV78VTZFyldlChkOocZRCPp1B+Wnk09bcLNme8WaMU/9/9bQ==}
     peerDependencies:
       react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
       react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
@@ -1632,8 +1638,8 @@ packages:
   '@tanstack/store@0.9.3':
     resolution: {integrity: sha512-8reSzl/qGWGGVKhBoxXPMWzATSbZLZFWhwBAFO9NAyp0TxzfBP0mIrGb8CP8KrQTmvzXlR/vFPPUrHTLBGyFyw==}
 
-  '@tanstack/virtual-core@3.16.0':
-    resolution: {integrity: sha512-Er2N7q3WOiH6y2JLxsxNX+u2/sLqSsL0bxFgDjuiPiA7vKhZRm+IzcS17vRee3GNXr64UsesA5CAp9yTiIYw9A==}
+  '@tanstack/virtual-core@3.17.0':
+    resolution: {integrity: sha512-gOxY/hFkPh/XQYhnThBHzkbkX3Ed+z/iushyz+R+JAr213aXxUDgQoTgTdrDpBSRsjFM73P/KfUyWmaF9WHMkQ==}
 
   '@tanstack/virtual-file-routes@1.162.0':
     resolution: {integrity: sha512-uhOeFyxLcU41HzvrxsGpiWdcMbScY1EDgbZ5K7DVRMYInbLYWAC0EA/kx9wXAoSM8q82bUG2hRl8+EAjE6XAbA==}
@@ -1664,6 +1670,9 @@ packages:
 
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
+
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@typescript/native-preview-darwin-arm64@7.0.0-dev.20260521.1':
     resolution: {integrity: sha512-DfwzV0Qc8VDHqQXG4uc0+bbHB23u/Twrl+D7H1Izo16MmwBse3kjdKAKCJDqeboYvofx/AetKZP9yo+VxjvOWg==}
@@ -2626,6 +2635,18 @@ packages:
       utf-8-validate:
         optional: true
 
+  ws@8.21.0:
+    resolution: {integrity: sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   xmlbuilder2@4.0.3:
     resolution: {integrity: sha512-bx8Q1STctnNaaDymWnkfQLKofs0mGNN7rLLapJlGuV3VlvegD7Ls4ggMjE3aUSWItCCzU0PEv45lI87iSigiCA==}
     engines: {node: '>=20.0'}
@@ -3268,11 +3289,11 @@ snapshots:
     transitivePeerDependencies:
       - '@opentelemetry/api'
 
-  '@orpc/experimental-durable-iterator@1.14.3(react@19.2.6)(typescript@5.9.3)(ws@8.20.1)':
+  '@orpc/experimental-durable-iterator@1.14.3(react@19.2.6)(typescript@5.9.3)(ws@8.21.0)':
     dependencies:
       '@orpc/client': 1.14.3
       '@orpc/contract': 1.14.3
-      '@orpc/server': 1.14.3(ws@8.20.1)
+      '@orpc/server': 1.14.3(ws@8.21.0)
       '@orpc/shared': 1.14.3
       partysocket: 1.1.19(react@19.2.6)
       valibot: 1.4.1(typescript@5.9.3)
@@ -3286,12 +3307,12 @@ snapshots:
 
   '@orpc/interop@1.14.3': {}
 
-  '@orpc/json-schema@1.14.3(ws@8.20.1)':
+  '@orpc/json-schema@1.14.3(ws@8.21.0)':
     dependencies:
       '@orpc/contract': 1.14.3
       '@orpc/interop': 1.14.3
-      '@orpc/openapi': 1.14.3(ws@8.20.1)
-      '@orpc/server': 1.14.3(ws@8.20.1)
+      '@orpc/openapi': 1.14.3(ws@8.21.0)
+      '@orpc/server': 1.14.3(ws@8.21.0)
       '@orpc/shared': 1.14.3
       json-schema-typed: 8.0.2
     transitivePeerDependencies:
@@ -3309,13 +3330,13 @@ snapshots:
     transitivePeerDependencies:
       - '@opentelemetry/api'
 
-  '@orpc/openapi@1.14.3(ws@8.20.1)':
+  '@orpc/openapi@1.14.3(ws@8.21.0)':
     dependencies:
       '@orpc/client': 1.14.3
       '@orpc/contract': 1.14.3
       '@orpc/interop': 1.14.3
       '@orpc/openapi-client': 1.14.3
-      '@orpc/server': 1.14.3(ws@8.20.1)
+      '@orpc/server': 1.14.3(ws@8.21.0)
       '@orpc/shared': 1.14.3
       '@orpc/standard-server': 1.14.3
       json-schema-typed: 8.0.2
@@ -3326,7 +3347,7 @@ snapshots:
       - fastify
       - ws
 
-  '@orpc/server@1.14.3(ws@8.20.1)':
+  '@orpc/server@1.14.3(ws@8.21.0)':
     dependencies:
       '@orpc/client': 1.14.3
       '@orpc/contract': 1.14.3
@@ -3340,7 +3361,7 @@ snapshots:
       '@orpc/standard-server-peer': 1.14.3
       cookie: 1.1.1
     optionalDependencies:
-      ws: 8.20.1
+      ws: 8.21.0
     transitivePeerDependencies:
       - '@opentelemetry/api'
       - fastify
@@ -3395,12 +3416,12 @@ snapshots:
     transitivePeerDependencies:
       - '@opentelemetry/api'
 
-  '@orpc/zod@1.14.3(@orpc/contract@1.14.3)(@orpc/server@1.14.3(ws@8.20.1))(ws@8.20.1)(zod@4.4.3)':
+  '@orpc/zod@1.14.3(@orpc/contract@1.14.3)(@orpc/server@1.14.3(ws@8.21.0))(ws@8.21.0)(zod@4.4.3)':
     dependencies:
       '@orpc/contract': 1.14.3
-      '@orpc/json-schema': 1.14.3(ws@8.20.1)
-      '@orpc/openapi': 1.14.3(ws@8.20.1)
-      '@orpc/server': 1.14.3(ws@8.20.1)
+      '@orpc/json-schema': 1.14.3(ws@8.21.0)
+      '@orpc/openapi': 1.14.3(ws@8.21.0)
+      '@orpc/server': 1.14.3(ws@8.21.0)
       '@orpc/shared': 1.14.3
       escape-string-regexp: 5.0.0
       wildcard-match: 5.1.4
@@ -3707,9 +3728,9 @@ snapshots:
       react-dom: 19.2.6(react@19.2.6)
       use-sync-external-store: 1.6.0(react@19.2.6)
 
-  '@tanstack/react-virtual@3.13.26(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
+  '@tanstack/react-virtual@3.14.2(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
     dependencies:
-      '@tanstack/virtual-core': 3.16.0
+      '@tanstack/virtual-core': 3.17.0
       react: 19.2.6
       react-dom: 19.2.6(react@19.2.6)
 
@@ -3828,7 +3849,7 @@ snapshots:
 
   '@tanstack/store@0.9.3': {}
 
-  '@tanstack/virtual-core@3.16.0': {}
+  '@tanstack/virtual-core@3.17.0': {}
 
   '@tanstack/virtual-file-routes@1.162.0': {}
 
@@ -3859,6 +3880,10 @@ snapshots:
       csstype: 3.2.3
 
   '@types/retry@0.12.0': {}
+
+  '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 24.12.4
 
   '@typescript/native-preview-darwin-arm64@7.0.0-dev.20260521.1':
     optional: true
@@ -3993,12 +4018,12 @@ snapshots:
 
   capnweb@0.8.0: {}
 
-  captun@0.0.3(@types/node@24.12.4)(valibot@1.4.1(typescript@5.9.3))(ws@8.20.1):
+  captun@0.0.3(@types/node@24.12.4)(valibot@1.4.1(typescript@5.9.3))(ws@8.21.0):
     dependencies:
       '@inquirer/prompts': 8.5.1(@types/node@24.12.4)
-      '@orpc/server': 1.14.3(ws@8.20.1)
+      '@orpc/server': 1.14.3(ws@8.21.0)
       capnweb: 0.8.0
-      trpc-cli: 0.14.1(@orpc/server@1.14.3(ws@8.20.1))(valibot@1.4.1(typescript@5.9.3))(zod@4.4.3)
+      trpc-cli: 0.14.1(@orpc/server@1.14.3(ws@8.21.0))(valibot@1.4.1(typescript@5.9.3))(zod@4.4.3)
       zod: 4.4.3
     transitivePeerDependencies:
       - '@opentelemetry/api'
@@ -4558,11 +4583,11 @@ snapshots:
 
   tinyrainbow@3.1.0: {}
 
-  trpc-cli@0.14.1(@orpc/server@1.14.3(ws@8.20.1))(valibot@1.4.1(typescript@5.9.3))(zod@4.4.3):
+  trpc-cli@0.14.1(@orpc/server@1.14.3(ws@8.21.0))(valibot@1.4.1(typescript@5.9.3))(zod@4.4.3):
     dependencies:
       commander: 14.0.3
     optionalDependencies:
-      '@orpc/server': 1.14.3(ws@8.20.1)
+      '@orpc/server': 1.14.3(ws@8.21.0)
       valibot: 1.4.1(typescript@5.9.3)
       zod: 4.4.3
 
@@ -4729,6 +4754,8 @@ snapshots:
       - utf-8-validate
 
   ws@8.20.1: {}
+
+  ws@8.21.0: {}
 
   xmlbuilder2@4.0.3:
     dependencies:

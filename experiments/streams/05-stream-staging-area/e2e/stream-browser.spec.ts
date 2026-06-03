@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
+// Baseline end-to-end smoke test for the simplified browser mirror: a composer append must
+// go to the server, be delivered back through the single elected subscriber, land in SQLite,
+// and show up through the visible-range SQL query.
 test("stream page appends through the shared browser mirror", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(streamRoute(streamPath));
@@ -19,6 +22,126 @@ test("stream page appends through the shared browser mirror", async ({ page }) =
   await expect(eventMeta(page, type).first()).toBeVisible();
 });
 
+// Event type filtering should stay as simple as the stream page SQL: COUNT(*) over the
+// generated type column plus the visible TanStack Virtual window over the same indexed type
+// and local_index ordering. The downloaded DB query plan check catches accidental full scans.
+test("event type filter uses the indexed SQLite type column", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  const primaryType = "events.iterate.com/debug/playwright-filter-primary";
+  const secondaryType = "events.iterate.com/debug/playwright-filter-secondary";
+  await appendComposerEvent(page, {
+    type: primaryType,
+    payload: { streamPath, value: crypto.randomUUID() },
+  });
+  await expect(eventMeta(page, primaryType).first()).toBeVisible();
+  await appendComposerEvent(page, {
+    type: secondaryType,
+    payload: { streamPath, value: crypto.randomUUID() },
+  });
+  await expect(eventMeta(page, secondaryType).first()).toBeVisible();
+  await appendComposerEvent(page, {
+    type: primaryType,
+    payload: { streamPath, value: crypto.randomUUID() },
+  });
+  await expect(eventMeta(page, primaryType)).toHaveCount(2);
+  await expect(page.getByTestId("event-count")).toHaveText("5");
+
+  await expect(page.getByLabel("Event type filter")).toContainText(primaryType);
+  await page.getByLabel("Event type filter").selectOption(primaryType);
+  await expect(page.getByTestId("event-count")).toHaveText("2");
+  await expect(page.getByTestId("filter-count")).toHaveText("2 filtered events / 5 total events");
+  await expect(eventMeta(page, primaryType)).toHaveCount(2);
+  await expect(eventMeta(page, secondaryType)).toHaveCount(0);
+  await expect(eventMeta(page, "events.iterate.com/stream/created")).toHaveCount(0);
+
+  await appendComposerEvent(page, {
+    type: secondaryType,
+    payload: { streamPath, value: crypto.randomUUID() },
+  });
+  await expect(page.getByTestId("event-count")).toHaveText("2");
+  await expect(eventMeta(page, secondaryType)).toHaveCount(0);
+
+  await appendComposerEvent(page, {
+    type: primaryType,
+    payload: { streamPath, value: crypto.randomUUID() },
+  });
+  await expect(page.getByTestId("event-count")).toHaveText("3");
+  await expect(page.getByTestId("filter-count")).toHaveText("3 filtered events / 7 total events");
+  await expect(eventMeta(page, primaryType)).toHaveCount(3);
+
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download", exact: true }).click();
+  const download = await downloadPromise;
+  const tempDirectory = mkdtempSync(join(tmpdir(), "stream-browser-db-"));
+  try {
+    const dbPath = join(tempDirectory, download.suggestedFilename());
+    await download.saveAs(dbPath);
+    expect(sqliteScalar(dbPath, `SELECT COUNT(*) FROM events WHERE type = ${sqliteLiteral(primaryType)}`)).toBe("3");
+    expect(sqliteQueryPlan(
+      dbPath,
+      `SELECT COUNT(*) FROM events WHERE type = ${sqliteLiteral(primaryType)}`,
+    )).toContain("events_type_local_index");
+    expect(sqliteQueryPlan(
+      dbPath,
+      `SELECT local_index FROM events WHERE type = ${sqliteLiteral(primaryType)} ORDER BY local_index ASC LIMIT 10 OFFSET 0`,
+    )).toContain("events_type_local_index");
+  } finally {
+    rmSync(tempDirectory, { force: true, recursive: true });
+  }
+});
+
+// The sidebar bulk inserter is an operator toy for large-stream testing, not just a counter.
+// It should generate varied, inspectable event types so the SQLite type filter can be tested
+// against realistic-looking streams without hand-editing composer JSON for every row.
+test("random bulk insert creates multiple filterable event types and shows filtered plus total counts", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await page.getByLabel("Count").fill("80");
+  await page.getByLabel("Batch size").fill("80");
+  await page.getByLabel("Seconds").fill("0");
+  await page.getByRole("button", { name: "Stream random events" }).click();
+  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("82", { timeout: 30_000 });
+  await expect(page.getByTestId("filter-count")).toHaveText("82 total events");
+
+  const generatedEventTypes = await page.getByLabel("Event type filter").evaluate((element) => {
+    if (!(element instanceof HTMLSelectElement)) throw new Error("event type filter must be a select");
+    return [...element.options]
+      .map((option) => option.value)
+      .filter((value) => value.startsWith("events.iterate.com/core/") || value.startsWith("https://events.iterate.com/"));
+  });
+  expect(generatedEventTypes.length).toBeGreaterThanOrEqual(3);
+
+  const selectedType = generatedEventTypes[0];
+  if (selectedType === undefined) throw new Error("random insert did not create a generated event type");
+  await page.getByLabel("Event type filter").selectOption(selectedType);
+  await expect(page.getByTestId("filter-count")).toHaveText(/\d+ filtered events \/ 82 total events/);
+  await expect(eventMeta(page, selectedType).first()).toBeVisible();
+});
+
+// Guards "instant enough" first draw. This catches regressions where OPFS/wa-sqlite setup,
+// subscription, or reactive query invalidation leaves the page hydrated but visually empty.
+test("first event row draws quickly", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  const firstRowDrawMs = await page.evaluate(() => {
+    const mark = performance.getEntriesByName("stream:first-event-row").at(-1);
+    if (mark === undefined) throw new Error("missing stream:first-event-row performance mark");
+    return mark.startTime;
+  });
+  expect(firstRowDrawMs).toBeLessThan(10_000);
+});
+
+// Proves two component-owned runtimes can point at one stream in one tab. The intended fix
+// was to rely on the same Web Locks leadership election used across tabs, so one runtime
+// writes and the other follows the shared OPFS mirror.
 test("split view can mount the same stream twice and mirror appends", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(`/split-stream?left=${encodeURIComponent(streamPath)}&right=${encodeURIComponent(streamPath)}`);
@@ -32,9 +155,12 @@ test("split view can mount the same stream twice and mirror appends", async ({ p
     payload: { streamPath, value: crypto.randomUUID() },
   });
 
+  await expect(page.locator(".stream-page__composer-state").first()).toHaveText("appended");
   await expect(eventMeta(page, type)).toHaveCount(2);
 });
 
+// Covers the original leadership requirement across browser tabs. Closing the elected writer
+// must release the lock, promote the follower, reconnect, and keep future appends live.
 test("two browser tabs update and hand off leadership after the writer closes", async ({ context, page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   const otherPage = await context.newPage();
@@ -73,6 +199,44 @@ test("two browser tabs update and hand off leadership after the writer closes", 
   await expect(eventMeta(follower, afterHandoffType).first()).toBeVisible();
 });
 
+// Deploy/schema-change regression. This reproduces the browser symptom where normal tabs
+// got stuck on `connected`, `follower`, `Events: 0` after a deploy, while incognito worked.
+// Old tabs can keep holding the previous unversioned Web Lock after new JS deploys and
+// migrates the shared OPFS DB. A fresh runtime must not become a permanent follower behind
+// that stale lock; its versioned lock should let it take over and replay server history.
+test("fresh runtime takes over when a legacy writer lock is still held", async ({ context, page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  const legacyLockHolder = await context.newPage();
+  await legacyLockHolder.goto("/virtual-repro");
+  await holdLegacyWriterLock(legacyLockHolder, streamPath);
+
+  await page.goto(streamRoute(streamPath));
+  await expect(page.getByTestId("subscription-status")).toHaveText("leader");
+  await expect(page.getByTestId("event-count")).toHaveText("2");
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await legacyLockHolder.close();
+});
+
+// If this tab is only a follower and its local SQLite mirror is empty, the page must say so
+// explicitly. This is the UI regression test for "no swallowed errors": this state may not
+// throw in the current tab, so the feed itself must explain why rows are not loading.
+test("empty follower state is visible in the stream UI", async ({ context, page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  const lockHolder = await context.newPage();
+  await lockHolder.goto("/virtual-repro");
+  await holdCurrentWriterLock(lockHolder, streamPath);
+
+  await page.goto(streamRoute(streamPath));
+  await expect(page.getByTestId("subscription-status")).toHaveText("follower");
+  await expect(page.getByTestId("event-count")).toHaveText("0");
+  await expect(page.getByTestId("stream-warning")).toContainText("Follower with empty SQLite mirror");
+
+  await lockHolder.close();
+});
+
+// Split view should not imply any global singleton. Two different streams mounted side by
+// side each own their stream runtime, database file, and leadership election.
 test("split view keeps different streams isolated", async ({ page }) => {
   const leftPath = `/e2e/${crypto.randomUUID()}/left`;
   const rightPath = `/e2e/${crypto.randomUUID()}/right`;
@@ -100,6 +264,182 @@ test("split view keeps different streams isolated", async ({ page }) => {
   await expect(eventMeta(rightPane, leftType)).toHaveCount(0);
 });
 
+// Regression for the composer/scrollbar layout. The composer deliberately lives inside the
+// native stream scroller, but outside TanStack Virtual's row content, so the browser scrollbar
+// runs beside the composer while Virtual still only sizes rows. Growing the textarea must not
+// require feeding composer height into the virtualizer or break tail-following.
+test("auto-growing composer stays in the stream scrollbar and preserves tail appends", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await expect.poll(async () => {
+    const rects = await page.evaluate(() => {
+      const scroller = document.querySelector("[data-testid='stream-events']");
+      if (!(scroller instanceof HTMLElement)) throw new Error("missing stream scroller");
+      return {
+        scrollerBottom: scroller.getBoundingClientRect().bottom,
+        viewportBottom: window.innerHeight,
+      };
+    });
+    return Math.round(rects.viewportBottom - rects.scrollerBottom);
+  }).toBe(0);
+
+  const textarea = page.getByLabel("Event JSON").first();
+  const initialTextareaHeight = await textarea.evaluate((element) => {
+    if (!(element instanceof HTMLTextAreaElement)) throw new Error("composer must be a textarea");
+    return element.getBoundingClientRect().height;
+  });
+  const type = "events.iterate.com/debug/playwright-grown-composer";
+  await textarea.fill(JSON.stringify({
+    type,
+    payload: {
+      lines: Array.from({ length: 40 }, (_, index) => `composer line ${index}`),
+    },
+  }, null, 2));
+  await expect.poll(async () =>
+    await textarea.evaluate((element) => {
+      if (!(element instanceof HTMLTextAreaElement)) throw new Error("composer must be a textarea");
+      return element.getBoundingClientRect().height;
+    }),
+  ).toBeGreaterThan(initialTextareaHeight + 100);
+  await expect.poll(async () => {
+    const alignment = await page.evaluate(() => {
+      const eventRow = document.querySelector(".stream-page__event-row");
+      const composerTextarea = document.querySelector(".stream-page__textarea");
+      if (!(eventRow instanceof HTMLElement) || !(composerTextarea instanceof HTMLTextAreaElement)) {
+        throw new Error("missing stream row or composer textarea");
+      }
+      const eventRect = eventRow.getBoundingClientRect();
+      const textareaRect = composerTextarea.getBoundingClientRect();
+      return {
+        left: Math.round(Math.abs(eventRect.left - textareaRect.left)),
+        right: Math.round(Math.abs(eventRect.right - textareaRect.right)),
+      };
+    });
+    return `${alignment.left}:${alignment.right}`;
+  }).toBe("0:0");
+
+  await page.getByRole("button", { name: "Append event" }).first().click();
+  await expect(page.locator(".stream-page__composer-state").first()).toHaveText("appended");
+  await expect(eventMeta(page, type).first()).toBeVisible();
+  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+  await scrollStreamBy(page, -120);
+  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+});
+
+// Regression for the bottom affordance badge. When the user is reading older rows, appends
+// should not force-scroll them, but the affordance should show how many new rows arrived since
+// the last time they were at the tail.
+test("scroll to bottom affordance counts new events while away from tail", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await page.getByLabel("Count").fill("80");
+  await page.getByLabel("Batch size").fill("80");
+  await page.getByLabel("Seconds").fill("0");
+  await page.getByRole("button", { name: "Stream random events" }).click();
+  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("82", { timeout: 30_000 });
+  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+
+  await page.getByRole("button", { name: "Scroll to top" }).click();
+  await expect(page.getByRole("button", { name: "Scroll to bottom" })).toBeVisible();
+
+  const type = "events.iterate.com/debug/playwright-new-event-count";
+  await appendComposerEvent(page, {
+    type,
+    payload: { streamPath, value: crypto.randomUUID() },
+  });
+
+  await expect(eventMeta(page, type)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Scroll to bottom, 1 new event" })).toBeVisible();
+  await page.getByRole("button", { name: "Scroll to bottom, 1 new event" }).click();
+  await expect(eventMeta(page, type).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Scroll to bottom, 1 new event" })).toHaveCount(0);
+});
+
+// Stress version of the unread badge. While 5,000 events are appended over several seconds,
+// the user can keep scrolling around older rows; as long as they never touch the tail, the
+// badge must keep accumulating exactly the number of rows appended since leaving the tail.
+test("scroll to bottom affordance keeps counting while scrolling older rows during heavy append", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await page.getByLabel("Count").fill("100");
+  await page.getByLabel("Batch size").fill("100");
+  await page.getByLabel("Seconds").fill("0");
+  await page.getByRole("button", { name: "Stream random events" }).click();
+  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("102", { timeout: 30_000 });
+  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+
+  await scrollStreamBy(page, -500);
+  await expect(page.getByRole("button", { name: "Scroll to bottom" })).toBeVisible();
+  await expect.poll(() => streamDistanceFromEnd(page)).toBeGreaterThan(200);
+
+  await page.getByLabel("Count").fill("5000");
+  await page.getByLabel("Batch size").fill("100");
+  await page.getByLabel("Seconds").fill("5");
+  const scrollJitter = jitterScrollAwayFromBottom(page, { durationMs: 5_500, delta: 24 });
+  await page.getByRole("button", { name: "Stream random events" }).click();
+  await Promise.all([
+    scrollJitter,
+    expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 60_000 }),
+  ]);
+
+  await expect(page.getByTestId("event-count")).toHaveText("5102", { timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "Scroll to bottom, 5000 new events" })).toBeVisible();
+  await expect.poll(() => streamDistanceFromEnd(page)).toBeGreaterThan(0);
+  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+
+  await page.getByRole("button", { name: "Scroll to bottom, 5000 new events" }).click();
+  await expect(page.getByRole("button", { name: "Scroll to bottom, 5000 new events" })).toHaveCount(0);
+  await expect.poll(() => streamDistanceFromEnd(page)).toBe(0);
+});
+
+// Row expansion is local view state keyed by stream offset, not DOM state on the virtual row.
+// This protects the common TanStack Virtual trap where an expanded row appears to "forget"
+// itself after being scrolled out of the rendered window and mounted again later.
+test("event row open and closed state survives virtual row unmounts", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await page.getByLabel("Count").fill("160");
+  await page.getByLabel("Batch size").fill("160");
+  await page.getByLabel("Seconds").fill("0");
+  await page.getByRole("button", { name: "Stream random events" }).click();
+  await expect(page.locator(".stream-page__insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("162", { timeout: 30_000 });
+
+  await page.getByRole("button", { name: "Scroll to top" }).click();
+  const firstRow = eventRowByOffset(page, 1);
+  await expect(firstRow).toBeVisible();
+  await firstRow.click();
+  await expect(firstRow).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".stream-page__event-json")).toBeVisible();
+
+  await page.getByRole("button", { name: "Scroll to bottom" }).click();
+  await expect(firstRow).toHaveCount(0);
+  await page.getByRole("button", { name: "Scroll to top" }).click();
+  await expect(eventRowByOffset(page, 1)).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".stream-page__event-json")).toBeVisible();
+
+  await eventRowByOffset(page, 1).click();
+  await expect(eventRowByOffset(page, 1)).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "Scroll to bottom" }).click();
+  await expect(eventRowByOffset(page, 1)).toHaveCount(0);
+  await page.getByRole("button", { name: "Scroll to top" }).click();
+  await expect(eventRowByOffset(page, 1)).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".stream-page__event-json")).toHaveCount(0);
+});
+
+// Exercises disposal when one of two same-stream panes changes path. This prevents stale
+// component-owned runtimes from keeping old WebSocket subscriptions or Web Lock candidates
+// alive after React unmounts a pane.
 test("split view disposes a replaced same-stream pane and keeps leadership", async ({ page }) => {
   const sharedPath = `/e2e/${crypto.randomUUID()}/shared`;
   const nextPath = `/e2e/${crypto.randomUUID()}/next`;
@@ -140,6 +480,10 @@ test("split view disposes a replaced same-stream pane and keeps leadership", asy
   await expect(eventMeta(nextPane, sharedType)).toHaveCount(0);
 });
 
+// Main regression for the flicker/stutter report. It creates a large stream, verifies the DOM
+// stays bounded by TanStack Virtual, then samples animation frames while scrolling upward from
+// the tail and middle. The fix was to keep close to the TanStack chat setup and batch delivered
+// server writes into one SQLite invalidation per animation frame.
 test("large streams stay virtualized and can scroll from tail to head", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(streamRoute(streamPath));
@@ -160,6 +504,15 @@ test("large streams stay virtualized and can scroll from tail to head", async ({
   ).toBeLessThan(120);
   await expect(page.locator("[data-index='0']")).toHaveCount(0);
   await expect(page.locator(`[data-index='${expectedCount - 1}']`)).toBeVisible();
+  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+  await waitForVisibleRowsSettled(page);
+  expectStableUpwardScroll(await sampleUpwardScroll(page, { stepCount: 60, scrollDelta: 10 }));
+  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
+
+  await scrollToMiddle(page);
+  await waitForVisibleRowsSettled(page);
+  expectStableUpwardScroll(await sampleUpwardScroll(page, { stepCount: 80, scrollDelta: 8 }));
+  await expect.poll(() => composerDistanceFromScrollerBottom(page)).toBe(0);
 
   await page.getByRole("button", { name: "Scroll to top" }).click();
   await expect(page.locator("[data-index='0']")).toBeVisible();
@@ -169,6 +522,50 @@ test("large streams stay virtualized and can scroll from tail to head", async ({
   await expect(page.locator(`[data-index='${expectedCount - 1}']`)).toBeVisible();
 });
 
+// Documents the reduced TanStack Virtual reproduction that explained the real stream bug.
+// Same-turn/microtask chunks can strand a tiny list far from the tail; one visible append or
+// requestAnimationFrame-spaced chunks with directDomUpdates follow the end correctly.
+test("TanStack repro captures same-render short-to-huge append behavior", async ({ page }) => {
+  await page.goto("/virtual-repro?initial=2&batch=1500&chunk=250&mode=microtask&footer=none&affordance=0");
+
+  await expect(page.getByTestId("virtual-repro-hydrated")).toHaveText("true");
+  await expect(page.getByTestId("virtual-repro-count")).toHaveText("2");
+  await page.getByRole("button", { name: "Append batch" }).click();
+  await expect(page.getByTestId("virtual-repro-count")).toHaveText("1502");
+  await expect.poll(() => scrollDistanceFromEnd(page)).toBeGreaterThan(40_000);
+
+  await page.goto("/virtual-repro?initial=2&batch=1500&chunk=1500&mode=single&footer=none&directDomUpdates=1");
+  await expect(page.getByTestId("virtual-repro-hydrated")).toHaveText("true");
+  await page.getByRole("button", { name: "Append batch" }).click();
+  await expect(page.getByTestId("virtual-repro-count")).toHaveText("1502");
+  await expect(page.locator("[data-index='1501']")).toBeVisible();
+  await expect.poll(() => scrollDistanceFromEnd(page)).toBe(0);
+
+  await page.goto("/virtual-repro?initial=2&batch=1500&chunk=250&mode=raf&footer=none&directDomUpdates=1");
+  await expect(page.getByTestId("virtual-repro-hydrated")).toHaveText("true");
+  await page.getByRole("button", { name: "Append batch" }).click();
+  await expect(page.getByTestId("virtual-repro-count")).toHaveText("1502");
+  await expect(page.locator("[data-index='1501']")).toBeVisible();
+  await expect.poll(() => scrollDistanceFromEnd(page)).toBe(0);
+});
+
+// Keeps footer experiments honest. A normal footer or measured overlay was not the root cause
+// of the stream stutter once appends were paced sanely, so both repro variants should still
+// follow the tail with the vanilla chat-style virtualizer.
+for (const footer of ["normal", "overlay-measured"] as const) {
+  test(`TanStack repro follows appends with ${footer} footer`, async ({ page }) => {
+    await page.goto(`/virtual-repro?initial=2&batch=1500&chunk=1500&mode=single&footer=${footer}&directDomUpdates=1`);
+
+    await expect(page.getByTestId("virtual-repro-hydrated")).toHaveText("true");
+    await page.getByRole("button", { name: "Append batch" }).click();
+    await expect(page.getByTestId("virtual-repro-count")).toHaveText("1502");
+    await expect(page.locator("[data-index='1501']")).toBeVisible();
+    await expect.poll(() => scrollDistanceFromEnd(page)).toBe(0);
+  });
+}
+
+// Verifies the raw SQLite export feature end to end. The downloaded browser OPFS mirror must
+// be a real SQLite database that can be queried from disk, not just a blob with the right name.
 test("downloaded SQLite file can be queried from disk", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(streamRoute(streamPath));
@@ -195,6 +592,8 @@ test("downloaded SQLite file can be queried from disk", async ({ page }) => {
   }
 });
 
+// Reconnection test: killing the Durable Object should reconnect the browser subscriber and
+// append the server's woken event instead of leaving the mirror stuck on a dead WebSocket.
 test("kill reconnects and appends a new woken event", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(streamRoute(streamPath));
@@ -206,6 +605,9 @@ test("kill reconnects and appends a new woken event", async ({ page }) => {
   await expect(eventMeta(page, "events.iterate.com/stream/woken")).toHaveCount(2);
 });
 
+// Catches stale local OPFS mirrors after server reset. This is the deployed-worker race that
+// led to old local rows surviving; the browser now discards impossible local state and shows
+// the fresh server stream.
 test("reset discards stale local rows and shows a fresh stream", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(streamRoute(streamPath));
@@ -234,6 +636,10 @@ function eventMeta(scope: Page | Locator, eventType: string) {
   return scope.locator("[data-testid='event-meta']", { hasText: eventType });
 }
 
+function eventRowByOffset(scope: Page | Locator, offset: number) {
+  return scope.locator(`[data-testid='event-meta'][data-event-offset='${offset}']`);
+}
+
 async function appendComposerEvent(scope: Page | Locator, event: unknown) {
   await scope.getByLabel("Event JSON").first().fill(JSON.stringify(event, null, 2));
   await scope.getByRole("button", { name: "Append event" }).first().click();
@@ -248,12 +654,162 @@ async function isLeader(page: Page) {
   return await page.getByTestId("subscription-status").innerText() === "leader";
 }
 
+async function holdLegacyWriterLock(page: Page, streamPath: string) {
+  await page.evaluate(async (path) => {
+    await new Promise<void>((resolve) => {
+      void navigator.locks.request(`stream-writer:${path}`, async () => {
+        resolve();
+        await new Promise(() => {});
+      });
+    });
+  }, streamPath);
+}
+
+async function holdCurrentWriterLock(page: Page, streamPath: string) {
+  await page.evaluate(async (path) => {
+    await new Promise<void>((resolve) => {
+      void navigator.locks.request(`stream-writer:browser-db-v4:${path}`, async () => {
+        resolve();
+        await new Promise(() => {});
+      });
+    });
+  }, streamPath);
+}
+
 function sqliteScalar(dbPath: string, sql: string) {
   return execFileSync("sqlite3", [dbPath, "-batch", "-noheader", sql], {
     encoding: "utf8",
   }).trim();
 }
 
+function sqliteQueryPlan(dbPath: string, sql: string) {
+  return sqliteScalar(dbPath, `EXPLAIN QUERY PLAN ${sql}`);
+}
+
+function sqliteLiteral(value: string) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
 function cssString(value: string) {
   return value.replaceAll("\\", "\\\\").replaceAll("'", "\\'");
+}
+
+async function scrollDistanceFromEnd(page: Page) {
+  return await page.getByTestId("virtual-repro-scroller").evaluate((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error("virtual repro scroller must be an HTMLElement");
+    return Math.round(element.scrollHeight - element.clientHeight - element.scrollTop);
+  });
+}
+
+async function streamDistanceFromEnd(page: Page) {
+  return await page.getByTestId("stream-events").evaluate((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
+    return Math.round(element.scrollHeight - element.clientHeight - element.scrollTop);
+  });
+}
+
+async function composerDistanceFromScrollerBottom(page: Page) {
+  return await page.evaluate(() => {
+    const scroller = document.querySelector("[data-testid='stream-events']");
+    const composer = document.querySelector(".stream-page__composer");
+    if (!(scroller instanceof HTMLElement) || !(composer instanceof HTMLElement)) {
+      throw new Error("missing stream scroller or composer");
+    }
+    return Math.round(scroller.getBoundingClientRect().bottom - composer.getBoundingClientRect().bottom);
+  });
+}
+
+async function scrollStreamBy(page: Page, delta: number) {
+  await page.getByTestId("stream-events").evaluate((element, scrollDelta) => {
+    if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
+    element.scrollTop += scrollDelta;
+  }, delta);
+}
+
+async function jitterScrollAwayFromBottom(
+  page: Page,
+  options: { durationMs: number; delta: number },
+) {
+  await page.getByTestId("stream-events").evaluate(async (element, jitterOptions) => {
+    if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
+
+    let direction = -1;
+    const finishedAt = performance.now() + jitterOptions.durationMs;
+    while (performance.now() < finishedAt) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const maxScrollTopAwayFromTail = Math.max(0, element.scrollHeight - element.clientHeight - 160);
+      const nextScrollTop = element.scrollTop + direction * jitterOptions.delta;
+      if (nextScrollTop <= 0 || nextScrollTop >= maxScrollTopAwayFromTail) {
+        direction *= -1;
+      }
+      element.scrollTop = Math.min(
+        maxScrollTopAwayFromTail,
+        Math.max(0, element.scrollTop + direction * jitterOptions.delta),
+      );
+    }
+  }, options);
+}
+
+async function waitForVisibleRowsSettled(page: Page) {
+  await expect.poll(() => page.locator("[data-testid='event-meta']").count()).toBeGreaterThan(0);
+  await expect.poll(() => page.locator(".stream-page__event-row--pending").count()).toBe(0);
+}
+
+async function scrollToMiddle(page: Page) {
+  await page.getByTestId("stream-events").evaluate((element) => {
+    if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
+    element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) / 2);
+  });
+}
+
+async function sampleUpwardScroll(page: Page, options: { stepCount: number; scrollDelta: number }) {
+  return await page.getByTestId("stream-events").evaluate(async (element, scrollOptions) => {
+    if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
+
+    function frame() {
+      const virtualRows = [...element.querySelectorAll(".stream-page__virtual-row")];
+      const indexFor = (row: Element | undefined) => {
+        const value = row?.getAttribute("data-index");
+        return value === undefined || value === null ? null : Number(value);
+      };
+
+      return {
+        clientHeight: element.clientHeight,
+        firstIndex: indexFor(virtualRows[0]),
+        lastIndex: indexFor(virtualRows.at(-1)),
+        pendingRowCount: element.querySelectorAll(".stream-page__event-row--pending").length,
+        renderedRowCount: element.querySelectorAll("[data-testid='event-meta']").length,
+        scrollHeight: element.scrollHeight,
+        scrollTop: element.scrollTop,
+      };
+    }
+
+    const frames = [frame()];
+    for (let index = 0; index < scrollOptions.stepCount; index += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      element.scrollTop = Math.max(0, element.scrollTop - scrollOptions.scrollDelta);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      frames.push(frame());
+    }
+    return frames;
+  }, options);
+}
+
+function expectStableUpwardScroll(
+  frames: Awaited<ReturnType<typeof sampleUpwardScroll>>,
+) {
+  const blankFrames = frames.filter((frame) => frame.renderedRowCount === 0);
+  const fullyPendingFrames = frames.filter(
+    (frame) => frame.pendingRowCount > 0 && frame.renderedRowCount === 0,
+  );
+  const largestPendingCount = Math.max(0, ...frames.map((frame) => frame.pendingRowCount));
+  const largestForwardJump = Math.max(
+    0,
+    ...frames.slice(1).map((frame, index) => frame.scrollTop - frames[index].scrollTop),
+  );
+
+  expect(blankFrames, JSON.stringify(blankFrames.slice(0, 3))).toHaveLength(0);
+  expect(fullyPendingFrames, JSON.stringify(fullyPendingFrames.slice(0, 3))).toHaveLength(0);
+  expect(largestPendingCount).toBeLessThanOrEqual(2);
+  expect(largestForwardJump).toBeLessThanOrEqual(2);
 }

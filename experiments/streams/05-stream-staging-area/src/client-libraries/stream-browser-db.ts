@@ -19,6 +19,13 @@ export type StreamDatabaseInfo = {
   crossOriginIsolated: boolean;
 };
 
+export type StreamDatabaseEventSummary = {
+  count: number;
+  minOffset: number | null;
+  maxOffset: number | null;
+  isContinuous: boolean;
+};
+
 export type SqliteQueryStatus = "pending" | "ok" | "error";
 
 export type SqliteQuerySnapshot<T> = {
@@ -47,7 +54,7 @@ type RegisteredQuery = {
 };
 
 const PENDING: SqliteQuerySnapshot<never> = { data: [], status: "pending", error: undefined };
-const BROWSER_DB_SCHEMA_VERSION = 2;
+export const BROWSER_DB_SCHEMA_VERSION = 4;
 
 export class StreamBrowserDatabase implements Disposable {
   readonly databasePath: string;
@@ -145,6 +152,13 @@ export class StreamBrowserDatabase implements Disposable {
         },
         {
           sql: `
+            -- The stream page can filter by generated event type while keeping
+            -- TanStack Virtual's visible window ordered by the dense local list.
+            CREATE INDEX IF NOT EXISTS events_type_local_index ON events (type, local_index)
+          `,
+        },
+        {
+          sql: `
             -- This trigger is the browser mirror's append invariant:
             -- 1. Identical replay is accepted and ignored, preserving inserted_at as
             --    "first stored locally".
@@ -180,6 +194,27 @@ export class StreamBrowserDatabase implements Disposable {
       `SELECT MAX(offset) AS max_offset FROM events`,
     );
     return Number(row?.max_offset ?? -1);
+  }
+
+  async eventSummary(): Promise<StreamDatabaseEventSummary> {
+    const [row] = await this.exec(
+      `SELECT COUNT(*) AS event_count, MIN(offset) AS min_offset, MAX(offset) AS max_offset
+       FROM events`,
+    );
+    const count = Number(row?.event_count ?? 0);
+    const minOffset = row?.min_offset === null || row?.min_offset === undefined
+      ? null
+      : Number(row.min_offset);
+    const maxOffset = row?.max_offset === null || row?.max_offset === undefined
+      ? null
+      : Number(row.max_offset);
+
+    return {
+      count,
+      minOffset,
+      maxOffset,
+      isContinuous: count === 0 || (minOffset === 1 && maxOffset === count),
+    };
   }
 
   async insertEventBatch(args: { events: StreamEvent[] }): Promise<void> {
@@ -249,11 +284,18 @@ export class StreamBrowserDatabase implements Disposable {
     const key = `${sql}\0${JSON.stringify(params)}`;
     const existing = this.#queries.get(key);
     if (existing !== undefined) return existing.handle;
+    // The visible-range query changes on every virtual scroll range. Seed a new
+    // range query with the previous successful result for the same SQL shape so
+    // the feed does not briefly render an all-pending window while SQLite catches up.
+    const previousSnapshot = [...this.#queries.values()]
+      .find((query) => query.sql === sql && query.snapshot.status === "ok")?.snapshot;
 
     const entry: RegisteredQuery = {
       sql,
       params,
-      snapshot: PENDING,
+      snapshot: previousSnapshot === undefined
+        ? PENDING
+        : { ...previousSnapshot, status: "pending", error: undefined },
       started: false,
       gcTimer: undefined,
       listeners: new Set(),
@@ -293,6 +335,11 @@ export class StreamBrowserDatabase implements Disposable {
       const data = await this.exec(entry.sql, entry.params);
       entry.snapshot = { data, status: "ok", error: undefined };
     } catch (error) {
+      console.error(`[stream-browser-db ${this.streamPath}] SQLite query failed`, {
+        error,
+        params: entry.params,
+        sql: entry.sql,
+      });
       entry.snapshot = {
         ...entry.snapshot,
         status: "error",

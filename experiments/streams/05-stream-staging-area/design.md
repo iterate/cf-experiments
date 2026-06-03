@@ -174,37 +174,29 @@ within a stream. If a later `subscription-configured` event uses the same `subsc
 the previous configuration for that subscription. The same subscriber implementation can appear in
 multiple subscriptions.
 `subscriber` describes what kind of subscriber should be connected and how to connect to it. The
-initial subscriber type is `built-in`, which uses `processorSlug` to select a built-in stream
-processor runner. Future subscriber types might look like:
+initial subscriber types are `built-in`, which uses `processorSlug` to select a built-in stream
+processor runner, and `external-url`, which dials a configured public URL using the same capnweb
+WebSocket protocol.
 
 ```ts
 {
   type: "events.iterate.com/stream/subscription-configured",
   payload: {
-    subscriptionKey: "summarize-transcript",
-    subscriber: {
-      type: "dynamic-worker",
-      transport: "capnweb-websocket",
-      workerName: "customer-summary-worker",
-      entrypoint: "TranscriptSummarizer",
-    },
-  },
-}
-```
-
-```ts
-{
-  type: "events.iterate.com/stream/subscription-configured",
-  payload: {
-    subscriptionKey: "crm-webhook",
+    subscriptionKey: "external-runner",
     subscriber: {
       type: "external-url",
-      transport: "https-webhook",
-      url: "https://example.com/events",
+      transport: "capnweb-websocket",
+      url: "https://example.com/stream-processor",
+      headers: {
+        "x-stream-token": "test-token",
+      },
     },
   },
 }
 ```
+
+TODO: Add `dynamic-worker` only once a worker-name/entrypoint dialer exists.
+TODO: Add webhooks only if we want non-capnweb delivery semantics.
 
 ## Subscriptions
 
