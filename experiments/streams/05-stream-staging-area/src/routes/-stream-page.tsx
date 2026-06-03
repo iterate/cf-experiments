@@ -426,25 +426,38 @@ function EventRowWindow({
   measureElement: (node: Element | null) => void;
   onToggleOffset(offset: number): void;
 }) {
+  const rowCacheRef = useRef(new Map<number, StreamEventRow>());
   const firstIndex = virtualItems[0]?.index ?? 0;
-  const lastIndex = virtualItems.at(-1)?.index ?? -1;
-  const pageStartIndex = Math.floor(firstIndex / 1_000) * 1_000;
-  const pageEndIndex = Math.max(lastIndex, pageStartIndex + 999);
-  const pageSize = pageEndIndex - pageStartIndex + 1;
-  // Append-only exploit: a window that already shows the newest rows must re-run when more
-  // arrive ("tail"); a window the user scrolled back to is entirely below any future append,
-  // so its rows can never change ("range") and it never re-runs. Scrolling changes the
-  // params, which re-keys the query and reloads naturally.
-  const followsTail = pageEndIndex >= eventCount - 1;
+  // FIXED-size, bin-aligned window. Crucially the size does NOT track the live last index:
+  // if it did, every append would re-key the query, which restarts it empty and blanks the
+  // whole visible window for a frame (a flicker). Two bins wide so a viewport straddling a
+  // bin boundary, and tail growth within the bin, stay covered without re-keying — the key
+  // only changes once per PAGE rows of scrolling.
+  const PAGE = 1_000;
+  const pageStartIndex = Math.floor(firstIndex / PAGE) * PAGE;
+  const pageSize = 2 * PAGE;
+  const windowEndIndex = pageStartIndex + pageSize; // 1-based exclusive upper bound
+  // Append-only exploit: "tail" while the live end is inside this window (re-run on append to
+  // pick up new rows); "range" once scrolled back so the window sits entirely below future
+  // appends — those rows can never change, so it never re-runs.
+  const followsTail = eventCount <= windowEndIndex;
   const rowQueryResult = useStreamQuery<StreamEventRow>(
     streamDatabase,
     `SELECT virtual_index, offset, type, idempotency_key, created_at, raw_json
      FROM events WHERE virtual_index >= ? ORDER BY virtual_index ASC LIMIT ?`,
     [pageStartIndex + 1, pageSize],
-    followsTail ? { type: "tail" } : { type: "range", untilVirtualIndex: pageEndIndex + 1 },
+    followsTail ? { type: "tail" } : { type: "range", untilVirtualIndex: windowEndIndex },
   );
-  const rowsByVirtualizerIndex = new Map<number, StreamEventRow>();
-  rowQueryResult.data.forEach((row) => rowsByVirtualizerIndex.set(row.virtual_index - 1, row));
+  // Retain rows we've already shown so the once-per-PAGE window shift repaints from cache
+  // instead of blanking while the next query loads. Reset on clear (EventRows remounts via
+  // its clearVersion key). Bounded so a long scroll session can't grow it without limit.
+  const rowsByVirtualizerIndex = rowCacheRef.current;
+  for (const row of rowQueryResult.data) rowsByVirtualizerIndex.set(row.virtual_index - 1, row);
+  while (rowsByVirtualizerIndex.size > 5 * PAGE) {
+    const oldest = rowsByVirtualizerIndex.keys().next().value;
+    if (oldest === undefined) break;
+    rowsByVirtualizerIndex.delete(oldest);
+  }
 
   return virtualItems.map((virtualItem) => {
     const event = rowsByVirtualizerIndex.get(virtualItem.index);
