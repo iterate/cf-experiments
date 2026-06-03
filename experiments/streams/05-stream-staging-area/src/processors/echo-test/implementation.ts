@@ -3,10 +3,14 @@
 // runtime tests can focus on subscription/runner behavior instead of business logic.
 
 import { implementProcessor } from "../../processor.js";
+import { buildProcessorRegisteredEvent } from "../../core-stream-processor.js";
 import { echoTestProcessorContract } from "./contract.js";
 
 export const echoTestProcessor = implementProcessor(echoTestProcessorContract, () => ({
   afterAppend({ event, state, stream, keepAlive }) {
+    if (!state.hasRegisteredCurrentVersion) {
+      keepAlive(stream.append({ event: buildProcessorRegisteredEvent({ contract: echoTestProcessorContract }) }));
+    }
     if (event.type !== "test.processor.input") return;
     keepAlive(stream.append({ event: { type: "test.processor.output", payload: { seen: state.seen } } }));
   },

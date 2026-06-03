@@ -31,6 +31,30 @@ export const coreStreamProcessorContract = defineProcessorContract({
     }),
     eventCount: z.number().int().min(0),
     maxOffset: z.number().int().min(0),
+    processorsBySlug: z.record(
+      z.string(),
+      z.object({
+        latestRegisteredEvent: z.object({
+          offset: z.number().int().min(0),
+          type: z.literal("events.iterate.com/stream/processor-registered"),
+          payload: z.object({
+            slug: z.string().trim().min(1),
+            version: z.string().trim().min(1),
+            description: z.string(),
+            consumes: z.array(z.string()),
+            emits: z.array(z.string()),
+            ownedEvents: z.array(
+              z.object({
+                type: z.string().trim().min(1),
+                description: z.string().optional(),
+                examples: z.array(z.unknown()).optional(),
+              }),
+            ),
+          }),
+          createdAt: z.string(),
+        }),
+      }),
+    ),
     subscriptionsByKey: z.record(
       z.string(),
       z.object({
@@ -56,6 +80,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     },
     eventCount: 0,
     maxOffset: 0,
+    processorsBySlug: {},
     subscriptionsByKey: {},
   },
   events: {
@@ -87,6 +112,23 @@ export const coreStreamProcessorContract = defineProcessorContract({
         subscriber: outboundSubscriberSchema,
       }),
     },
+    "events.iterate.com/stream/processor-registered": {
+      description: "Records the public contract for a processor active on this stream.",
+      payloadSchema: z.object({
+        slug: z.string().trim().min(1),
+        version: z.string().trim().min(1),
+        description: z.string(),
+        consumes: z.array(z.string()),
+        emits: z.array(z.string()),
+        ownedEvents: z.array(
+          z.object({
+            type: z.string().trim().min(1),
+            description: z.string().optional(),
+            examples: z.array(z.unknown()).optional(),
+          }),
+        ),
+      }),
+    },
   },
   consumes: [
     "*",
@@ -94,6 +136,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "events.iterate.com/stream/woken",
     "events.iterate.com/stream/configured",
     "events.iterate.com/stream/subscription-configured",
+    "events.iterate.com/stream/processor-registered",
   ],
   emits: [],
   reduce({ state, event }) {
@@ -148,6 +191,15 @@ export const coreStreamProcessorContract = defineProcessorContract({
         };
       }
 
+      case "events.iterate.com/stream/processor-registered":
+        return {
+          ...next,
+          processorsBySlug: {
+            ...next.processorsBySlug,
+            [event.payload.slug]: { latestRegisteredEvent: event },
+          },
+        };
+
       default:
         return next;
     }
@@ -158,3 +210,43 @@ export type CoreStreamState = z.infer<typeof coreStreamProcessorContract.stateSc
 
 export type SubscriptionConfiguredEvent =
   CoreStreamState["subscriptionsByKey"][string]["latestConfiguredEvent"];
+
+export type ProcessorRegisteredEvent =
+  CoreStreamState["processorsBySlug"][string]["latestRegisteredEvent"];
+
+export function buildProcessorRegisteredEvent(args: {
+  contract: {
+    slug: string;
+    version?: string;
+    description: string;
+    consumes: readonly string[];
+    emits: readonly string[];
+    events: Record<
+      string,
+      {
+        description?: string;
+        examples?: readonly unknown[];
+      }
+    >;
+  };
+}) {
+  const version = args.contract.version ?? "0.0.0";
+  return {
+    type: "events.iterate.com/stream/processor-registered",
+    idempotencyKey: `processor-registered:${args.contract.slug}:${version}`,
+    payload: {
+      slug: args.contract.slug,
+      version,
+      description: args.contract.description,
+      consumes: [...args.contract.consumes],
+      emits: [...args.contract.emits],
+      ownedEvents: Object.entries(args.contract.events).map(([type, event]) => ({
+        type,
+        ...(event.description === undefined ? {} : { description: event.description }),
+        ...(event.examples === undefined || event.examples.length === 0
+          ? {}
+          : { examples: [...event.examples] }),
+      })),
+    },
+  } as const;
+}

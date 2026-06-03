@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { coreStreamProcessorContract } from "./core-stream-processor.js";
+import {
+  buildProcessorRegisteredEvent,
+  coreStreamProcessorContract,
+} from "./core-stream-processor.js";
 
 const reduce = coreStreamProcessorContract.reduce;
 if (reduce === undefined) throw new Error("core stream processor must have a reducer");
@@ -168,5 +171,45 @@ describe("core stream processor", () => {
     );
 
     expect(state.config.simulatedStorageSyncDelayMs).toBe(25);
+  });
+
+  it("keeps the latest processor-registered event by processor slug", () => {
+    let state = coreStreamProcessorContract.stateSchema.parse(
+      coreStreamProcessorContract.initialState,
+    );
+    state = coreStreamProcessorContract.stateSchema.parse(
+      reduce({
+        contract: coreStreamProcessorContract,
+        state,
+        event: {
+          offset: 1,
+          createdAt: "2026-06-01T12:00:00.000Z",
+          ...buildProcessorRegisteredEvent({
+            contract: {
+              slug: "echo-test",
+              version: "0.1.0",
+              description: "Echoes test inputs.",
+              consumes: ["test.processor.input"],
+              emits: ["test.processor.output"],
+              events: {
+                "test.processor.input": { description: "Input." },
+                "test.processor.output": { description: "Output." },
+              },
+            },
+          }),
+        },
+      }),
+    );
+
+    expect(state.processorsBySlug["echo-test"]?.latestRegisteredEvent.payload).toMatchObject({
+      slug: "echo-test",
+      version: "0.1.0",
+      consumes: ["test.processor.input"],
+      emits: ["test.processor.output"],
+      ownedEvents: [
+        { type: "test.processor.input", description: "Input." },
+        { type: "test.processor.output", description: "Output." },
+      ],
+    });
   });
 });

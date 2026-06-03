@@ -48,7 +48,10 @@ function memoryStream() {
 describe("failure conditions (in-process runner)", () => {
   it("resumes from a persisted snapshot and dedups already-processed offsets", async () => {
     const { stream, committed } = memoryStream();
-    let saved: Snapshot<EchoTestState> | undefined = { state: { seen: 2 }, offset: 5 };
+    let saved: Snapshot<EchoTestState> | undefined = {
+      state: { seen: 2, hasRegisteredCurrentVersion: true },
+      offset: 5,
+    };
     const runner = createProcessorRunner({
       processor: echoTestProcessor,
       deps: undefined,
@@ -78,7 +81,10 @@ describe("failure conditions (in-process runner)", () => {
 
     await runner.processEventBatch({ events: [input(1)], streamMaxOffset: 1 });
     await runner.processEventBatch({ events: [input(1)], streamMaxOffset: 1 }); // exact re-delivery (e.g. after a reconnect)
-    expect(committed).toHaveLength(1);
+    expect(committed).toMatchObject([
+      { type: "events.iterate.com/stream/processor-registered" },
+      { type: "test.processor.output", payload: { seen: 1 } },
+    ]);
     expect(saved?.state.seen).toBe(1);
   });
 
