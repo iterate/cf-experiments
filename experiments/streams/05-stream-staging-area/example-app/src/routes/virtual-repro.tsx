@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import "./-stream-page.css";
@@ -29,7 +29,8 @@ function VirtualReproRoute() {
   const didInitialScroll = useRef(false);
   const nextMessageIndex = useRef(search.initial);
   const [footerHeight, setFooterHeight] = useState(0);
-  const [hydrated, setHydrated] = useState(false);
+  // Canonical "have we hydrated" read: false during SSR, true on the client, no mount flash.
+  const hydrated = useSyncExternalStore(() => () => {}, () => true, () => false);
   const [messages, setMessages] = useState(() => makeMessages(0, search.initial));
   const [runState, setRunState] = useState<"idle" | "running" | "done">("idle");
 
@@ -48,10 +49,6 @@ function VirtualReproRoute() {
   const virtualItems = virtualizer.getVirtualItems();
   const firstVirtualItem = virtualItems[0];
   const lastVirtualItem = virtualItems.at(-1);
-
-  useEffect(() => {
-    setHydrated(true);
-  }, []);
 
   useLayoutEffect(() => {
     if (didInitialScroll.current) return;
@@ -85,6 +82,9 @@ function VirtualReproRoute() {
     nextMessageIndex.current += search.batch;
 
     for (const chunk of chunks) {
+      // Intentional sequential pacing: this repro spaces chunk appends over time to
+      // reproduce the virtualizer's same-turn append behavior, so Promise.all is wrong here.
+      // eslint-disable-next-line react-doctor/async-await-in-loop
       await waitForMode(search.mode, search.delayMs);
       setMessages((current) => [...current, ...chunk]);
     }

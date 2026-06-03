@@ -5,5 +5,6 @@ const streamSplatRoute = getRouteApi("/streams/$");
 
 export function StreamSplatRoute() {
   const { _splat } = streamSplatRoute.useParams();
-  return <StreamPage streamPath={`/${_splat}`} />;
+  const { view } = streamSplatRoute.useSearch();
+  return <StreamPage streamPath={`/${_splat}`} viewSlug={view} />;
 }

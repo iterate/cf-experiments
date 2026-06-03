@@ -5,16 +5,17 @@ import { WebSocket as WsWebSocket, WebSocketServer } from "ws";
 import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { describe, expect, it } from "vitest";
-import type { CoreStreamState, SubscriptionConfiguredEvent } from "./core-stream-processor.js";
+import type { StreamPersistedProcessorState } from "../../../src/types.js";
+import type { SubscriptionConfiguredEvent } from "../../../src/processors/core/contract.js";
 import type {
   StreamProcessorRunnerRpc,
   StreamRpc,
   SubscriptionSink,
-} from "./types.js";
-import { connectStreamProcessorRunner } from "./node/connect-processor-runner.js";
-import { connectStream as connectBrowserStream } from "./browser/connect.js";
+} from "../../../src/types.js";
+import { connectStreamProcessorRunner } from "../../../src/node/connect-processor-runner.js";
+import { connectStream as connectBrowserStream } from "../../../src/browser/connect.js";
 
-const workerUrl = process.env.WORKER_URL ?? "http://localhost:8787";
+const workerUrl = process.env.WORKER_URL ?? "http://localhost:5173";
 const e2eIt = process.env.STREAM_STAGING_E2E === "true" ? it : it.skip;
 const localWorkerE2eIt =
   process.env.STREAM_STAGING_E2E === "true" &&
@@ -45,14 +46,14 @@ class NodeStreamProcessorRunner extends RpcTarget implements StreamProcessorRunn
   readonly requestHeaders: Headers[] = [];
   readonly batches: StreamEvent[][] = [];
   subscriptionConfiguredEvent: SubscriptionConfiguredEvent | undefined;
-  streamRuntimeState: { state: CoreStreamState } | undefined;
+  streamRuntimeState: { state: StreamPersistedProcessorState } | undefined;
 
   requestSubscription(args: {
     stream: RpcStub<StreamRpc>;
     subscriptionKey: string;
     streamMaxOffset: number;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
-    streamRuntimeState: { state: CoreStreamState };
+    streamRuntimeState: { state: StreamPersistedProcessorState };
   }): { sink: SubscriptionSink; replayAfterOffset?: number } {
     this.subscriptionConfiguredEvent = args.subscriptionConfiguredEvent;
     this.streamRuntimeState = args.streamRuntimeState;
@@ -261,6 +262,7 @@ describe("stream capnweb protocol", () => {
       },
     });
     await waitFor(() => sink.batches.length === 2, 1_000);
+    const runtime = await stream.stream.runtimeState();
 
     expect(sink.batches).toEqual([
       [
@@ -268,7 +270,7 @@ describe("stream capnweb protocol", () => {
           type: "events.iterate.com/stream/created",
           offset: 1,
           payload: {
-            namespace: "stream",
+            namespace: runtime.state.core.namespace,
             path,
           },
         }),
@@ -333,10 +335,11 @@ describe("stream capnweb protocol", () => {
 
   e2eIt("runs a built-in outbound processor from subscription-configured", async () => {
     const path = `stream-capnweb-processor-${crypto.randomUUID()}`;
-    const subscriptionKey = "echo-test";
+    const subscriptionKey = "echo-example";
     await using stream = await connectStream(path);
+    const runtime = await stream.stream.runtimeState();
     await using processor = await connectStreamProcessorRunner({
-      url: toStreamProcessorRunnerWebSocketUrl(`stream:${path}:${subscriptionKey}`),
+      url: toStreamProcessorRunnerWebSocketUrl(`${runtime.state.core.namespace}:${path}:${subscriptionKey}`),
     });
 
     const configured = await stream.stream.append({
@@ -348,7 +351,7 @@ describe("stream capnweb protocol", () => {
           subscriber: {
             type: "built-in",
             transport: "capnweb-websocket",
-            processorSlug: "echo-test",
+            processorSlug: "echo-example",
           },
         },
       },
@@ -357,7 +360,7 @@ describe("stream capnweb protocol", () => {
     await waitFor(async () => {
       const status = await processor.rpc.runtimeState();
       return (
-        status.processorSlug === "echo-test" &&
+        status.processorSlug === "echo-example" &&
         status.snapshot?.offset === configured.offset &&
         status.snapshot?.state.seen === 0
       );
@@ -365,14 +368,14 @@ describe("stream capnweb protocol", () => {
 
     await stream.stream.append({
       event: {
-        type: "test.processor.input",
+        type: "events.iterate.com/echo-example/input-received",
         payload: { path },
       },
     });
 
     await waitFor(async () => {
       const status = await processor.rpc.runtimeState();
-      return status.snapshot?.state.seen === 1 && status.snapshot.offset >= 5;
+      return status.snapshot?.state.seen === 1 && status.snapshot.offset > configured.offset;
     }, 1_000);
   });
 
@@ -408,7 +411,7 @@ describe("stream capnweb protocol", () => {
     await waitFor(
       () =>
         runner.subscriptionConfiguredEvent?.offset === configured.offset &&
-        runner.streamRuntimeState?.state.path === path &&
+        runner.streamRuntimeState?.state.core.path === path &&
         runner.requestHeaders.some((headers) => headers.get("x-stream-test") === headerValue),
       10_000,
     );
@@ -462,9 +465,9 @@ describe("stream capnweb protocol", () => {
       await waitFor(
         () =>
           runner.subscriptionConfiguredEvent?.offset === configured.offset &&
-          runner.streamRuntimeState?.state.path === path &&
+          runner.streamRuntimeState?.state.core.path === path &&
           runner.requestHeaders.some((headers) => headers.get("x-stream-test") === headerValue),
-        20_000,
+        3_000,
       );
 
       const appended = await stream.stream.append({
@@ -477,7 +480,7 @@ describe("stream capnweb protocol", () => {
       await waitFor(
         () =>
           runner.batches.some((batch) => batch.some((event) => event.offset === appended.offset)),
-        20_000,
+        3_000,
       );
       expect(runner.batches.flat()).toContainEqual(appended);
     },
@@ -615,7 +618,7 @@ async function startCloudflaredTunnel(originUrl: string): Promise<
   const output: string[] = [];
   const url = await waitForCloudflaredUrl(child, output);
   // Quick-tunnel DNS/edge routing can lag briefly after cloudflared prints the URL.
-  await new Promise((resolve) => setTimeout(resolve, 5_000));
+  await new Promise((resolve) => setTimeout(resolve, 500));
 
   return {
     url,

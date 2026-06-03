@@ -36,13 +36,13 @@ The root package is shaped like the future stream package; `dev`, `build`,
 Then run end-to-end tests against it:
 
 ```sh
-WORKER_URL=http://localhost:5173 STREAM_STAGING_E2E=true pnpm --filter @cf-experiments/05-stream-staging-area test -- src/stream-capnweb.test.ts
+WORKER_URL=http://localhost:5173 STREAM_STAGING_E2E=true pnpm --dir experiments/streams/05-stream-staging-area/example-app vitest
 ```
 
 Run browser Playwright tests against local Miniflare:
 
 ```sh
-pnpm --filter @cf-experiments/05-stream-staging-area test:e2e
+pnpm --dir experiments/streams/05-stream-staging-area/example-app playwright
 ```
 
 The browser suite covers append + local mirror updates, same-stream split views,
@@ -91,7 +91,7 @@ doppler run --project os --config dev -- pnpm --filter @cf-experiments/05-stream
 Run the same end-to-end tests against the deployed worker:
 
 ```sh
-WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev STREAM_STAGING_E2E=true pnpm --filter @cf-experiments/05-stream-staging-area test -- src/stream-capnweb.test.ts src/stream-processor-node.test.ts
+WORKER_URL=https://stream-staging-area.iterate-dev-preview.workers.dev STREAM_STAGING_E2E=true pnpm --dir experiments/streams/05-stream-staging-area/example-app vitest
 ```
 
 ## Evaluate
@@ -102,7 +102,7 @@ main repo:
 - appends are expressed as event batches
 - subscribers consume event batches through a `processEventBatch({ events, streamMaxOffset })` RPC method
 - stream delivery does not await each subscriber's `processEventBatch` result
-- stream state is reduced by the core stream processor contract
+- stream state is reduced by built-in processors keyed by slug (`core`, `circuit-breaker`)
 - outbound built-in subscribers are reconciled from `subscription-configured` events
 
 ## Stream Processor Abstraction
@@ -164,9 +164,9 @@ Use `afterAppend` when each consumed event independently causes a side effect:
 
 ```ts
 afterAppend({ event, state, stream, keepAlive }) {
-  if (event.type !== "test.processor.input") return;
+  if (event.type !== "events.iterate.com/echo-example/input-received") return;
   keepAlive(stream.append({
-    event: { type: "test.processor.output", payload: { seen: state.seen } },
+    event: { type: "events.iterate.com/echo-example/output-echoed", payload: { seen: state.seen } },
   }));
 }
 ```
@@ -232,3 +232,48 @@ A processor that should start side effects exactly at subscription time calls
 `shouldApplySideEffects({ event })`. A processor that wants a 10 second look-back
 passes `gracePeriodMs: 10_000`. A processor that must enact every historical side
 effect ignores the helper.
+
+### Standard processor behavior
+
+Ordinary processors self-register on the stream exactly once per processor version.
+Spread the shared pieces from `standardProcessorBehavior` into the contract, delegate
+`reduce` and the registration append from `afterAppend`, and let the core processor
+index `events.iterate.com/stream/processor-registered` into `processorsBySlug`:
+
+Keep durable event type strings inline in the `events` object, `consumes`, `emits`,
+and reducer. Repeating the string inside one processor definition is preferred over
+local `eventTypes` objects or aliases that hide the wire contract.
+
+```ts
+import { standardProcessorBehavior } from "./standard-processor-behavior.js";
+
+defineProcessorContract({
+  stateSchema: z.object({
+    ...standardProcessorBehavior.stateShape,
+    seen: z.number().int().min(0).default(0),
+  }),
+  processorDeps: [...standardProcessorBehavior.processorDeps],
+  consumes: [
+    ...standardProcessorBehavior.consumes,
+    "events.iterate.com/echo-example/input-received",
+  ],
+  emits: [
+    ...standardProcessorBehavior.emits,
+    "events.iterate.com/echo-example/output-echoed",
+  ],
+  reduce({ state, event, contract }) {
+    const nextState = standardProcessorBehavior.reduce({ state, event, contract });
+    return event.type === "events.iterate.com/echo-example/input-received"
+      ? { ...nextState, seen: nextState.seen + 1 }
+      : nextState;
+  },
+});
+
+afterAppend({ event, state, stream, shouldApplySideEffects, keepAlive }) {
+  if (!shouldApplySideEffects({ event })) return;
+  standardProcessorBehavior.afterAppend({ state, stream, keepAlive, contract });
+  // processor-specific side effects...
+}
+```
+
+See `processors/examples/echo/` for a full example processor.

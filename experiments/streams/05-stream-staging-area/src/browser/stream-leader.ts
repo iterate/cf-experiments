@@ -21,7 +21,7 @@ export type WriterRole = {
   release(): void;
 };
 
-export function acquireWriterRole(args: { streamPath: string; compatibilityVersion: string }): WriterRole {
+export function acquireWriterRole(args: { lockName: string }): WriterRole {
   let release = () => {};
   // The lock is held until this promise resolves; resolving it === resigning.
   const held = new Promise<void>((resolve) => {
@@ -31,13 +31,23 @@ export function acquireWriterRole(args: { streamPath: string; compatibilityVersi
   const whenWriter = new Promise<void>((resolve) => {
     signalWriter = resolve;
   });
-  void navigator.locks.request(
-    `stream-writer:${args.compatibilityVersion}:${args.streamPath}`,
-    { mode: "exclusive" },
-    async () => {
-      signalWriter();
-      await held;
-    },
-  );
+  void navigator.locks.request(args.lockName, { mode: "exclusive" }, async () => {
+    signalWriter();
+    await held;
+  });
   return { whenWriter, release: () => release() };
+}
+
+/**
+ * The Web Lock name electing the single writer for one (namespace, path, processor).
+ * Versioned by the processor's schema so a deploy that migrates the shared OPFS DB lets a
+ * fresh tab take over instead of waiting forever behind an old tab's lock.
+ */
+export function streamWriterLockName(args: {
+  namespace: string;
+  streamPath: string;
+  slug: string;
+  schemaVersion: number;
+}): string {
+  return `stream-writer:${args.namespace}:${args.streamPath}:${args.slug}:v${args.schemaVersion}`;
 }

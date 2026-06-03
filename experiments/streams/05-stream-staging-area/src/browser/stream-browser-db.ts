@@ -74,9 +74,12 @@ export class StreamBrowserDatabase implements Disposable {
   readonly #queries = new Map<string, RegisteredQuery>();
   readonly #changeListeners = new Set<(change: StreamDbChange) => void>();
 
-  constructor(readonly streamPath: string) {
-    this.databasePath = databasePathForStreamPath(streamPath);
-    this.downloadFilename = downloadFilenameForStreamPath(streamPath);
+  constructor(
+    readonly namespace: string,
+    readonly streamPath: string,
+  ) {
+    this.databasePath = databasePathFor(namespace, streamPath);
+    this.downloadFilename = downloadFilenameFor(namespace, streamPath);
     this.#worker = new Worker(new URL("./stream-db.worker.ts", import.meta.url), {
       type: "module",
     });
@@ -88,7 +91,9 @@ export class StreamBrowserDatabase implements Disposable {
       if (ok) pending.resolve(result);
       else pending.reject(new Error(error ?? "stream db worker error"));
     };
-    this.#channel = new BroadcastChannel(`stream-db:${encodeURIComponent(streamPath)}`);
+    this.#channel = new BroadcastChannel(
+      `stream-db:${encodeURIComponent(namespace)}:${encodeURIComponent(streamPath)}`,
+    );
     this.#channel.onmessage = (event: MessageEvent<StreamDbChange>) => this.#onChange(event.data);
     this.#ready = this.#call("init", { databasePath: this.databasePath }).then(() => undefined);
   }
@@ -196,8 +201,11 @@ export class StreamBrowserDatabase implements Disposable {
     URL.revokeObjectURL(url);
   }
 
-  async clear() {
-    await this.exec(`DELETE FROM events`);
+  /** Clears the given tables (those that exist) and broadcasts a clear so views remount. */
+  async clearTables(tables: readonly string[]) {
+    for (const table of tables) {
+      if (await this.#tableExists(table)) await this.exec(`DELETE FROM ${table}`);
+    }
     this.#publishChange({ kind: "clear" });
   }
 
@@ -263,8 +271,10 @@ export class StreamBrowserDatabase implements Disposable {
       const data = await this.exec(entry.sql, entry.params);
       entry.snapshot = { data, status: "ok", error: undefined };
     } catch (error) {
-      if (isMissingEventsTableError(error)) {
-        entry.snapshot = { data: emptyEventsTableRows(entry.sql), status: "ok", error: undefined };
+      if (isMissingTableError(error)) {
+        // A view's table may not exist until its processor's first write creates it. Treat
+        // that as an empty result (count 0 / no rows) rather than a surfaced error.
+        entry.snapshot = { data: emptyTableRows(entry.sql), status: "ok", error: undefined };
         for (const listener of entry.listeners) listener();
         return;
       }
@@ -283,9 +293,14 @@ export class StreamBrowserDatabase implements Disposable {
   }
 
   async #eventsTableExists(): Promise<boolean> {
+    return this.#tableExists("events");
+  }
+
+  async #tableExists(name: string): Promise<boolean> {
     await this.#ready;
     const [row] = await this.#execReady(
-      `SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'events'`,
+      `SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?`,
+      [name],
     );
     return row !== undefined;
   }
@@ -319,12 +334,13 @@ export class StreamBrowserDatabase implements Disposable {
   }
 }
 
-function databasePathForStreamPath(streamPath: string) {
-  return `${databaseSlugForStreamPath(streamPath)}.sqlite3`;
+// OPFS layout: one folder per namespace, one SQLite file per stream path inside it.
+function databasePathFor(namespace: string, streamPath: string) {
+  return `${encodeURIComponent(namespace)}/${databaseSlugForStreamPath(streamPath)}.sqlite3`;
 }
 
-function downloadFilenameForStreamPath(streamPath: string) {
-  return `${databaseSlugForStreamPath(streamPath)}.sqlite3`;
+function downloadFilenameFor(namespace: string, streamPath: string) {
+  return `${encodeURIComponent(namespace)}__${databaseSlugForStreamPath(streamPath)}.sqlite3`;
 }
 
 function databaseSlugForStreamPath(streamPath: string) {
@@ -358,13 +374,12 @@ function isSqlValue(value: unknown): value is SqlValue {
   );
 }
 
-function isMissingEventsTableError(error: unknown) {
-  return error instanceof Error && error.message.includes("no such table: events");
+function isMissingTableError(error: unknown) {
+  return error instanceof Error && error.message.includes("no such table");
 }
 
-function emptyEventsTableRows(sql: string): Record<string, SqlValue>[] {
-  if (/^\s*SELECT\s+COUNT\(\*\)\s+AS\s+count\s+FROM\s+events\b/i.test(sql)) {
-    return [{ count: 0 }];
-  }
-  return [];
+function emptyTableRows(sql: string): Record<string, SqlValue>[] {
+  // A `SELECT COUNT(*) AS count ...` over a not-yet-created table reads as 0; anything else
+  // reads as no rows.
+  return /^\s*SELECT\s+COUNT\(\*\)\s+AS\s+count\b/i.test(sql) ? [{ count: 0 }] : [];
 }

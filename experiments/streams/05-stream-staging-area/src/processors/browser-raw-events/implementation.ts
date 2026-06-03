@@ -1,22 +1,16 @@
-// Implements the "raw-events-browser" processor.
-// Owns the browser `events` table schema and writes each delivered event with plain SQL.
+// Implements the "browser-raw-events" processor.
+// Owns the browser `events` table schema and writes each delivered batch of events
+// in one SQLite transaction (afterAppendBatch + the batch write API).
 
-import type { StreamEvent } from "@cf-experiments/shared/event";
 import { implementProcessor } from "../../processor.js";
+import { createSchemaEnsurer } from "../../browser/ensure-schema-once.js";
 import type { SqlClient, SqlValue } from "../../browser/stream-browser-db.js";
-import { rawEventsBrowserProcessorContract } from "./contract.js";
+import { browserRawEventsContract } from "./contract.js";
 
 export const BROWSER_RAW_EVENTS_SCHEMA_VERSION = 4;
 
-const schemaReady = new WeakSet<SqlClient>();
-const schemaPromises = new WeakMap<SqlClient, Promise<void>>();
-
-export async function ensureRawEventsBrowserSchema(sql: SqlClient): Promise<void> {
-  if (schemaReady.has(sql)) return;
-  const existing = schemaPromises.get(sql);
-  if (existing !== undefined) return existing;
-
-  const schemaPromise = (async () => {
+const ensureBrowserRawEventsSchema = createSchemaEnsurer({
+  run: async (sql) => {
     const [schemaVersion] = await sql.exec(`PRAGMA user_version`);
     if (Number(schemaVersion?.user_version ?? 0) !== BROWSER_RAW_EVENTS_SCHEMA_VERSION) {
       await sql.batch(
@@ -89,32 +83,30 @@ export async function ensureRawEventsBrowserSchema(sql: SqlClient): Promise<void
       ],
       { transaction: true },
     );
+  },
+});
 
-    schemaReady.add(sql);
-  })().finally(() => {
-    schemaPromises.delete(sql);
-  });
-
-  schemaPromises.set(sql, schemaPromise);
-  return schemaPromise;
+/** Resume cursor for this processor: the max committed offset in the events table. */
+export async function loadBrowserRawEventsCheckpoint(
+  sql: SqlClient,
+): Promise<{ state: Record<string, never>; offset: number } | undefined> {
+  await ensureBrowserRawEventsSchema(sql);
+  const [row] = await sql.exec(`SELECT MAX(offset) AS max_offset FROM events`);
+  const max = Number(row?.max_offset ?? -1);
+  return max < 0 ? undefined : { state: {}, offset: max };
 }
 
-export const rawEventsBrowserProcessor = implementProcessor(
-  rawEventsBrowserProcessorContract,
+export const browserRawEvents = implementProcessor(
+  browserRawEventsContract,
   (deps: { sql: SqlClient }) => ({
     afterAppendBatch({ events, blockProcessorUntil }) {
       blockProcessorUntil(() =>
-        ensureRawEventsBrowserSchema(deps.sql).then(() =>
+        ensureBrowserRawEventsSchema(deps.sql).then(() =>
           deps.sql.batch(
             events.map(({ event }) => {
-              const maybeEvent: unknown = event;
-              if (!isStreamEvent(maybeEvent)) {
-                throw new Error("raw events browser processor received a malformed stream event");
-              }
-              const streamEvent = maybeEvent;
               return {
                 sql: `INSERT INTO events (local_index, raw_jsonb) VALUES (?, jsonb(?))`,
-                params: [streamEvent.offset - 1, JSON.stringify(streamEvent)] satisfies SqlValue[],
+                params: [event.offset - 1, JSON.stringify(event)] satisfies SqlValue[],
               };
             }),
             { transaction: true },
@@ -125,11 +117,4 @@ export const rawEventsBrowserProcessor = implementProcessor(
   }),
 );
 
-function isStreamEvent(event: unknown): event is StreamEvent {
-  return (
-    event !== null &&
-    typeof event === "object" &&
-    "offset" in event &&
-    typeof event.offset === "number"
-  );
-}
+export { ensureBrowserRawEventsSchema };

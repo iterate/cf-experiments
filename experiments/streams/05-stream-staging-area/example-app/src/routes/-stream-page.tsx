@@ -5,11 +5,13 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import { ClientOnly, useNavigate } from "@tanstack/react-router";
 import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
 import {
-  createStreamBrowserStore,
+  acquireStreamRuntime,
+  type BrowserProcessorConfig,
   type StreamBrowserSnapshot,
   type StreamBrowserStore,
 } from "../../../src/browser/stream-browser-store.js";
@@ -17,14 +19,44 @@ import {
   type StreamBrowserDatabase,
   type StreamEventRow,
 } from "../../../src/browser/stream-browser-db.js";
+import {
+  BROWSER_RAW_EVENTS_SCHEMA_VERSION,
+  browserRawEvents,
+  loadBrowserRawEventsCheckpoint,
+} from "../../../src/processors/browser-raw-events/implementation.js";
 import { useStreamQuery } from "../../../src/browser/hooks/use-stream-query.js";
+import { EventFeedView } from "./-event-feed-view.js";
+import { StreamStateView } from "./-stream-state-view.js";
+import { ViewSwitcher } from "./-view-switcher.js";
 import "./-stream-page.css";
 
-export function StreamPage({ streamPath }: { streamPath: string }) {
+export function StreamPage({ streamPath, viewSlug }: { streamPath: string; viewSlug: string }) {
   return (
     <ClientOnly fallback={<StreamHydrationFallback streamPath={streamPath} />}>
-      <HydratedStreamPage streamPath={streamPath} />
+      <HydratedStreamPage streamPath={streamPath} viewSlug={viewSlug} />
     </ClientOnly>
+  );
+}
+
+// One hydration boundary, then exactly one of the three sibling views, chosen by `?view=`
+// (the value is the view's slug). All three share the same sidebar shell.
+function HydratedStreamPage({ streamPath, viewSlug }: { streamPath: string; viewSlug: string }) {
+  const sidebarRuntime = useRawEventsView(streamPath, "");
+
+  return (
+    <StreamViewShell
+      currentView={viewSlug}
+      sidebarRuntime={sidebarRuntime}
+      streamPath={streamPath}
+    >
+      {viewSlug === "browser-event-feed" ? (
+        <EventFeedView streamPath={streamPath} />
+      ) : viewSlug === "browser-state" ? (
+        <StreamStateView streamPath={streamPath} />
+      ) : (
+        <RawEventsMain streamPath={streamPath} />
+      )}
+    </StreamViewShell>
   );
 }
 
@@ -36,22 +68,33 @@ export function StreamCompactView({ streamPath }: { streamPath: string }) {
   );
 }
 
-function HydratedStreamPage({ streamPath }: { streamPath: string }) {
+// The raw-events sibling view: type filter + virtualized raw event list + composer.
+function RawEventsMain({ streamPath }: { streamPath: string }) {
   const [eventTypeFilter, setEventTypeFilter] = useState("");
-  const runtime = useStreamRuntime(streamPath, eventTypeFilter);
+  const runtime = useRawEventsView(streamPath, eventTypeFilter);
+
+  if (runtime.countResult.status !== "ok") {
+    return (
+      <StreamLoadingPanel
+        message={
+          runtime.countResult.status === "error"
+            ? `client hydrated, sqlite DB error at ${runtime.streamDatabase.databasePath}: ${runtime.countResult.error?.message ?? "unknown error"}`
+            : `client hydrated, opening sqlite DB at ${runtime.streamDatabase.databasePath}`
+        }
+      />
+    );
+  }
 
   return (
-    <StreamPageWithDatabase
-      snapshot={runtime.snapshot}
-      streamDatabase={runtime.streamDatabase}
-      streamStore={runtime.streamStore}
-      streamPath={streamPath}
-      databaseReady={runtime.countResult.status === "ok"}
-      databaseError={runtime.countResult.error}
-      databaseStatus={runtime.countResult.status}
+    <EventRows
       eventCount={runtime.eventCount}
       eventTypeFilter={eventTypeFilter}
       eventTypes={runtime.eventTypes}
+      key={`events:${streamPath}:${runtime.snapshot.clearVersion}:${eventTypeFilter}`}
+      snapshot={runtime.snapshot}
+      streamDatabase={runtime.streamDatabase}
+      streamPath={streamPath}
+      streamStore={runtime.streamStore}
       totalEventCount={runtime.totalEventCount}
       onEventTypeFilterChange={setEventTypeFilter}
     />
@@ -60,7 +103,7 @@ function HydratedStreamPage({ streamPath }: { streamPath: string }) {
 
 function HydratedStreamCompactView({ streamPath }: { streamPath: string }) {
   const [eventTypeFilter, setEventTypeFilter] = useState("");
-  const runtime = useStreamRuntime(streamPath, eventTypeFilter);
+  const runtime = useRawEventsView(streamPath, eventTypeFilter);
 
   return (
     <section
@@ -100,34 +143,37 @@ function HydratedStreamCompactView({ streamPath }: { streamPath: string }) {
   );
 }
 
-function useStreamRuntime(streamPath: string, eventTypeFilter: string) {
-  const streamStore = useMemo(
-    () => createStreamBrowserStore({ streamPath }),
-    [streamPath],
-  );
-  const snapshot = useSyncExternalStore(
-    streamStore.subscribe,
-    streamStore.getSnapshot,
-    streamStore.getServerSnapshot,
-  );
-  const streamDatabase = streamStore.streamDatabase;
-  const totalCountResult = useStreamQuery(
-    streamDatabase,
-    `SELECT COUNT(*) AS count FROM events`,
-  );
+// The browser's thin layer over a processor: acquire the shared (path, processor) runtime
+// — which, once it wins leadership, runs the processor over a subscription exactly like the
+// StreamProcessorRunner DO — and subscribe to its snapshot for React. Nothing view-specific.
+function useStreamProcessor(streamPath: string, config: BrowserProcessorConfig) {
+  const store = useMemo(() => acquireStreamRuntime({ streamPath, ...config }), [streamPath, config]);
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getServerSnapshot);
+  return { store, snapshot, db: store.streamDatabase };
+}
+
+// Stable raw-events config (a constant so useStreamProcessor's useMemo identity is stable).
+const RAW_EVENTS_RUNTIME: BrowserProcessorConfig = {
+  processor: browserRawEvents,
+  schemaVersion: BROWSER_RAW_EVENTS_SCHEMA_VERSION,
+  tables: ["events"],
+  loadCheckpoint: loadBrowserRawEventsCheckpoint,
+};
+
+// The raw-events view's data: the thin runtime + this view's own reactive SQL queries.
+function useRawEventsView(streamPath: string, eventTypeFilter: string) {
+  const { store, snapshot, db } = useStreamProcessor(streamPath, RAW_EVENTS_RUNTIME);
+  const totalCountResult = useStreamQuery(db, `SELECT COUNT(*) AS count FROM events`);
   const countResult = useStreamQuery(
-    streamDatabase,
+    db,
     eventTypeFilter === ""
       ? `SELECT COUNT(*) AS count FROM events`
       : `SELECT COUNT(*) AS count FROM events WHERE type = ?`,
     eventTypeFilter === "" ? [] : [eventTypeFilter],
   );
   const eventTypesResult = useStreamQuery(
-    streamDatabase,
-    `SELECT type, COUNT(*) AS count
-     FROM events
-     GROUP BY type
-     ORDER BY type ASC`,
+    db,
+    `SELECT type, COUNT(*) AS count FROM events GROUP BY type ORDER BY type ASC`,
   );
   const eventCount = Number(countResult.data[0]?.count ?? 0);
   const totalEventCount = Number(totalCountResult.data[0]?.count ?? 0);
@@ -135,92 +181,38 @@ function useStreamRuntime(streamPath: string, eventTypeFilter: string) {
     if (typeof row.type !== "string" || typeof row.count !== "number") return [];
     return [{ count: row.count, type: row.type }];
   });
-  return { countResult, eventCount, eventTypes, snapshot, streamDatabase, streamStore, totalEventCount };
+  return {
+    countResult,
+    eventCount,
+    eventTypes,
+    snapshot,
+    streamDatabase: db,
+    streamStore: store,
+    totalEventCount,
+  };
 }
 
 function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
   return (
     <div className="min-h-full bg-white font-sans text-slate-950">
       <div className="flex min-h-60 items-center justify-center gap-2.5 text-sm text-slate-500">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
+        <div className="size-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
         <span>SSR done, hydrating client for {streamPath}</span>
       </div>
     </div>
   );
 }
 
-function StreamPageWithDatabase({
+function StreamViewShell({
   streamPath,
-  snapshot,
-  streamDatabase,
-  streamStore,
-  eventCount,
-  eventTypeFilter,
-  eventTypes,
-  totalEventCount,
-  databaseReady,
-  databaseError,
-  databaseStatus,
-  onEventTypeFilterChange,
+  currentView,
+  sidebarRuntime,
+  children,
 }: {
   streamPath: string;
-  snapshot: StreamBrowserSnapshot;
-  streamDatabase: StreamBrowserDatabase;
-  streamStore: StreamBrowserStore;
-  eventCount: number;
-  eventTypeFilter: string;
-  eventTypes: { count: number; type: string }[];
-  totalEventCount: number;
-  databaseReady: boolean;
-  databaseError: Error | undefined;
-  databaseStatus: "pending" | "ok" | "error";
-  onEventTypeFilterChange(eventType: string): void;
-}) {
-
-  return (
-    <StreamPageLayout
-      databaseReady={databaseReady}
-      databaseError={databaseError}
-      databaseStatus={databaseStatus}
-      eventCount={eventCount}
-      eventTypeFilter={eventTypeFilter}
-      eventTypes={eventTypes}
-      totalEventCount={totalEventCount}
-      snapshot={snapshot}
-      streamDatabase={streamDatabase}
-      streamStore={streamStore}
-      streamPath={streamPath}
-      onEventTypeFilterChange={onEventTypeFilterChange}
-    />
-  );
-}
-
-function StreamPageLayout({
-  streamPath,
-  snapshot,
-  streamDatabase,
-  streamStore,
-  eventCount,
-  eventTypeFilter,
-  eventTypes,
-  totalEventCount,
-  databaseReady,
-  databaseError,
-  databaseStatus,
-  onEventTypeFilterChange,
-}: {
-  streamPath: string;
-  snapshot: StreamBrowserSnapshot;
-  streamDatabase: StreamBrowserDatabase;
-  streamStore: StreamBrowserStore;
-  eventCount: number;
-  eventTypeFilter: string;
-  eventTypes: { count: number; type: string }[];
-  totalEventCount: number;
-  databaseReady: boolean;
-  databaseError: Error | undefined;
-  databaseStatus: "pending" | "ok" | "error";
-  onEventTypeFilterChange(eventType: string): void;
+  currentView: string;
+  sidebarRuntime: ReturnType<typeof useRawEventsView>;
+  children: ReactNode;
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => globalThis.matchMedia("(min-width: 761px)").matches,
@@ -231,11 +223,12 @@ function StreamPageLayout({
       <div className="flex h-full min-h-0 flex-row gap-4 p-0 max-[760px]:flex-col max-[760px]:gap-0">
         <StreamSidebar
           className={sidebarOpen ? undefined : "hidden"}
-          eventCount={eventCount}
+          currentView={currentView}
+          eventCount={sidebarRuntime.totalEventCount}
           key={`sidebar:${streamPath}`}
-          snapshot={snapshot}
-          streamDatabase={streamDatabase}
-          streamStore={streamStore}
+          snapshot={sidebarRuntime.snapshot}
+          streamDatabase={sidebarRuntime.streamDatabase}
+          streamStore={sidebarRuntime.streamStore}
           streamPath={streamPath}
           onSidebarOpenChange={setSidebarOpen}
         />
@@ -250,7 +243,7 @@ function StreamPageLayout({
             <button
               aria-controls="stream-sidebar"
               aria-label="Show sidebar"
-              className="absolute left-4 top-4 z-20 inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
+              className="absolute left-4 top-4 z-20 inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
               title="Show sidebar"
               type="button"
               onClick={() => setSidebarOpen(true)}
@@ -258,28 +251,7 @@ function StreamPageLayout({
               <SidebarIcon />
             </button>
           )}
-          {!databaseReady ? (
-            <StreamLoadingPanel
-              message={
-                databaseStatus === "error"
-                  ? `client hydrated, sqlite DB error at ${streamDatabase.databasePath}: ${databaseError?.message ?? "unknown error"}`
-                  : `client hydrated, opening sqlite DB at ${streamDatabase.databasePath}`
-              }
-            />
-          ) : (
-            <EventRows
-              eventCount={eventCount}
-              eventTypeFilter={eventTypeFilter}
-              eventTypes={eventTypes}
-              key={`events:${streamPath}:${snapshot.clearVersion}:${eventTypeFilter}`}
-              snapshot={snapshot}
-              streamDatabase={streamDatabase}
-              streamPath={streamPath}
-              streamStore={streamStore}
-              totalEventCount={totalEventCount}
-              onEventTypeFilterChange={onEventTypeFilterChange}
-            />
-          )}
+          {children}
         </div>
       </div>
     </main>
@@ -293,7 +265,7 @@ function StreamLoadingPanel({ message }: { message: string }) {
       className="relative grid min-h-0 flex-1 place-items-center overflow-y-auto bg-white"
     >
       <div className="flex min-h-60 items-center justify-center gap-2.5 text-sm text-slate-500">
-        <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
+        <div className="size-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
         <span>{message}</span>
       </div>
     </section>
@@ -304,7 +276,7 @@ function EditStreamIcon() {
   return (
     <svg
       aria-hidden
-      className="h-3.5 w-3.5"
+      className="size-3.5"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -322,7 +294,7 @@ function SidebarIcon() {
   return (
     <svg
       aria-hidden
-      className="h-3.5 w-3.5"
+      className="size-3.5"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -340,7 +312,7 @@ function AppendEventIcon() {
   return (
     <svg
       aria-hidden
-      className="h-3.5 w-3.5"
+      className="size-3.5"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -394,6 +366,7 @@ function StreamTopBar({
     void navigate({
       to: "/streams/$",
       params: { _splat: normalizedDraftPath.slice(1) },
+      search: { view: "browser-raw-events" },
     });
   }
 
@@ -412,7 +385,7 @@ function StreamTopBar({
       <button
         aria-controls="stream-sidebar"
         aria-label="Hide sidebar"
-        className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
+        className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
         title="Hide sidebar"
         type="button"
         onClick={() => onSidebarOpenChange(false)}
@@ -461,7 +434,7 @@ function StreamTopBar({
               type="button"
               onClick={() => goToDraftPath()}
             >
-              Go
+              Go to stream
             </button>
             <button
               className="cursor-pointer border-0 bg-transparent px-0 py-1 text-[11px] text-[#98a2b3] hover:text-[#475467] hover:underline"
@@ -474,7 +447,7 @@ function StreamTopBar({
         ) : (
           <button
             aria-label="Edit stream path"
-            className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
+            className="inline-flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent p-0 text-[#667085] hover:bg-[#f8fafc] hover:text-[#344054]"
             title="Edit stream path"
             type="button"
             onClick={() => startEditingPath()}
@@ -583,21 +556,13 @@ function EventRows({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <EventTypeFilterBar
-        eventCount={eventCount}
-        eventTypeFilter={eventTypeFilter}
-        eventTypes={eventTypes}
-        totalEventCount={totalEventCount}
-        onEventTypeFilterChange={onEventTypeFilterChange}
-      />
-      <StreamRuntimeNotice eventCount={eventCount} snapshot={snapshot} />
       {showScrollToTop ? (
         <div className="pointer-events-none absolute left-0 right-3.5 top-11 z-10 flex h-12 items-start justify-center pt-2">
           <div className="absolute inset-0 bg-gradient-to-b from-white via-white/80 to-transparent" aria-hidden />
           <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 top-3">
             <button
               aria-label="Scroll to top"
-              className="pointer-events-auto grid h-8 w-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
+              className="pointer-events-auto grid size-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
               type="button"
               onClick={() => {
                 virtualizer.scrollToOffset(0);
@@ -611,13 +576,21 @@ function EventRows({
       <section
         aria-label="Stream events"
         data-testid="stream-events"
-        className="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto bg-white pr-4 [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
+        className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-white pr-4 [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
         ref={parentRef}
       >
+        <EventTypeFilterBar
+          eventCount={eventCount}
+          eventTypeFilter={eventTypeFilter}
+          eventTypes={eventTypes}
+          totalEventCount={totalEventCount}
+          onEventTypeFilterChange={onEventTypeFilterChange}
+        />
+        <StreamRuntimeNotice eventCount={eventCount} snapshot={snapshot} />
         {eventCount === 0 ? (
-          <div className="flex min-h-60 items-center justify-center gap-2.5 text-sm text-slate-500">
+          <div className="flex min-h-60 flex-1 items-center justify-center gap-2.5 text-sm text-slate-500">
             {snapshot.connectionStatus === "subscribed" ? null : (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
+              <div className="size-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
             )}
             <span>
               {eventTypeFilter !== ""
@@ -632,8 +605,8 @@ function EventRows({
         ) : (
           <>
             <div
-              className="relative w-full"
-              style={{ height: virtualizer.getTotalSize() }}
+              className="relative w-full flex-1"
+              style={{ minHeight: virtualizer.getTotalSize() }}
             >
               <EventRowWindow
                 eventCount={eventCount}
@@ -672,7 +645,7 @@ function EventRows({
                   }
                   className={
                     newEventCount === 0
-                      ? "pointer-events-auto grid h-8 w-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
+                      ? "pointer-events-auto grid size-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
                       : "pointer-events-auto inline-grid h-8 auto-cols-max grid-flow-col place-items-center gap-1.5 rounded-full border border-[#e8ebf0] bg-white px-2.5 text-[13px] text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
                   }
                   type="button"
@@ -717,7 +690,10 @@ function EventTypeFilterBar({
   }`;
 
   return (
-    <div className="grid min-h-11 flex-none grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 border-b border-[#eef1f5] bg-white pr-4">
+    <div
+      className="sticky top-0 z-3 grid min-h-11 flex-none grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 border-b border-[#eef1f5] bg-white/95 pr-4 backdrop-blur-sm"
+      data-testid="event-type-filter-bar"
+    >
       <label className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-xs font-semibold text-[#667085]">
         <span>Event type</span>
         <select
@@ -763,13 +739,13 @@ function StreamRuntimeNotice({
     // SQLite mirror is empty. Surface it loudly instead of showing only a
     // spinner, because there may be no exception in this tab's console.
     return (
-      <div className="grid gap-[3px] border-b border-[#fedf89] bg-[#fff8e6] py-[9px] pr-4 text-xs text-[#7a4b00]" data-testid="stream-warning" role="status">
+      <output className="grid gap-[3px] border-b border-[#fedf89] bg-[#fff8e6] py-[9px] pr-4 text-xs text-[#7a4b00]" data-testid="stream-warning">
         <strong>Follower with empty SQLite mirror</strong>
         <span>
           This tab is waiting for the elected writer tab to mirror events into local SQLite.
           Reload or close older tabs if this does not resolve.
         </span>
-      </div>
+      </output>
     );
   }
 
@@ -928,6 +904,7 @@ function streamEventRowFromSql(row: Record<string, unknown>): StreamEventRow | u
 function StreamSidebar({
   className,
   streamPath,
+  currentView,
   snapshot,
   streamDatabase,
   streamStore,
@@ -936,6 +913,7 @@ function StreamSidebar({
 }: {
   className?: string;
   streamPath: string;
+  currentView: string;
   snapshot: StreamBrowserSnapshot;
   streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
@@ -948,6 +926,9 @@ function StreamSidebar({
       id="stream-sidebar"
     >
       <StreamTopBar streamPath={streamPath} onSidebarOpenChange={onSidebarOpenChange} />
+      <div className="py-2">
+        <ViewSwitcher streamPath={streamPath} current={currentView} />
+      </div>
       <SubscriptionTool
         eventCount={eventCount}
         snapshot={snapshot}
@@ -1156,6 +1137,7 @@ function InsertEventsTool({
         insertBatchSize: string;
         periodSeconds: string;
         appendResponseMode: "await" | "background" | "dispose";
+        raiseCircuitBreaker: boolean;
         insertState: "idle" | "inserting" | "done" | "error";
       },
       action:
@@ -1163,9 +1145,12 @@ function InsertEventsTool({
         | { type: "set-insert-batch-size"; value: string }
         | { type: "set-period-seconds"; value: string }
         | { type: "set-append-response-mode"; value: "await" | "background" | "dispose" }
+        | { type: "set-raise-circuit-breaker"; value: boolean }
         | { type: "set-insert-state"; value: "idle" | "inserting" | "done" | "error" },
     ) => {
       switch (action.type) {
+        case "set-raise-circuit-breaker":
+          return { ...state, raiseCircuitBreaker: action.value };
         case "set-insert-event-count":
           return { ...state, insertEventCount: action.value };
         case "set-insert-batch-size":
@@ -1183,6 +1168,7 @@ function InsertEventsTool({
       insertBatchSize: "100",
       periodSeconds: "5",
       appendResponseMode: "await",
+      raiseCircuitBreaker: false,
       insertState: "idle",
     },
   );
@@ -1203,6 +1189,20 @@ function InsertEventsTool({
     dispatchInsertState({ type: "set-insert-state", value: "inserting" });
 
     try {
+      // Optionally lift the stream's token-bucket circuit breaker first, so a large burst
+      // isn't paused. Idempotency-keyed, so repeated runs append it at most once.
+      if (insertState.raiseCircuitBreaker) {
+        await streamStore.appendBatch({
+          events: [
+            {
+              type: "events.iterate.com/circuit-breaker/configured",
+              payload: { burstCapacity: 1_000_000_000, refillRatePerMinute: 1_000_000_000 },
+              idempotencyKey: "raise-circuit-breaker",
+            },
+          ],
+        });
+      }
+
       const pendingResponses: Promise<unknown>[] = [];
       const batchCount = Math.ceil(count / batchSize);
       const batchDelayMs = batchCount <= 1 ? 0 : periodMs / (batchCount - 1);
@@ -1326,6 +1326,21 @@ function InsertEventsTool({
           <option value="dispose">Dispose</option>
         </select>
       </label>
+      <label className="flex items-center gap-2 text-[11px] font-medium text-[#667085]">
+        <input
+          type="checkbox"
+          checked={insertState.raiseCircuitBreaker}
+          onChange={(event) =>
+            dispatchInsertState({
+              type: "set-raise-circuit-breaker",
+              value: event.currentTarget.checked,
+            })
+          }
+        />
+        <span title="Append a circuit-breaker/configured event raising the burst/refill limits before inserting, so a large burst isn't rate-limited.">
+          Raise rate limit before burst
+        </span>
+      </label>
       <button
         className="cursor-pointer whitespace-nowrap rounded-md bg-[#1f6feb] px-3 py-2 text-[13px] font-semibold text-white no-underline disabled:cursor-default disabled:opacity-55"
         disabled={insertState.insertState === "inserting"}
@@ -1357,15 +1372,13 @@ function randomStreamEventInput(args: {
   const noun = nouns[(randomValues[1] ?? 0) % nouns.length] ?? "artifact";
   const adjective = adjectives[(randomValues[2] ?? 0) % adjectives.length] ?? "reviewed";
   const eventTypes = [
-    "events.iterate.com/core/metadata-updated",
-    "events.iterate.com/core/child-stream-created",
-    "events.iterate.com/core/error-occurred",
-    "events.iterate.com/core/circuit-breaker-configured",
-    "events.iterate.com/core/paused",
-    "events.iterate.com/core/resumed",
-    "https://events.iterate.com/manual-event-appended",
-  ];
-  const type = eventTypes[random % eventTypes.length] ?? "https://events.iterate.com/manual-event-appended";
+    "events.iterate.com/random/note-appended",
+    "events.iterate.com/random/tag-applied",
+    "events.iterate.com/random/status-changed",
+    "events.iterate.com/random/metric-recorded",
+    "events.iterate.com/random/ping-sent",
+  ] as const;
+  const type = eventTypes[random % eventTypes.length] ?? "events.iterate.com/random/note-appended";
   const debug = {
     batchIndex: args.batchIndex,
     batchSize: args.batchSize,
@@ -1375,63 +1388,51 @@ function randomStreamEventInput(args: {
     streamPath: args.streamPath,
   };
 
-  if (type === "events.iterate.com/core/metadata-updated") {
-    return {
-      type,
-      payload: {
-        ...debug,
-        description: `${actor} marked the ${noun} as ${adjective}.`,
-        labels: [adjective, noun],
-        title: `${adjective} ${noun}`,
-        updatedBy: actor,
-      },
-    };
-  }
-
-  if (type === "events.iterate.com/core/child-stream-created") {
-    return {
-      type,
-      payload: {
-        ...debug,
-        childStreamPath: `${args.streamPath}/children/${suffix}`,
-        createdBy: actor,
-        reason: `follow-up for ${noun}`,
-      },
-    };
-  }
-
-  if (type === "events.iterate.com/core/error-occurred") {
-    return {
-      type,
-      payload: {
-        ...debug,
-        errorId: crypto.randomUUID(),
-        failedEventType: "https://events.iterate.com/manual-event-appended",
-        message: `${actor} could not process ${adjective} ${noun}.`,
-        severity: random % 3 === 0 ? "high" : random % 3 === 1 ? "medium" : "low",
-      },
-    };
-  }
-
-  if (type === "events.iterate.com/core/circuit-breaker-configured") {
-    return {
-      type,
-      payload: {
-        ...debug,
-        burstCapacity: 50 + (random % 500),
-        configuredBy: actor,
-        refillRatePerMinute: 10 + (random % 90),
-      },
-    };
-  }
-
-  if (type === "events.iterate.com/core/paused" || type === "events.iterate.com/core/resumed") {
+  if (type === "events.iterate.com/random/note-appended") {
     return {
       type,
       payload: {
         ...debug,
         actor,
-        reason: `${adjective} ${noun} maintenance`,
+        body: `${actor} appended a ${adjective} note about the ${noun}.`,
+        id: suffix,
+      },
+    };
+  }
+
+  if (type === "events.iterate.com/random/tag-applied") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        actor,
+        tags: [noun, adjective],
+        targetId: suffix,
+      },
+    };
+  }
+
+  if (type === "events.iterate.com/random/status-changed") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        actor,
+        from: adjective,
+        to: noun,
+        targetId: suffix,
+      },
+    };
+  }
+
+  if (type === "events.iterate.com/random/metric-recorded") {
+    return {
+      type,
+      payload: {
+        ...debug,
+        metric: noun,
+        unit: "count",
+        value: 1 + (random % 100),
       },
     };
   }
@@ -1441,9 +1442,8 @@ function randomStreamEventInput(args: {
     payload: {
       ...debug,
       actor,
-      body: `${actor} appended a ${adjective} note about the ${noun}.`,
-      id: crypto.randomUUID(),
-      tags: [noun, adjective],
+      message: `${actor} sent ping ${suffix}`,
+      sequence: args.index,
     },
   };
 }
@@ -1525,10 +1525,10 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
           }
           className={
             appendState === "error"
-              ? "absolute bottom-1.5 right-1.5 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#b42318] hover:bg-[#f2f4f7] disabled:cursor-default disabled:opacity-60"
+              ? "absolute bottom-1.5 right-1.5 inline-flex size-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#b42318] hover:bg-[#f2f4f7] disabled:cursor-default disabled:opacity-60"
               : appendState === "done"
-                ? "absolute bottom-1.5 right-1.5 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#067647] hover:bg-[#f2f4f7] disabled:cursor-default disabled:opacity-60"
-              : "absolute bottom-1.5 right-1.5 inline-flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#98a2b3] hover:bg-[#f2f4f7] hover:text-[#536073] disabled:cursor-default disabled:opacity-60"
+                ? "absolute bottom-1.5 right-1.5 inline-flex size-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#067647] hover:bg-[#f2f4f7] disabled:cursor-default disabled:opacity-60"
+              : "absolute bottom-1.5 right-1.5 inline-flex size-7 cursor-pointer items-center justify-center rounded-full border-0 bg-transparent p-0 text-[#98a2b3] hover:bg-[#f2f4f7] hover:text-[#536073] disabled:cursor-default disabled:opacity-60"
           }
           disabled={appendState === "appending"}
           type="button"

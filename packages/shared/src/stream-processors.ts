@@ -208,7 +208,11 @@ export type EventFromTypes<
   Events extends EventCatalog,
   ProcessorDeps extends readonly unknown[],
   Types extends readonly string[],
-> = EventFromType<Events, ProcessorDeps, Exclude<Types[number], "*">>;
+> = "*" extends Types[number]
+  ? Exclude<Types[number], "*"> extends never
+    ? StreamEvent
+    : EventFromType<Events, ProcessorDeps, Exclude<Types[number], "*">>
+  : EventFromType<Events, ProcessorDeps, Types[number]>;
 
 export type EventFromType<
   Events extends EventCatalog,

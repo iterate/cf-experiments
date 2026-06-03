@@ -12,6 +12,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "catalog:cloudflare"
+    "@cloudflare/workers-types": "catalog:cloudflare",
+    "expect-type": "^1.3.0"
   }
 }

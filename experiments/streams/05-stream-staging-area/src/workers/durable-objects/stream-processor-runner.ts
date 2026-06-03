@@ -5,17 +5,19 @@ import {
   createStreamSubscription,
   type StreamSubscription,
 } from "../../subscription.js";
-import { createProcessorRunner, type ProcessorRunner } from "../../processor-runner.js";
+import { createProcessorRunner, type ProcessorRunner, type Snapshot } from "../../processor-runner.js";
 // The SAME processor the Node e2e (inbound) and the browser tab (inbound) run.
-import { echoTestProcessor } from "../../processors/echo-test/implementation.js";
-import type { CoreStreamState, SubscriptionConfiguredEvent } from "../../core-stream-processor.js";
+import { echoExampleProcessor } from "../../processors/examples/echo/implementation.js";
+import type { EchoExampleState } from "../../processors/examples/echo/contract.js";
+import type { StreamPersistedProcessorState } from "../../types.js";
+import type { SubscriptionConfiguredEvent } from "../../processors/core/contract.js";
 import type {
   StreamProcessorRunnerRpc,
-  StreamProcessorRunnerSnapshot,
-  StreamProcessorSlug,
   StreamRpc,
   SubscriptionSink,
 } from "../../types.js";
+
+type EchoExampleRunnerSnapshot = Snapshot<EchoExampleState>;
 
 export class StreamProcessorRunner extends DurableObject {
   #stream: RpcStub<StreamRpc> | undefined;
@@ -33,13 +35,13 @@ export class StreamProcessorRunner extends DurableObject {
   // The Stream Durable Object calls this method and we have to return an RpcTarget
   // that implements processEventBatch.
   // The Stream durable object helpfully shares the subscriptionConfiguredEvent with us,
-  // so we can decide which stream processor implementation to use
+  // so we can decide which built-in processor implementation to use.
   async requestSubscription(args: {
     stream: RpcStub<StreamRpc>;
     subscriptionKey: string;
     streamMaxOffset: number;
     subscriptionConfiguredEvent: SubscriptionConfiguredEvent;
-    streamRuntimeState: { state: CoreStreamState };
+    streamRuntimeState: { state: StreamPersistedProcessorState };
   }): Promise<{ sink: SubscriptionSink; replayAfterOffset?: number }> {
     const subscriber = args.subscriptionConfiguredEvent.payload.subscriber;
     if (subscriber.type !== "built-in") {
@@ -48,8 +50,9 @@ export class StreamProcessorRunner extends DurableObject {
     if (subscriber.transport !== "capnweb-websocket") {
       throw new Error("StreamProcessorRunner only supports capnweb-websocket subscribers");
     }
-    if (subscriber.processorSlug !== "echo-test") {
-      throw new Error(`Unknown stream processor slug: ${subscriber.processorSlug}`);
+    const processor = getBuiltInProcessor(subscriber.processorSlug);
+    if (processor === undefined) {
+      throw new Error(`Unknown built-in processor slug: ${subscriber.processorSlug}`);
     }
 
     await this.#processing?.[Symbol.asyncDispose]();
@@ -60,10 +63,10 @@ export class StreamProcessorRunner extends DurableObject {
     // Same runner path as Node/browser. KV is the storage port; the stream stub is
     // the exact Stream RPC API passed to processor afterAppend.
     this.#runner = createProcessorRunner({
-      processor: echoTestProcessor,
+      processor,
       deps: undefined,
       storage: {
-        load: () => this.ctx.storage.kv.get<StreamProcessorRunnerSnapshot>("snapshot"),
+        load: () => this.ctx.storage.kv.get<EchoExampleRunnerSnapshot>("snapshot"),
         save: (snapshot) => void this.ctx.storage.kv.put("snapshot", snapshot),
       },
       stream: this.#stream,
@@ -88,8 +91,8 @@ export class StreamProcessorRunner extends DurableObject {
   /** Returns durable processor state for test fixtures and operator inspection. */
   runtimeState() {
     return {
-      processorSlug: this.ctx.storage.kv.get<StreamProcessorSlug>("processorSlug"),
-      snapshot: this.ctx.storage.kv.get<StreamProcessorRunnerSnapshot>("snapshot"),
+      processorSlug: this.ctx.storage.kv.get<string>("processorSlug"),
+      snapshot: this.ctx.storage.kv.get<EchoExampleRunnerSnapshot>("snapshot"),
     };
   }
 
@@ -99,3 +102,8 @@ export const StreamProcessorRunnerRpcTarget = makeRpcTargetClass<
   StreamProcessorRunnerRpc,
   StreamProcessorRunner
 >(StreamProcessorRunner);
+
+function getBuiltInProcessor(slug: string) {
+  if (slug === "echo-example") return echoExampleProcessor;
+  return undefined;
+}

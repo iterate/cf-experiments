@@ -15,7 +15,8 @@ export default createServerEntry({
 
     if (url.pathname.startsWith("/stream/")) {
       const path = decodeURIComponent(url.pathname.slice("/stream/".length));
-      return env.STREAM.getByName(`stream:${path}`).fetch(request);
+      // Stream DOs are named `${namespace}:${path}`; the browser namespace is "default".
+      return env.STREAM.getByName(`default:${path}`).fetch(request);
     }
 
     // No COOP/COEP on purpose: the browser SQLite mirror uses wa-sqlite's OPFSCoopSyncVFS,

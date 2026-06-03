@@ -1,16 +1,12 @@
+// Defines the built-in "core" processor contract.
+// This processor owns stream runtime state such as max offset, stream config,
+// outbound subscription configuration, registered processors, and the
+// paused/resumed door. The Stream Durable Object runs it inline during append
+// instead of through a subscription runner. Token-bucket rate limiting lives in
+// the circuit-breaker processor.
+
 import { z } from "zod";
 import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
-import type { StreamEventInput } from "@cf-experiments/shared/event";
-
-const DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY = 500;
-const DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE = 500;
-
-type CircuitBreakerFields = {
-  availableTokens: number;
-  lastRefillAtMs: number | null;
-  burstCapacity: number;
-  refillRatePerMinute: number;
-};
 
 const outboundSubscriberSchema = z.discriminatedUnion("type", [
   z.object({
@@ -28,8 +24,8 @@ const outboundSubscriberSchema = z.discriminatedUnion("type", [
   // TODO: Add webhooks only if we want non-capnweb delivery semantics.
 ]);
 
-export const coreStreamProcessorContract = defineProcessorContract({
-  slug: "stream",
+export const coreProcessorContract = defineProcessorContract({
+  slug: "core",
   version: "0.1.0",
   description: "Maintains the stream's own reduced state.",
   stateSchema: z.object({
@@ -46,10 +42,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
     childPaths: z.array(z.string().trim().min(1)),
     paused: z.boolean(),
     pauseReason: z.string().nullable(),
-    availableTokens: z.number(),
-    lastRefillAtMs: z.number().int().min(0).nullable(),
-    burstCapacity: z.number().int().positive(),
-    refillRatePerMinute: z.number().int().positive(),
     processorsBySlug: z.record(
       z.string(),
       z.object({
@@ -103,10 +95,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
     childPaths: [],
     paused: false,
     pauseReason: null,
-    availableTokens: DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY,
-    lastRefillAtMs: null,
-    burstCapacity: DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY,
-    refillRatePerMinute: DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE,
     processorsBySlug: {},
     subscriptionsByKey: {},
   },
@@ -182,13 +170,6 @@ export const coreStreamProcessorContract = defineProcessorContract({
           .optional(),
       }),
     },
-    "events.iterate.com/stream/circuit-breaker-configured": {
-      description: "Configures the stream token-bucket circuit breaker.",
-      payloadSchema: z.object({
-        burstCapacity: z.number().int().positive(),
-        refillRatePerMinute: z.number().int().positive(),
-      }),
-    },
     "events.iterate.com/stream/paused": {
       description: "Records that the stream is paused and should reject ordinary appends.",
       payloadSchema: z.object({
@@ -212,36 +193,23 @@ export const coreStreamProcessorContract = defineProcessorContract({
     "events.iterate.com/stream/subscription-configured",
     "events.iterate.com/stream/processor-registered",
     "events.iterate.com/stream/error-occurred",
-    "events.iterate.com/stream/circuit-breaker-configured",
     "events.iterate.com/stream/paused",
     "events.iterate.com/stream/resumed",
   ],
   emits: [],
   reduce({ state, event }) {
-    // All events increment the event count and max offset
-    let next = {
+    const next = {
       ...state,
       eventCount: state.eventCount + 1,
       maxOffset: event.offset,
     };
 
     switch (event.type) {
-      case "events.iterate.com/stream/circuit-breaker-configured":
-        return {
-          ...next,
-          burstCapacity: event.payload.burstCapacity,
-          refillRatePerMinute: event.payload.refillRatePerMinute,
-          availableTokens: event.payload.burstCapacity,
-          lastRefillAtMs: Date.parse(event.createdAt),
-        };
-
       case "events.iterate.com/stream/paused":
         return {
           ...next,
           paused: true,
           pauseReason: event.payload.reason ?? null,
-          availableTokens: state.burstCapacity,
-          lastRefillAtMs: Date.parse(event.createdAt),
         };
 
       case "events.iterate.com/stream/resumed":
@@ -249,13 +217,9 @@ export const coreStreamProcessorContract = defineProcessorContract({
           ...next,
           paused: false,
           pauseReason: null,
-          availableTokens: state.burstCapacity,
-          lastRefillAtMs: Date.parse(event.createdAt),
         };
 
-      // events.iterate.com/stream/created will only ever happen once and is always the first event
       case "events.iterate.com/stream/created":
-        next = spendCircuitBreakerToken({ state, event, next });
         if (event.offset !== 1) {
           throw new Error(
             "events.iterate.com/stream/created must be the first event and have offset 1",
@@ -268,17 +232,13 @@ export const coreStreamProcessorContract = defineProcessorContract({
           createdAt: event.createdAt,
         };
 
-      // events.iterate.com/stream/woken will fire each time the Stream durable object's javascript constructor
-      // fires. Each time that happens, we get a new "incarnationId"
       case "events.iterate.com/stream/woken":
         return {
           ...next,
           incarnationId: event.payload.incarnationId,
         };
 
-      // events.iterate.com/stream/configured is used for runtime configuration of the stream
       case "events.iterate.com/stream/configured":
-        next = spendCircuitBreakerToken({ state, event, next });
         return {
           ...next,
           config: {
@@ -288,14 +248,12 @@ export const coreStreamProcessorContract = defineProcessorContract({
         };
 
       case "events.iterate.com/stream/metadata-updated":
-        next = spendCircuitBreakerToken({ state, event, next });
         return {
           ...next,
           metadata: event.payload.metadata,
         };
 
       case "events.iterate.com/stream/child-stream-created": {
-        next = spendCircuitBreakerToken({ state, event, next });
         const childPath = getImmediateChildPath({
           parentPath: state.path,
           childPath: event.payload.childPath,
@@ -307,9 +265,7 @@ export const coreStreamProcessorContract = defineProcessorContract({
         };
       }
 
-      // events.iterate.com/stream/subscription-configured is used to configure outbound subscriptions
-      case "events.iterate.com/stream/subscription-configured": {
-        next = spendCircuitBreakerToken({ state, event, next });
+      case "events.iterate.com/stream/subscription-configured":
         return {
           ...next,
           subscriptionsByKey: {
@@ -317,10 +273,8 @@ export const coreStreamProcessorContract = defineProcessorContract({
             [event.payload.subscriptionKey]: { latestConfiguredEvent: event },
           },
         };
-      }
 
       case "events.iterate.com/stream/processor-registered":
-        next = spendCircuitBreakerToken({ state, event, next });
         return {
           ...next,
           processorsBySlug: {
@@ -330,167 +284,18 @@ export const coreStreamProcessorContract = defineProcessorContract({
         };
 
       default:
-        return spendCircuitBreakerToken({ state, event, next });
+        return next;
     }
   },
 });
 
-export type CoreStreamState = z.infer<typeof coreStreamProcessorContract.stateSchema>;
+export type CoreProcessorState = z.infer<typeof coreProcessorContract.stateSchema>;
 
 export type SubscriptionConfiguredEvent =
-  CoreStreamState["subscriptionsByKey"][string]["latestConfiguredEvent"];
+  CoreProcessorState["subscriptionsByKey"][string]["latestConfiguredEvent"];
 
 export type ProcessorRegisteredEvent =
-  CoreStreamState["processorsBySlug"][string]["latestRegisteredEvent"];
-
-export function buildProcessorRegisteredEvent(args: {
-  contract: {
-    slug: string;
-    version?: string;
-    description: string;
-    consumes: readonly string[];
-    emits: readonly string[];
-    events: Record<
-      string,
-      {
-        description?: string;
-        examples?: readonly unknown[];
-      }
-    >;
-  };
-}) {
-  const version = args.contract.version ?? "0.0.0";
-  return {
-    type: "events.iterate.com/stream/processor-registered",
-    idempotencyKey: `processor-registered:${args.contract.slug}:${version}`,
-    payload: {
-      slug: args.contract.slug,
-      version,
-      description: args.contract.description,
-      consumes: [...args.contract.consumes],
-      emits: [...args.contract.emits],
-      ownedEvents: Object.entries(args.contract.events).map(([type, event]) => ({
-        type,
-        ...(event.description === undefined ? {} : { description: event.description }),
-        ...(event.examples === undefined || event.examples.length === 0
-          ? {}
-          : { examples: [...event.examples] }),
-      })),
-    },
-  } as const;
-}
-
-export function buildStreamErrorOccurredEvent(args: {
-  message: string;
-  error?: {
-    name?: string;
-    message: string;
-    code?: string;
-    stack?: string;
-  };
-  idempotencyKey?: string;
-}) {
-  return {
-    type: "events.iterate.com/stream/error-occurred",
-    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
-    payload: {
-      message: args.message,
-      ...(args.error === undefined ? {} : { error: args.error }),
-    },
-  } as const;
-}
-
-export function buildStreamMetadataUpdatedEvent(args: {
-  metadata: Record<string, unknown>;
-  idempotencyKey?: string;
-}) {
-  return {
-    type: "events.iterate.com/stream/metadata-updated",
-    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
-    payload: { metadata: args.metadata },
-  } as const;
-}
-
-export function buildChildStreamCreatedEvent(args: {
-  parentPath: string;
-  childPath: string;
-}) {
-  return {
-    type: "events.iterate.com/stream/child-stream-created",
-    idempotencyKey: `child-stream-created:${args.parentPath}:${args.childPath}`,
-    payload: { childPath: args.childPath },
-  } as const;
-}
-
-export function buildStreamPausedEvent(args: {
-  reason: string;
-  idempotencyKey?: string;
-}) {
-  return {
-    type: "events.iterate.com/stream/paused",
-    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
-    payload: { reason: args.reason },
-  } as const;
-}
-
-export function buildStreamResumedEvent(args: {
-  reason?: string;
-  idempotencyKey?: string;
-}) {
-  return {
-    type: "events.iterate.com/stream/resumed",
-    ...(args.idempotencyKey === undefined ? {} : { idempotencyKey: args.idempotencyKey }),
-    payload: args.reason === undefined ? {} : { reason: args.reason },
-  } as const;
-}
-
-export function assertCoreStreamAppendAllowed(args: {
-  event: StreamEventInput;
-  state: CoreStreamState;
-}) {
-  if (!args.state.paused) return;
-  if (args.event.type === "events.iterate.com/stream/resumed") return;
-  if (args.event.type === "events.iterate.com/stream/error-occurred") return;
-  if (args.event.type === "events.iterate.com/stream/woken") return;
-  throw new Error(`stream paused: ${args.state.pauseReason ?? "circuit breaker open"}`);
-}
-
-export function shouldPauseCoreStreamAfterAppend(state: CoreStreamState) {
-  return !state.paused && state.availableTokens < 0;
-}
-
-function spendCircuitBreakerToken<State extends CircuitBreakerFields>(args: {
-  state: CircuitBreakerFields;
-  event: { createdAt: string };
-  next: State;
-}): State {
-  const createdAtMs = Date.parse(args.event.createdAt);
-  const refilled =
-    args.state.lastRefillAtMs === null
-      ? args.state.burstCapacity
-      : Math.min(
-          args.state.burstCapacity,
-          args.state.availableTokens +
-            (createdAtMs - args.state.lastRefillAtMs) *
-              (args.state.refillRatePerMinute / 60_000),
-        );
-
-  return {
-    ...args.next,
-    availableTokens: refilled - 1,
-    lastRefillAtMs: createdAtMs,
-  };
-}
-
-export function getAncestorStreamPaths(path: string): string[] {
-  if (path === "/") return [];
-  const segments = path.split("/").filter(Boolean);
-  const ancestors = ["/"];
-  for (let index = 1; index < segments.length; index += 1) {
-    ancestors.push(`/${segments.slice(0, index).join("/")}`);
-  }
-  return ancestors;
-}
+  CoreProcessorState["processorsBySlug"][string]["latestRegisteredEvent"];
 
 function getImmediateChildPath(args: {
   parentPath: string;

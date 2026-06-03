@@ -9,7 +9,6 @@ import {
   runProcessorReduce,
   type ProcessorState,
 } from "@cf-experiments/shared/stream-processors";
-import { buildStreamErrorOccurredEvent } from "./core-stream-processor.js";
 import type { StreamEventBatch, StreamSubscription } from "./subscription.js";
 import type {
   Processor,
@@ -184,15 +183,18 @@ export function createProcessorRunner<Contract extends RunnableContract<Contract
     const serializedError = serializeError(argsForError.error);
     try {
       await args.stream.append({
-        event: buildStreamErrorOccurredEvent({
+        event: {
+          type: "events.iterate.com/stream/error-occurred",
           idempotencyKey: [
             "processor-error",
             contract.slug,
             String(argsForError.batch.checkpointOffset),
           ].join(":"),
-          message: `Processor ${contract.slug} side effects failed at offset ${argsForError.batch.checkpointOffset}: ${serializedError.message}`,
-          error: serializedError,
-        }),
+          payload: {
+            message: `Processor ${contract.slug} side effects failed at offset ${argsForError.batch.checkpointOffset}: ${serializedError.message}`,
+            error: serializedError,
+          },
+        },
       });
     } catch (appendError) {
       console.error("failed to append processor error event", appendError);

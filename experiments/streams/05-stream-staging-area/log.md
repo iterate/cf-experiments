@@ -66,22 +66,22 @@ First-party sources:
 
 Reworked the staging API around explicit primitives instead of `with*` wrappers:
 
-- `StreamConnection` now exposes `connection.stream` rather than `connection.stream`.
+- `StreamConnection` exposes `connection.stream` as the stream RPC surface.
 - Runtime connection helpers are package-shaped under `src/browser`, `src/node`, and `src/workers`.
 - `createStreamSubscription` owns the capnweb sink, queue, async iterator, `waitForEvent`, and latest `streamMaxOffset`.
-- `createStreamSubscription` and `processorRunner.run({ subscription })` were removed from the active model.
-- `createProcessorRunner` now exposes `snapshot()`, `processEventBatch(...)`, and `run({ subscription })`; browser, Node/Vitest, and the StreamProcessorRunner Durable Object use the same downstream runner path.
+- `createProcessorRunner` exposes `snapshot()`, `processEventBatch(...)`, and `run({ subscription })`; browser, Node/Vitest, and the StreamProcessorRunner Durable Object use the same downstream runner path.
 - Delivery batches now call `processEventBatch({ events, streamMaxOffset })`; max-offset terminology replaced the old ambiguous stream-position wording.
 - Subscription replay uses `replayAfterOffset`; omitting it live-tails, while `0` replays from the first event.
 - Processor `afterAppend` remains synchronous and receives the exact stream append API plus `keepAlive(...)` and `blockProcessorUntil(...)`.
 
 Also moved processors into `src/processors/<slug>/{contract,implementation}.ts` with filesystem-safe slugs:
 
-- `stream`
-- `echo-test`
-- `raw-events-browser`
+- `core`
+- `echo-example`
+- `browser-raw-events`
+- `browser-event-feed`
 
-The browser SQLite mirror is now driven by the `raw-events-browser` processor instead of a bespoke `BrowserMirrorSink`, while preserving the existing requestAnimationFrame batching behavior for SQLite writes.
+The browser SQLite mirror is now driven by the `browser-raw-events` processor instead of a bespoke `BrowserMirrorSink`.
 
 Verification:
 
@@ -89,7 +89,7 @@ Verification:
 - `pnpm --filter @cf-experiments/05-stream-staging-area test`
 - `pnpm --filter @cf-experiments/05-stream-staging-area build`
 - deployed `stream-staging-area`
-- deployed `STREAM_STAGING_E2E=true ... test -- src/stream-capnweb.test.ts src/stream-processor-node.test.ts`: `24 passed | 2 skipped`
+- deployed `STREAM_STAGING_E2E=true ... vitest e2e/vitest/stream-capnweb.test.ts e2e/vitest/stream-processor-node.test.ts`: `24 passed | 2 skipped`
 - deployed Playwright: `21 passed`
 
 ### Fixed stale browser writer lock after deploy/schema changes
@@ -123,9 +123,9 @@ renders a warning banner instead of only showing a spinner.
 ### Made random bulk inserts varied and filterable
 
 The sidebar "Stream random events" tool now emits a mix of Iterate-inspired event types
-(`events.iterate.com/core/metadata-updated`, `child-stream-created`, `error-occurred`,
-`circuit-breaker-configured`, `paused`, `resumed`, and
-`https://events.iterate.com/manual-event-appended`) with varied inspectable payloads. This
+(`events.iterate.com/stream/metadata-updated`, `child-stream-created`, `error-occurred`,
+`events.iterate.com/circuit-breaker/configured`, `paused`, `resumed`, and
+`https://events.iterate.com/manual-event-appended`) with contract-valid payloads. This
 makes large-stream/filter testing less monotonous without adding a fake-data dependency.
 
 The filter bar now shows total local events when unfiltered and `N filtered / M total` when

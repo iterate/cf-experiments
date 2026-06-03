@@ -7,7 +7,9 @@
     "build": "vite build && tsc --noEmit",
     "preview": "vite preview",
     "deploy": "pnpm build && wrangler deploy",
-    "test:e2e": "playwright test",
+    "vitest": "vitest run e2e/vitest",
+    "playwright": "playwright test e2e/playwright",
+    "test:e2e": "pnpm vitest && pnpm playwright",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -29,9 +31,12 @@
     "@types/node": "^24.12.4",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^6.0.2",
     "tailwindcss": "^4.3.0",
     "vite": "^8.0.16",
-    "wrangler": "^4.95.0"
+    "vitest": "^4.1.7",
+    "wrangler": "^4.95.0",
+    "ws": "^8.21.0"
   }
 }

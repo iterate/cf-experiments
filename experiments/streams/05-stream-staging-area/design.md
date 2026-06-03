@@ -30,7 +30,7 @@ Subscription: the configured edge from a stream node to a subscriber node. `subs
 this edge within one stream. The same subscriber implementation can appear behind many subscriptions.
 
 Subscription configuration: the latest `events.iterate.com/stream/subscription-configured` event for a
-given `subscriptionKey`. The core stream processor stores this exact event in stream reduced state.
+given `subscriptionKey`. The built-in core processor stores this exact event in stream reduced state.
 
 Subscription connection: a live runtime connection used to deliver events for a subscription. It has
 a direction, a transport, an optional `subscriptionKey`, and a subscription sink. It is not persisted;
@@ -63,7 +63,7 @@ schemas, and the latest `subscription-configured` event for each `subscriptionKe
 
 Core stream processor: The built-in reducer that belongs to the stream itself. It runs synchronously
 inside the stream durable object after offset allocation. Its reduced state is the stream reduced
-state.
+state. Its processor slug is `core`; it still owns `events.iterate.com/stream/*` event types.
 
 Subscription reconciler: the stream-owned process that compares stream reduced state with runtime
 subscription connections and opens any outbound connections that should exist. For now it only needs to
@@ -99,7 +99,7 @@ Each stream contains an append-only log of events with
 ### `events.iterate.com/stream/created`
 
 The first event in every stream. It has offset `0`, records the stream namespace/path, and lets the
-core stream processor reduce `createdAt` from the event timestamp.
+built-in core processor reduce `createdAt` from the event timestamp.
 
 ```ts
 {
@@ -491,20 +491,20 @@ Working reference implementation: `src/stream-processor.ts (+ stream-processor.t
   would smear admission logic into the pure reducer that ships to browser projections.
   Reference: os `packages/shared/src/streams/circuit-breaker.ts`. `beforeAppend` is sync
   today (matches os); async is a future extension if authorization needs I/O.
-- **The core processor folds stream bookkeeping + child-stream topology + the circuit
-  breaker into ONE inline builtin** (not separate processors), mirroring os core +
-  circuit-breaker.ts:
-  - `beforeAppend` = the breaker gate (reject while `paused`, allowlisting `resumed`/`woken`).
-  - `reduce` = bookkeeping (count, maxOffset) + token-bucket metering (every non-control
-    event spends a token; configured/paused/resumed reset) + `childPaths` (immediate child
-    from a `child-stream-created`) + namespace/path/incarnation.
-  - `afterAppend` = trip the breaker (emit `paused` when tokens went negative) + propagate
-    `child-stream-created` to every ancestor on creation (cross-stream, via a
-    `deps.appendToStream` capability the Stream DO supplies from its namespace binding).
-  Demonstrated AND executed in the trial (`coreContract`/`core` + `CoreStreamSim`):
-  `exampleChildStreamTopology()` => ancestors get `["/a"]`,`["/a/b"]`,`["/a/b/c"]`;
-  `exampleCircuitBreaker()` => trips after the burst budget, later appends rejected. The
-  trial now runs under `tsx`, not just typecheck.
+- **The Stream DO runs multiple built-in processors inline, keyed by slug.**
+  The `core` processor owns stream bookkeeping, child-stream topology, and the
+  paused/resumed door (`beforeAppend`). The `circuit-breaker` processor owns token-bucket
+  metering and the `events.iterate.com/circuit-breaker/configured` event; when it trips, it
+  appends `events.iterate.com/stream/paused`, and the `core` processor shuts the door.
+  More complex circuit breakers could sit elsewhere in the network and use the same
+  paused/resumed contract.
+
+- **Ordinary processors include standard processor behavior by copying the shared pieces.**
+  `standardProcessorBehavior` contributes the registration state field, the
+  `events.iterate.com/stream/processor-registered` dependency, and the hook that appends
+  that registration event once per processor version. Keep owned event type strings inline
+  in the processor contract, consumes/emits arrays, and reducer; repeating one durable
+  event string inside a processor definition is clearer than hiding it behind aliases.
 
 - **`afterAppend` gets `streamMaxOffset`, a raw fact with no derived fields.** The stream
   piggybacks it on each delivery via `processEventBatch({ events, streamMaxOffset })`

@@ -51,7 +51,7 @@ test("event type filter uses the indexed SQLite type column", async ({ page }) =
 
   await expect(page.getByLabel("Event type filter")).toContainText(primaryType);
   await page.getByLabel("Event type filter").selectOption(primaryType);
-  await expect(page.getByTestId("event-count")).toHaveText("2");
+  await expect(page.getByTestId("event-count")).toHaveText("5");
   await expect(page.getByTestId("filter-count")).toHaveText("2 filtered events / 5 total events");
   await expect(eventMeta(page, primaryType)).toHaveCount(2);
   await expect(eventMeta(page, secondaryType)).toHaveCount(0);
@@ -61,14 +61,14 @@ test("event type filter uses the indexed SQLite type column", async ({ page }) =
     type: secondaryType,
     payload: { streamPath, value: crypto.randomUUID() },
   });
-  await expect(page.getByTestId("event-count")).toHaveText("2");
+  await expect(page.getByTestId("event-count")).toHaveText("6");
   await expect(eventMeta(page, secondaryType)).toHaveCount(0);
 
   await appendComposerEvent(page, {
     type: primaryType,
     payload: { streamPath, value: crypto.randomUUID() },
   });
-  await expect(page.getByTestId("event-count")).toHaveText("3");
+  await expect(page.getByTestId("event-count")).toHaveText("7");
   await expect(page.getByTestId("filter-count")).toHaveText("3 filtered events / 7 total events");
   await expect(eventMeta(page, primaryType)).toHaveCount(3);
 
@@ -113,7 +113,7 @@ test("random bulk insert creates multiple filterable event types and shows filte
     if (!(element instanceof HTMLSelectElement)) throw new Error("event type filter must be a select");
     return [...element.options]
       .map((option) => option.value)
-      .filter((value) => value.startsWith("events.iterate.com/core/") || value.startsWith("https://events.iterate.com/"));
+      .filter((value) => value.startsWith("events.iterate.com/random/"));
   });
   expect(generatedEventTypes.length).toBeGreaterThanOrEqual(3);
 
@@ -302,6 +302,17 @@ test("auto-growing composer stays in the stream scrollbar and preserves tail app
   await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
 
   await expect.poll(async () => {
+    return await page.evaluate(() => {
+      const scroller = document.querySelector("[data-testid='stream-events']");
+      const filterBar = document.querySelector("[data-testid='event-type-filter-bar']");
+      if (!(scroller instanceof HTMLElement) || !(filterBar instanceof HTMLElement)) {
+        throw new Error("missing stream scroller or filter bar");
+      }
+      return scroller.contains(filterBar);
+    });
+  }).toBe(true);
+  await expectComposerAtScrollerBottom(page);
+  await expect.poll(async () => {
     const rects = await page.evaluate(() => {
       const scroller = document.querySelector("[data-testid='stream-events']");
       if (!(scroller instanceof HTMLElement)) throw new Error("missing stream scroller");
@@ -396,12 +407,17 @@ test("scroll to bottom affordance keeps counting while scrolling older rows duri
   await page.goto(streamRoute(streamPath));
   await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
 
+  // Raise the stream's burst limit so the 5000-event burst below isn't rate-limited. This
+  // appends one idempotency-keyed circuit-breaker/configured event (offset 3), so counts
+  // below are created + woken + that event + inserted.
+  await page.getByLabel("Raise rate limit before burst").check();
+
   await page.getByLabel("Count").fill("100");
   await page.getByLabel("Batch size").fill("100");
   await page.getByLabel("Seconds").fill("0");
   await page.getByRole("button", { name: "Stream random events" }).click();
   await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
-  await expect(page.getByTestId("event-count")).toHaveText("102", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("103", { timeout: 30_000 });
   await expectAtStreamEnd(page);
 
   await scrollStreamBy(page, -500);
@@ -418,7 +434,7 @@ test("scroll to bottom affordance keeps counting while scrolling older rows duri
     expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 60_000 }),
   ]);
 
-  await expect(page.getByTestId("event-count")).toHaveText("5102", { timeout: 60_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("5103", { timeout: 60_000 });
   await expect(page.getByRole("button", { name: "Scroll to bottom, 5000 new events" })).toBeVisible();
   await expect.poll(() => streamDistanceFromEnd(page)).toBeGreaterThan(0);
   await expectComposerAtScrollerBottom(page);
@@ -474,12 +490,14 @@ test("split view disposes a replaced same-stream pane and keeps leadership", asy
   await page.goto(`/split-stream?left=${encodeURIComponent(sharedPath)}&right=${encodeURIComponent(sharedPath)}`);
 
   await expect(page.locator(`[data-stream-path='${cssString(sharedPath)}']`)).toHaveCount(2);
+  // Two views of the same (path, processor) now SHARE one runtime/connection (within-tab
+  // dedup), so both panes reflect that single runtime as the leader — no intra-tab follower.
   await expect.poll(async () =>
     (await page.getByTestId("subscription-status").allInnerTexts())
       .map((status) => status.toLowerCase())
       .sort()
       .join(","),
-  ).toBe("follower,leader");
+  ).toBe("leader,leader");
 
   await page.getByLabel("Left stream").fill(nextPath);
   await page.getByRole("button", { name: "Go to streams" }).click();
@@ -517,6 +535,10 @@ test("large streams stay virtualized and can scroll from tail to earliest rows",
   await page.goto(streamRoute(streamPath));
   await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
 
+  // Raise the burst limit so the 1500-event burst isn't rate-limited; this adds one
+  // idempotency-keyed circuit-breaker/configured event, hence created + woken + that + inserted.
+  await page.getByLabel("Raise rate limit before burst").check();
+
   const insertedCount = 1_500;
   await page.getByLabel("Count").fill(String(insertedCount));
   await page.getByLabel("Batch size").fill("250");
@@ -524,7 +546,7 @@ test("large streams stay virtualized and can scroll from tail to earliest rows",
   await page.getByRole("button", { name: "Stream random events" }).click();
   await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
 
-  const expectedCount = insertedCount + 2;
+  const expectedCount = insertedCount + 3;
   await expect(page.getByTestId("event-count")).toHaveText(String(expectedCount), { timeout: 30_000 });
   await expect.poll(
     () => page.locator("[data-testid='event-meta']").count(),
@@ -655,6 +677,58 @@ test("reset discards stale local rows and shows a fresh stream", async ({ page }
   await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
 });
 
+// The event-feed view hosts the browser-event-feed processor: specific-renderer events
+// (created/woken) render as their own rows; consecutive events of the same type collapse
+// into one group row. A new type always starts a fresh row.
+test("event-feed view renders specific renderers as singletons and groups by type", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(`/streams/${streamPath.slice(1)}?view=browser-event-feed`);
+
+  await expect(page.locator("[data-testid='feed-item'][data-component='stream.created']")).toHaveCount(1);
+  await expect(page.locator("[data-testid='feed-item'][data-component='stream.woken']")).toHaveCount(1);
+
+  await appendComposerEvent(page, { type: "events.iterate.com/debug/feed-a", payload: { v: 1 } });
+  const groupA = page.locator("[data-testid='feed-item'][data-event-type='events.iterate.com/debug/feed-a']");
+  await expect(groupA).toHaveCount(1);
+  await expect(groupA).toHaveAttribute("data-event-count", "1");
+
+  await appendComposerEvent(page, { type: "events.iterate.com/debug/feed-b", payload: { v: 2 } });
+  await expect(groupA).toHaveAttribute("data-event-count", "1");
+  const groupB = page.locator("[data-testid='feed-item'][data-event-type='events.iterate.com/debug/feed-b']");
+  await expect(groupB).toHaveCount(1);
+  await expect(groupB).toHaveAttribute("data-event-count", "1");
+
+  await appendComposerEvent(page, { type: "events.iterate.com/debug/feed-a", payload: { v: 3 } });
+  await expect(page.locator("[data-testid='feed-item'][data-event-type='events.iterate.com/debug/feed-a']")).toHaveCount(2);
+  const lastGroupA = page.locator("[data-testid='feed-item'][data-event-type='events.iterate.com/debug/feed-a']").last();
+  await appendComposerEvent(page, { type: "events.iterate.com/debug/feed-a", payload: { v: 4 } });
+  await expect(lastGroupA).toHaveAttribute("data-event-count", "2");
+});
+
+// The state view has no processor or table: it reads the stream's reduced + runtime state
+// live over the runtimeState() RPC and renders it in a fixed-width block.
+test("state view renders the stream runtime state over RPC", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(`/streams/${streamPath.slice(1)}?view=browser-state`);
+  await expect(page.getByTestId("stream-state")).toContainText("maxOffset", { timeout: 20_000 });
+  await expect(page.getByTestId("stream-state")).toContainText("namespace");
+});
+
+// The view switcher moves between the three sibling views, preserving the stream path.
+test("view switcher navigates between the three views", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await page.getByTestId("view-link-browser-event-feed").click();
+  await expect(page).toHaveURL(/view=browser-event-feed/);
+  await expect(page.getByTestId("feed-item-count")).toBeVisible();
+
+  await page.getByTestId("view-link-browser-state").click();
+  await expect(page).toHaveURL(/view=browser-state/);
+  await expect(page.getByTestId("stream-state")).toContainText("maxOffset", { timeout: 20_000 });
+});
+
 function streamRoute(streamPath: string) {
   if (streamPath === "/") return "/streams/";
   return `/streams/${streamPath.slice(1)}`;
@@ -696,7 +770,7 @@ async function holdLegacyWriterLock(page: Page, streamPath: string) {
 async function holdCurrentWriterLock(page: Page, streamPath: string) {
   await page.evaluate(async (path) => {
     await new Promise<void>((resolve) => {
-      void navigator.locks.request(`stream-writer:browser-db-v4:${path}`, async () => {
+      void navigator.locks.request(`stream-writer:default:${path}:browser-raw-events:v4`, async () => {
         resolve();
         await new Promise(() => {});
       });
