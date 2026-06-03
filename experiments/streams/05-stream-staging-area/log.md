@@ -62,6 +62,23 @@ First-party sources:
 
 ## 2026-06-03
 
+### Two more browser non-linearities (both size-dependent → now constant)
+
+1. **"kill stream" → slow `woken` on large streams.** On reconnect the browser re-subscribed
+   at `afterOffset = -1` (the runner's no-op storage had no cursor), so the Stream DO replayed
+   the WHOLE stream before the newly-appended `woken` arrived — delay grew with stream size.
+   Fix: the runner's `storage.load` now returns the local SQLite mirror's `maxOffset()` as the
+   resume cursor (the events table IS the durable cursor), with a fallback to `-1` if the DB
+   read fails. Verified on deployed: kill on a 3002-event stream → only **1** event replayed
+   (`recvDelta=1`), constant regardless of size.
+2. **Flicker on every append in a long list.** The windowed row query sized itself to the live
+   last index (`max(lastIndex, …)`), so every append re-keyed the query; a fresh reactive query
+   starts empty, blanking the visible window for a frame. Fix: a FIXED-size, bin-aligned window
+   (key changes only once per ~1000 rows of scrolling) + a bounded retained-rows cache so the
+   occasional window shift repaints from cache instead of blanking. Verified on deployed: 60
+   rapid samples while appending near the tail of a 1200+ event stream → `minRendered=11`,
+   `maxPending=0` (never blanks). Both provisional (not yet repeated across sessions).
+
 ### Perf: `PRAGMA busy_timeout` causes a ~5s first-open stall with OPFSCoopSyncVFS
 
 First page load sat on "opening sqlite DB" for ~5s (independent of event count). Cause:
