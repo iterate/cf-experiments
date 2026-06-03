@@ -453,7 +453,7 @@ function EventRows({
           : scrollElement.scrollHeight - scrollElement.clientHeight - scrollElement.scrollTop;
       const nextScrollPosition = {
         isAtTop: (instance.scrollOffset ?? 0) <= 4,
-        isAtEnd: distanceFromEnd <= 4,
+        isAtEnd: distanceFromEnd <= 4 || !userHasMovedAwayFromEnd.current,
       };
       if (nextScrollPosition.isAtEnd) userHasMovedAwayFromEnd.current = false;
       dispatchScrollState({ type: "set-scroll-position", scrollPosition: nextScrollPosition });
