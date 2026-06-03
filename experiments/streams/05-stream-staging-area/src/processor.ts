@@ -32,8 +32,9 @@ export type ProcessorCapabilities<Contract> = {
   stream: ProcessorStream;
   /**
    * Processor policy helper for replay/catch-up. It returns true when `event` is
-   * at/after the subscription anchor, or within the optional grace period before
-   * it. If the runner has no anchor, it returns true.
+   * after the subscription anchor, or within the optional grace period before it.
+   * The anchor event itself is not eligible. If the runner has no anchor, it
+   * returns true.
    *
    * Ignore this helper when a processor intentionally wants historical side
    * effects for every replayed event.

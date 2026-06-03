@@ -7,7 +7,8 @@ import { buildProcessorRegisteredEvent } from "../../core-stream-processor.js";
 import { echoTestProcessorContract } from "./contract.js";
 
 export const echoTestProcessor = implementProcessor(echoTestProcessorContract, () => ({
-  afterAppend({ event, state, stream, keepAlive }) {
+  afterAppend({ event, state, stream, shouldApplySideEffects, keepAlive }) {
+    if (!shouldApplySideEffects({ event })) return;
     if (!state.hasRegisteredCurrentVersion) {
       keepAlive(stream.append({ event: buildProcessorRegisteredEvent({ contract: echoTestProcessorContract }) }));
     }

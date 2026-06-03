@@ -12,6 +12,7 @@ import {
   implementProcessor,
 } from "./processor.js";
 import { createProcessorRunner, type Snapshot } from "./processor-runner.js";
+import { echoTestProcessor } from "./processors/echo-test/implementation.js";
 import type { StreamRpc } from "./types.js";
 
 const iso = (ms = 0) => new Date(ms).toISOString();
@@ -129,6 +130,31 @@ describe("subscription processor (node, in-process)", () => {
       streamMaxOffset: 5,
     });
     expect(committed).toHaveLength(0); // offset 3 <= snapshot 5
+  });
+
+  it("runs echo side effects only after the subscription anchor", async () => {
+    const { stream, committed } = memoryStream();
+    const runner = createProcessorRunner({
+      processor: echoTestProcessor,
+      deps: undefined,
+      storage: { load: () => undefined, save: () => {} },
+      stream,
+      sideEffectAnchor: { offset: 10, createdAt: iso(10_000) },
+    });
+
+    await runner.processEventBatch({
+      events: [
+        event({ type: "test.processor.input", offset: 9, payload: {}, createdAtMs: 9_000 }),
+        event({ type: "test.processor.input", offset: 10, payload: {}, createdAtMs: 10_000 }),
+        event({ type: "test.processor.input", offset: 11, payload: {}, createdAtMs: 11_000 }),
+      ],
+      streamMaxOffset: 11,
+    });
+
+    expect(committed).toMatchObject([
+      { type: "events.iterate.com/stream/processor-registered" },
+      { type: "test.processor.output", payload: { seen: 3 } },
+    ]);
   });
 });
 
@@ -299,11 +325,12 @@ describe("projector processor (consumes everything, writes to a db port)", () =>
         event({ type: "a", offset: 8, payload: {}, createdAtMs: 0 }),
         event({ type: "b", offset: 9, payload: {}, createdAtMs: 5_000 }),
         event({ type: "c", offset: 10, payload: {}, createdAtMs: 10_000 }),
+        event({ type: "d", offset: 11, payload: {}, createdAtMs: 11_000 }),
       ],
-      streamMaxOffset: 10,
+      streamMaxOffset: 11,
     });
 
-    expect(written).toEqual([9, 10]);
+    expect(written).toEqual([9, 11]);
   });
 });
 
