@@ -247,3 +247,4 @@ Practical consequence: for DOs that are **only** ever addressed by `getByName`, 
 read `this.ctx.id.name` (or throw `"this should never happen"` if missing) instead of threading the
 name through every RPC argument or persisting it in storage — including in `alarm()` handlers with no
 incoming request.
+

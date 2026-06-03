@@ -151,6 +151,21 @@ importers:
         specifier: catalog:cloudflare
         version: 4.93.1(@cloudflare/workers-types@4.20260521.1)
 
+  experiments/06-hibernation-restarts:
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: catalog:cloudflare
+        version: 4.20260521.1
+      '@types/node':
+        specifier: ^24.12.4
+        version: 24.12.4
+      vitest:
+        specifier: ^4.1.7
+        version: 4.1.7(@types/node@24.12.4)(vite@8.0.14(@types/node@24.12.4)(esbuild@0.27.3))
+      wrangler:
+        specifier: catalog:cloudflare
+        version: 4.93.1(@cloudflare/workers-types@4.20260521.1)
+
   experiments/streams/00-max-throughput-stream:
     dependencies:
       '@cf-experiments/shared':
