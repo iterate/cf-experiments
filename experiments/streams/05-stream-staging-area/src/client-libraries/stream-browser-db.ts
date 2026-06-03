@@ -132,8 +132,10 @@ export class StreamBrowserDatabase {
 
   async #initSchema(): Promise<void> {
     // CREATE IF NOT EXISTS is idempotent and safe to run from every tab's connection.
+    // One transaction = ONE cooperative file-lock cycle for all DDL (six separate
+    // autocommits otherwise cost six lock acquire/release round-trips on first open).
     await this.#call("batch", {
-      transaction: false,
+      transaction: true,
       statements: [
         {
           sql: `CREATE TABLE IF NOT EXISTS events (

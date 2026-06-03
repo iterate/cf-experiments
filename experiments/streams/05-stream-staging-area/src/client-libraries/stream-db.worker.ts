@@ -13,6 +13,7 @@ import SQLiteESMFactory from "@journeyapps/wa-sqlite/dist/wa-sqlite.mjs";
 import wasmUrl from "@journeyapps/wa-sqlite/dist/wa-sqlite.wasm?url";
 import { Factory } from "@journeyapps/wa-sqlite";
 import {
+  SQLITE_BUSY,
   SQLITE_OPEN_CREATE,
   SQLITE_OPEN_READWRITE,
   SQLITE_ROW,
@@ -44,9 +45,12 @@ async function open(path: string): Promise<void> {
   sqlite3.vfs_register(vfs, false);
   databasePath = path;
   db = await sqlite3.open_v2(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, VFS_NAME);
-  // Busy timeout lets cooperative-lock contention with other tabs' connections resolve
-  // inside SQLite instead of surfacing SQLITE_BUSY to every read.
-  await sqlite3.exec(db, "PRAGMA busy_timeout = 5000;");
+  // NOTE: deliberately NO `PRAGMA busy_timeout`. OPFSCoopSyncVFS acquires its OPFS access
+  // handle asynchronously and pushes that onto wa-sqlite's `retryOps`, which sqlite3.exec/
+  // statements await and then retry — so the first lock resolves in ~one event-loop turn.
+  // A busy_timeout would instead make SQLite's core spin synchronously (blocking the event
+  // loop, so the async acquisition can't resolve) for the whole timeout — a ~5s stall on
+  // first open. Cross-connection contention is handled by withBusyRetry instead.
 }
 
 /** Runs one statement, collecting any result rows as plain objects. */
@@ -78,6 +82,21 @@ async function batch(statements: Statement[], transaction: boolean): Promise<voi
   }
 }
 
+// wa-sqlite's own retryOps resolves the FIRST (async) handle acquisition. This handles the
+// other case: genuine contention when another tab's connection currently holds the OPFS
+// access handle. We retry the whole op with a short backoff, yielding the event loop so the
+// cooperative handoff (BroadcastChannel) can complete. Bounded so a real error still surfaces.
+async function withBusyRetry<T>(run: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      if ((error as { code?: number })?.code !== SQLITE_BUSY || attempt >= 25) throw error;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(50, 2 ** attempt)));
+    }
+  }
+}
+
 async function exportFile(): Promise<ArrayBuffer> {
   // OPFSCoopSyncVFS stores a real, transparent SQLite file in OPFS; read it back raw.
   const root = await navigator.storage.getDirectory();
@@ -94,9 +113,9 @@ async function handle(request: Request): Promise<unknown> {
       await open(request.databasePath);
       return undefined;
     case "exec":
-      return exec(request.sql, request.params);
+      return withBusyRetry(() => exec(request.sql, request.params));
     case "batch":
-      return batch(request.statements, request.transaction);
+      return withBusyRetry(() => batch(request.statements, request.transaction));
     case "export":
       return exportFile();
   }

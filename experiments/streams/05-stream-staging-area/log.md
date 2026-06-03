@@ -62,6 +62,25 @@ First-party sources:
 
 ## 2026-06-03
 
+### Perf: `PRAGMA busy_timeout` causes a ~5s first-open stall with OPFSCoopSyncVFS
+
+First page load sat on "opening sqlite DB" for ~5s (independent of event count). Cause:
+OPFSCoopSyncVFS acquires its OPFS `FileSystemSyncAccessHandle` **asynchronously** — its
+`jLock` returns `SQLITE_BUSY` and pushes the acquisition onto wa-sqlite's `Module.retryOps`,
+which `sqlite3.exec`/`statements` `await` and then retry (resolves in ~one event-loop turn).
+Setting `PRAGMA busy_timeout = 5000` **breaks this**: SQLite's core busy handler retries
+*synchronously*, blocking the event loop so the async acquisition can never resolve, and it
+spins for the entire timeout before yielding to wa-sqlite's `retry()`. Measured init on a
+fresh stream: **5081ms → 64ms** after removing the pragma (`wasm 7 / vfs.create 9 / open 4 /
+schema 10`). Genuine cross-connection (multi-tab) contention is handled instead by a bounded
+JS-layer retry-on-`SQLITE_BUSY` with backoff (`withBusyRetry` in `stream-db.worker.ts`).
+
+Confirmed on the production build: reopening an 808 KB DB (3002 events) → 137ms init, ~253ms
+to first rendered rows; deployed cold load → ~1.2s to first render (dominated by page/JS/wasm
+download + the capnweb subscribe round-trip, not SQLite). Init is size-independent — the
+count is special-cased (O(1)) and the row query is LIMIT-windowed — so thousands of events
+load just as fast. NOT yet repeated across sessions — provisional.
+
 ### Migrated the browser SQLite mirror from SQLocal → wa-sqlite OPFSCoopSyncVFS
 
 Replaced SQLocal/`@sqlite.org/sqlite-wasm` (opfs-sahpool, kept working only by removing
