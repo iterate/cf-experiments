@@ -140,18 +140,17 @@ function StreamPageLayout({
         streamPath={streamPath}
         onSidebarOpenChange={setSidebarOpen}
       />
-      {sidebarOpen ? (
-        <StreamSidebar
-          eventCount={eventCount}
-          key={`sidebar:${streamPath}`}
-          snapshot={snapshot}
-          sqliteWriteMode={sqliteWriteMode}
-          streamDatabase={streamDatabase}
-          streamStore={streamStore}
-          streamPath={streamPath}
-          onSqliteWriteModeChange={onSqliteWriteModeChange}
-        />
-      ) : null}
+      <StreamSidebar
+        className={sidebarOpen ? "stream-page__sidebar--open" : undefined}
+        eventCount={eventCount}
+        key={`sidebar:${streamPath}`}
+        snapshot={snapshot}
+        sqliteWriteMode={sqliteWriteMode}
+        streamDatabase={streamDatabase}
+        streamStore={streamStore}
+        streamPath={streamPath}
+        onSqliteWriteModeChange={onSqliteWriteModeChange}
+      />
       <div className="stream-page__body">
         <div className="stream-page__main">
           {!databaseReady ? (
@@ -202,9 +201,10 @@ function StreamTopBar({
   onSidebarOpenChange(open: boolean): void;
 }) {
   const navigate = useNavigate();
-  const [editedPath, setEditedPath] = useState<string | undefined>();
-  const draftPath = editedPath ?? streamPath;
-  const trimmedDraftPath = draftPath.trim();
+  const pathInputRef = useRef<HTMLInputElement>(null);
+  const [editingPath, setEditingPath] = useState(false);
+  const [editedPath, setEditedPath] = useState(streamPath);
+  const trimmedDraftPath = editedPath.trim();
   const normalizedDraftPath =
     trimmedDraftPath === ""
       ? "/"
@@ -213,8 +213,19 @@ function StreamTopBar({
         : `/${trimmedDraftPath}`;
   const pathChanged = normalizedDraftPath !== streamPath;
 
+  useLayoutEffect(() => {
+    if (!editingPath) return;
+    pathInputRef.current?.focus();
+    pathInputRef.current?.select();
+  }, [editingPath]);
+
   function goToDraftPath() {
-    if (!pathChanged) return;
+    if (!pathChanged) {
+      setEditingPath(false);
+      setEditedPath(streamPath);
+      return;
+    }
+    setEditingPath(false);
     if (normalizedDraftPath === "/") {
       void navigate({ to: "/streams" });
       return;
@@ -225,34 +236,84 @@ function StreamTopBar({
     });
   }
 
+  function startEditingPath() {
+    setEditedPath(streamPath);
+    setEditingPath(true);
+  }
+
+  function cancelEditingPath() {
+    setEditedPath(streamPath);
+    setEditingPath(false);
+  }
+
   return (
     <header className="stream-page__top-bar">
       <div className="stream-page__controls">
-        <input
-          aria-label="Stream path"
-          className="stream-page__input"
-          id="stream-path"
-          value={draftPath}
-          onChange={(event) => setEditedPath(event.currentTarget.value)}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            goToDraftPath();
-          }}
-        />
+        {editingPath ? (
+          <>
+            <input
+              aria-label="Stream path"
+              className="stream-page__input stream-page__path-input"
+              id="stream-path"
+              ref={pathInputRef}
+              value={editedPath}
+              onChange={(event) => setEditedPath(event.currentTarget.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelEditingPath();
+                  return;
+                }
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                goToDraftPath();
+              }}
+            />
+            <button
+              className="stream-page__button stream-page__path-submit"
+              disabled={!pathChanged}
+              type="button"
+              onClick={() => goToDraftPath()}
+            >
+              Go
+            </button>
+          </>
+        ) : (
+          <button
+            className="stream-page__path-headline"
+            type="button"
+            onClick={() => startEditingPath()}
+          >
+            {streamPath}
+          </button>
+        )}
+        {editingPath ? null : (
+          <button
+            aria-label="Go to another stream path"
+            className="stream-page__top-bar-button stream-page__path-navigate"
+            type="button"
+            onClick={() => startEditingPath()}
+          >
+            <span aria-hidden>✎</span>
+          </button>
+        )}
         <button
           aria-controls="stream-sidebar"
           aria-expanded={sidebarOpen}
           aria-label={sidebarOpen ? "Hide tools" : "Show tools"}
           className={
             sidebarOpen
-              ? "stream-page__sidebar-toggle stream-page__sidebar-toggle--open"
-              : "stream-page__sidebar-toggle"
+              ? "stream-page__top-bar-button stream-page__sidebar-toggle stream-page__sidebar-toggle--open"
+              : "stream-page__top-bar-button stream-page__sidebar-toggle"
           }
           type="button"
           onClick={() => onSidebarOpenChange(!sidebarOpen)}
         >
-          <span aria-hidden>▼</span>
+          <span aria-hidden className="stream-page__menu-icon">
+            <span />
+            <span />
+            <span />
+          </span>
         </button>
       </div>
     </header>
@@ -405,7 +466,7 @@ function EventRows({
                   type="button"
                   onClick={() => {
                     dispatchScrollState({ type: "stop-following-end" });
-                    virtualizer.scrollToIndex(0, { align: "start", behavior: "smooth" });
+                    virtualizer.scrollToIndex(0, { align: "start" });
                   }}
                 >
                   ↑
@@ -454,7 +515,7 @@ function EventRows({
                   type="button"
                   onClick={() => {
                     dispatchScrollState({ type: "follow-end" });
-                    virtualizer.scrollToEnd({ behavior: "smooth" });
+                    virtualizer.scrollToEnd();
                   }}
                 >
                   <span className="stream-page__scroll-button-arrow" aria-hidden>
@@ -570,6 +631,7 @@ function EventRowWindow({
 }
 
 function StreamSidebar({
+  className,
   streamPath,
   snapshot,
   sqliteWriteMode,
@@ -578,6 +640,7 @@ function StreamSidebar({
   eventCount,
   onSqliteWriteModeChange,
 }: {
+  className?: string;
   streamPath: string;
   snapshot: StreamBrowserSnapshot;
   sqliteWriteMode: StreamDatabaseWriteMode;
@@ -587,7 +650,10 @@ function StreamSidebar({
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
   return (
-    <aside className="stream-page__sidebar" id="stream-sidebar">
+    <aside
+      className={className === undefined ? "stream-page__sidebar" : `stream-page__sidebar ${className}`}
+      id="stream-sidebar"
+    >
       <SubscriptionTool
         eventCount={eventCount}
         snapshot={snapshot}
