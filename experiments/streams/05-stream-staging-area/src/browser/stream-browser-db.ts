@@ -1,5 +1,3 @@
-import type { StreamEvent } from "@cf-experiments/shared/event";
-
 export type SqlValue = string | number | bigint | Uint8Array | number[] | null;
 
 export type StreamEventRow = {
@@ -39,6 +37,14 @@ export type SqliteQueryHandle = {
   subscribe(listener: () => void): () => void;
 };
 
+export type SqlClient = {
+  exec(sql: string, params?: SqlValue[]): Promise<Record<string, SqlValue>[]>;
+  batch(
+    statements: { sql: string; params?: SqlValue[] }[],
+    options?: { transaction?: boolean },
+  ): Promise<void>;
+};
+
 type StreamDbChange =
   | { kind: "append"; minOffset: number; maxOffset: number }
   | { kind: "clear" };
@@ -54,7 +60,6 @@ type RegisteredQuery = {
 };
 
 const PENDING: SqliteQuerySnapshot<never> = { data: [], status: "pending", error: undefined };
-export const BROWSER_DB_SCHEMA_VERSION = 4;
 
 export class StreamBrowserDatabase implements Disposable {
   readonly databasePath: string;
@@ -85,7 +90,7 @@ export class StreamBrowserDatabase implements Disposable {
     };
     this.#channel = new BroadcastChannel(`stream-db:${encodeURIComponent(streamPath)}`);
     this.#channel.onmessage = (event: MessageEvent<StreamDbChange>) => this.#onChange(event.data);
-    this.#ready = this.#call("init", { databasePath: this.databasePath }).then(() => this.#initSchema());
+    this.#ready = this.#call("init", { databasePath: this.databasePath }).then(() => undefined);
   }
 
   #assertOpen() {
@@ -112,84 +117,16 @@ export class StreamBrowserDatabase implements Disposable {
     return rows.filter(isSqlRow);
   }
 
-  async #initSchema(): Promise<void> {
-    const [schemaVersion] = await this.#execReady(`PRAGMA user_version`);
-    if (Number(schemaVersion?.user_version ?? 0) !== BROWSER_DB_SCHEMA_VERSION) {
-      await this.#call("batch", {
-        transaction: true,
-        statements: [
-          { sql: `DROP TRIGGER IF EXISTS events_before_insert` },
-          { sql: `DROP TABLE IF EXISTS events` },
-          { sql: `PRAGMA user_version = ${BROWSER_DB_SCHEMA_VERSION}` },
-        ],
-      });
-    }
-
-    await this.#call("batch", {
-      transaction: true,
-      statements: [
-        {
-          sql: `
-            -- Browser-owned append log mirror. raw_jsonb is the source of truth:
-            -- SQLite derives the queryable event fields from it, so future JSON-field
-            -- indexes can use the same payload without duplicating text JSON.
-            --
-            -- local_index is deliberately separate from offset. Today it is offset - 1,
-            -- because server offsets are one-based and TanStack Virtual indexes are
-            -- zero-based. Keeping a separate local list position gives us room to age
-            -- server events out later while still rendering a dense local list.
-            CREATE TABLE IF NOT EXISTS events (
-              local_index INTEGER PRIMARY KEY,
-              raw_jsonb BLOB NOT NULL,
-              offset INTEGER GENERATED ALWAYS AS (json_extract(raw_jsonb, '$.offset')) STORED NOT NULL UNIQUE,
-              type TEXT GENERATED ALWAYS AS (json_extract(raw_jsonb, '$.type')) STORED NOT NULL,
-              idempotency_key TEXT GENERATED ALWAYS AS (json_extract(raw_jsonb, '$.idempotencyKey')) STORED,
-              created_at TEXT GENERATED ALWAYS AS (json_extract(raw_jsonb, '$.createdAt')) STORED NOT NULL,
-              inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
-              CHECK (local_index = offset - 1)
-            )
-          `,
-        },
-        {
-          sql: `
-            -- The stream page can filter by generated event type while keeping
-            -- TanStack Virtual's visible window ordered by the dense local list.
-            CREATE INDEX IF NOT EXISTS events_type_local_index ON events (type, local_index)
-          `,
-        },
-        {
-          sql: `
-            -- This trigger is the browser mirror's append invariant:
-            -- 1. Identical replay is accepted and ignored, preserving inserted_at as
-            --    "first stored locally".
-            -- 2. Same offset with different JSON is a conflicting duplicate.
-            -- 3. New rows must append continuously, so a missed offset fails loudly.
-            CREATE TRIGGER IF NOT EXISTS events_before_insert
-            BEFORE INSERT ON events
-            BEGIN
-              SELECT CASE
-                WHEN EXISTS (
-                  SELECT 1
-                  FROM events
-                  WHERE offset = NEW.offset
-                    AND json(raw_jsonb) = json(NEW.raw_jsonb)
-                ) THEN RAISE(IGNORE)
-                WHEN EXISTS (
-                  SELECT 1
-                  FROM events
-                  WHERE offset = NEW.offset
-                ) THEN RAISE(ABORT, 'stream browser mirror replay changed an existing offset')
-                WHEN NEW.offset != COALESCE((SELECT MAX(offset) + 1 FROM events), 1)
-                  THEN RAISE(ABORT, 'stream browser mirror offsets must append continuously')
-              END;
-            END
-          `,
-        },
-      ],
-    });
+  async batch(
+    statements: { sql: string; params?: SqlValue[] }[],
+    options: { transaction?: boolean } = {},
+  ): Promise<void> {
+    await this.#ready;
+    await this.#call("batch", { statements, transaction: options.transaction ?? false });
   }
 
   async maxOffset(): Promise<number> {
+    if (!(await this.#eventsTableExists())) return -1;
     const [row] = await this.exec(
       `SELECT MAX(offset) AS max_offset FROM events`,
     );
@@ -197,6 +134,9 @@ export class StreamBrowserDatabase implements Disposable {
   }
 
   async eventSummary(): Promise<StreamDatabaseEventSummary> {
+    if (!(await this.#eventsTableExists())) {
+      return { count: 0, minOffset: null, maxOffset: null, isContinuous: true };
+    }
     const [row] = await this.exec(
       `SELECT COUNT(*) AS event_count, MIN(offset) AS min_offset, MAX(offset) AS max_offset
        FROM events`,
@@ -217,20 +157,8 @@ export class StreamBrowserDatabase implements Disposable {
     };
   }
 
-  async insertEventBatch(args: { events: StreamEvent[] }): Promise<void> {
-    if (args.events.length === 0) return;
-    const statements = args.events.map((event) => ({
-      sql: `INSERT INTO events (local_index, raw_jsonb) VALUES (?, jsonb(?))`,
-      params: [event.offset - 1, JSON.stringify(event)] satisfies SqlValue[],
-    }));
-    await this.#ready;
-    await this.#call("batch", { statements, transaction: true });
-    const offsets = args.events.map((event) => event.offset);
-    this.#publishChange({
-      kind: "append",
-      minOffset: Math.min(...offsets),
-      maxOffset: Math.max(...offsets),
-    });
+  notifyChanged(change: StreamDbChange = { kind: "append", minOffset: 0, maxOffset: 0 }) {
+    this.#publishChange(change);
   }
 
   async info(): Promise<StreamDatabaseInfo> {
@@ -335,6 +263,11 @@ export class StreamBrowserDatabase implements Disposable {
       const data = await this.exec(entry.sql, entry.params);
       entry.snapshot = { data, status: "ok", error: undefined };
     } catch (error) {
+      if (isMissingEventsTableError(error)) {
+        entry.snapshot = { data: emptyEventsTableRows(entry.sql), status: "ok", error: undefined };
+        for (const listener of entry.listeners) listener();
+        return;
+      }
       console.error(`[stream-browser-db ${this.streamPath}] SQLite query failed`, {
         error,
         params: entry.params,
@@ -347,6 +280,14 @@ export class StreamBrowserDatabase implements Disposable {
       };
     }
     for (const listener of entry.listeners) listener();
+  }
+
+  async #eventsTableExists(): Promise<boolean> {
+    await this.#ready;
+    const [row] = await this.#execReady(
+      `SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'events'`,
+    );
+    return row !== undefined;
   }
 
   #publishChange(change: StreamDbChange) {
@@ -415,4 +356,15 @@ function isSqlValue(value: unknown): value is SqlValue {
     value instanceof Uint8Array ||
     (Array.isArray(value) && value.every((item) => typeof item === "number"))
   );
+}
+
+function isMissingEventsTableError(error: unknown) {
+  return error instanceof Error && error.message.includes("no such table: events");
+}
+
+function emptyEventsTableRows(sql: string): Record<string, SqlValue>[] {
+  if (/^\s*SELECT\s+COUNT\(\*\)\s+AS\s+count\s+FROM\s+events\b/i.test(sql)) {
+    return [{ count: 0 }];
+  }
+  return [];
 }

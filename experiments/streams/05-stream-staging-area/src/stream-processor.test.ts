@@ -106,8 +106,8 @@ describe("subscription processor (node, in-process)", () => {
       stream,
     });
 
-    await runner.processEvent({
-      event: event({ type: "test.input", payload: { path: "/x" }, offset: 2 }),
+    await runner.processEventBatch({
+      events: [event({ type: "test.input", payload: { path: "/x" }, offset: 2 })],
       streamMaxOffset: 2,
     });
 
@@ -124,8 +124,8 @@ describe("subscription processor (node, in-process)", () => {
       storage: { load: () => ({ state: { seen: 0 }, offset: 5 }), save: () => {} },
       stream,
     });
-    await runner.processEvent({
-      event: event({ type: "test.input", payload: { path: "/x" }, offset: 3 }),
+    await runner.processEventBatch({
+      events: [event({ type: "test.input", payload: { path: "/x" }, offset: 3 })],
       streamMaxOffset: 5,
     });
     expect(committed).toHaveLength(0); // offset 3 <= snapshot 5
@@ -183,8 +183,8 @@ describe("durable processor (blockProcessorUntil)", () => {
       stream,
     });
 
-    const processed = runner.processEvent({
-      event: event({ type: "test.audio", payload: { url: "/a" }, offset: 2 }),
+    const processed = runner.processEventBatch({
+      events: [event({ type: "test.audio", payload: { url: "/a" }, offset: 2 })],
       streamMaxOffset: 2,
     });
     await new Promise((r) => setTimeout(r, 0));
@@ -227,9 +227,83 @@ describe("projector processor (consumes everything, writes to a db port)", () =>
       storage: { load: () => undefined, save: () => {} },
       stream,
     });
-    await runner.processEvent({ event: event({ type: "a", offset: 0, payload: {} }), streamMaxOffset: 1 });
-    await runner.processEvent({ event: event({ type: "b", offset: 1, payload: {} }), streamMaxOffset: 1 });
+    await runner.processEventBatch({ events: [event({ type: "a", offset: 0, payload: {} })], streamMaxOffset: 1 });
+    await runner.processEventBatch({ events: [event({ type: "b", offset: 1, payload: {} })], streamMaxOffset: 1 });
     expect(written).toEqual([0, 1]);
+  });
+
+  it("can commit a delivered batch as one side-effect/checkpoint unit", async () => {
+    const written: number[][] = [];
+    const saves: number[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const projector = implementProcessor(projectorContract, () => ({
+      afterAppendBatch({ events, blockProcessorUntil }) {
+        blockProcessorUntil(async () => {
+          await gate;
+          written.push(events.map(({ event }) => {
+            const streamEvent: StreamEvent = event;
+            return streamEvent.offset;
+          }));
+        });
+      },
+    }));
+    const { stream } = memoryStream();
+    const runner = createProcessorRunner({
+      processor: projector,
+      deps: undefined,
+      storage: { load: () => undefined, save: (snapshot) => void saves.push(snapshot.offset) },
+      stream,
+    });
+
+    const processed = runner.processEventBatch({
+      events: [
+        event({ type: "a", offset: 1, payload: {} }),
+        event({ type: "b", offset: 2, payload: {} }),
+      ],
+      streamMaxOffset: 2,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(written).toEqual([]);
+    expect(saves).toEqual([]);
+
+    release();
+    await processed;
+    expect(written).toEqual([[1, 2]]);
+    expect(saves).toEqual([2]);
+  });
+
+  it("lets a processor decide side-effect eligibility from the subscription anchor and grace period", async () => {
+    const written: number[] = [];
+    const projector = implementProcessor(projectorContract, () => ({
+      afterAppendBatch({ events, shouldApplySideEffects }) {
+        for (const { event } of events) {
+          const streamEvent: StreamEvent = event;
+          if (shouldApplySideEffects({ event: streamEvent, gracePeriodMs: 6_000 })) {
+            written.push(streamEvent.offset);
+          }
+        }
+      },
+    }));
+    const { stream } = memoryStream();
+    const runner = createProcessorRunner({
+      processor: projector,
+      deps: undefined,
+      storage: { load: () => undefined, save: () => {} },
+      stream,
+      sideEffectAnchor: { offset: 10, createdAt: iso(10_000) },
+    });
+
+    await runner.processEventBatch({
+      events: [
+        event({ type: "a", offset: 8, payload: {}, createdAtMs: 0 }),
+        event({ type: "b", offset: 9, payload: {}, createdAtMs: 5_000 }),
+        event({ type: "c", offset: 10, payload: {}, createdAtMs: 10_000 }),
+      ],
+      streamMaxOffset: 10,
+    });
+
+    expect(written).toEqual([9, 10]);
   });
 });
 
@@ -389,6 +463,7 @@ class CoreStreamSim {
       state: entry.state,
       streamMaxOffset: committed.offset,
       stream,
+      shouldApplySideEffects: () => true,
       blockProcessorUntil: (work) => void work(),
       keepAlive: () => {},
     });

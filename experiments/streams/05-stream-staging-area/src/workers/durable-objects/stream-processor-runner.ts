@@ -67,6 +67,10 @@ export class StreamProcessorRunner extends DurableObject {
         save: (snapshot) => void this.ctx.storage.kv.put("snapshot", snapshot),
       },
       stream: this.#stream,
+      sideEffectAnchor: {
+        offset: args.subscriptionConfiguredEvent.offset,
+        createdAt: args.subscriptionConfiguredEvent.createdAt,
+      },
     });
     const snapshot = await this.#runner.snapshot();
     this.#subscription = createStreamSubscription({

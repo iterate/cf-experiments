@@ -124,6 +124,34 @@ test("random bulk insert creates multiple filterable event types and shows filte
   await expect(eventMeta(page, selectedType).first()).toBeVisible();
 });
 
+// Regression for initial tail anchoring from persisted local SQLite rows. A stream page that
+// already has enough rows to scroll should mount at the newest rows after a reload, not at
+// local_index 0. This is separate from "follow while appending": reload reconstructs the
+// virtualizer from SQLite query results and must still settle at the tail.
+test("stream page reload starts at the bottom of an existing local mirror", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  const insertedCount = 200;
+  await page.getByLabel("Count").fill(String(insertedCount));
+  await page.getByLabel("Batch size").fill(String(insertedCount));
+  await page.getByLabel("Seconds").fill("0");
+  await page.getByRole("button", { name: "Stream random events" }).click();
+
+  const expectedCount = insertedCount + 2;
+  await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText(String(expectedCount), { timeout: 30_000 });
+  await expect(page.locator(`[data-index='${expectedCount - 1}']`)).toBeVisible();
+  await expectAtStreamEnd(page);
+
+  await page.reload();
+
+  await expect(page.getByTestId("event-count")).toHaveText(String(expectedCount), { timeout: 30_000 });
+  await expect(page.locator("[data-index='0']")).toHaveCount(0);
+  await expect(page.locator(`[data-index='${expectedCount - 1}']`)).toBeVisible();
+});
+
 // Guards "instant enough" first draw. This catches regressions where OPFS/wa-sqlite setup,
 // subscription, or reactive query invalidation leaves the page hydrated but visually empty.
 test("first event row draws quickly", async ({ page }) => {

@@ -2,7 +2,7 @@
 // Contracts are pure data/reducer definitions; implementations bind a contract
 // to synchronous afterAppend side effects and optional built-in beforeAppend gates.
 
-import type { StreamEventInput } from "@cf-experiments/shared/event";
+import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import type {
   ConsumedEvent,
   EventCatalog,
@@ -31,9 +31,22 @@ export type ProcessorCapabilities<Contract> = {
   /** The exact stream RPC API this processor is running against. */
   stream: ProcessorStream;
   /**
+   * Processor policy helper for replay/catch-up. It returns true when `event` is
+   * at/after the subscription anchor, or within the optional grace period before
+   * it. If the runner has no anchor, it returns true.
+   *
+   * Ignore this helper when a processor intentionally wants historical side
+   * effects for every replayed event.
+   */
+  shouldApplySideEffects(args: {
+    event: Pick<StreamEvent, "offset" | "createdAt">;
+    gracePeriodMs?: number;
+  }): boolean;
+  /**
    * Durable opt-in: "do not checkpoint past this event until `work` completes."
-   * Must be called synchronously during afterAppend. Crash before completion =>
-   * the event is re-delivered and re-processed (at-least-once).
+   * Must be called synchronously during afterAppend/afterAppendBatch. Crash
+   * before completion => the whole delivery batch is re-delivered from the last
+   * saved checkpoint and side effects are at-least-once.
    */
   blockProcessorUntil(work: () => Promise<unknown>): void;
   /**
@@ -44,6 +57,8 @@ export type ProcessorCapabilities<Contract> = {
   keepAlive(work: unknown): void;
 };
 
+export type ProcessorSideEffectAnchor = Pick<StreamEvent, "offset" | "createdAt">;
+
 /** Per-event hook. Everything is an argument -> trivially testable. */
 export type AfterAppendArgs<Contract> = ProcessorCapabilities<Contract> & {
   event: ConsumedEvent<Contract>;
@@ -52,8 +67,25 @@ export type AfterAppendArgs<Contract> = ProcessorCapabilities<Contract> & {
   streamMaxOffset: number;
 };
 
+export type ReducedEvent<Contract> = {
+  event: ConsumedEvent<Contract>;
+  previousState: ProcessorState<Contract>;
+  state: ProcessorState<Contract>;
+};
+
+/** Per-batch hook. Prefer this when side effects naturally commit in one transaction. */
+export type AfterAppendBatchArgs<Contract> = ProcessorCapabilities<Contract> & {
+  events: ReducedEvent<Contract>[];
+  previousState: ProcessorState<Contract>;
+  state: ProcessorState<Contract>;
+  /** Offset that will be saved after this hook and its blockers succeed. */
+  checkpointOffset: number;
+  streamMaxOffset: number;
+};
+
 export type ProcessorImplementation<Contract> = {
   afterAppend?(args: AfterAppendArgs<Contract>): void;
+  afterAppendBatch?(args: AfterAppendBatchArgs<Contract>): void;
 };
 
 /** Pre-commit gate args. The event has no offset/createdAt yet. */

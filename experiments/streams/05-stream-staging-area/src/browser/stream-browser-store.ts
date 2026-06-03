@@ -1,16 +1,22 @@
 import type { RpcPromise, RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
 import { connectStream, type StreamBrowserConnectionStatus } from "./connect.js";
-import { rawEventsBrowserProcessor } from "../processors/raw-events-browser/implementation.js";
+import {
+  BROWSER_RAW_EVENTS_SCHEMA_VERSION,
+  ensureRawEventsBrowserSchema,
+  rawEventsBrowserProcessor,
+} from "../processors/raw-events-browser/implementation.js";
 import { createProcessorRunner } from "../processor-runner.js";
 import type { StreamRpc } from "../types.js";
 import { createStreamSubscription, type StreamSubscription } from "../subscription.js";
 import { acquireWriterRole, type WriterRole } from "./stream-leader.js";
 import {
-  BROWSER_DB_SCHEMA_VERSION,
   StreamBrowserDatabase,
+  type SqlClient,
   type StreamDatabaseInfo,
 } from "./stream-browser-db.js";
+
+const LIVE_PROGRESS_NOTIFICATION_MS = 16;
 
 export type StreamBrowserSnapshot = {
   connectionStatus:
@@ -41,6 +47,30 @@ export function createStreamBrowserStore(args: {
   onDispose?: () => void;
 }): StreamBrowserStore {
   const streamDatabase = new StreamBrowserDatabase(args.streamPath);
+  const sql: SqlClient = {
+    exec: (statement, params) =>
+      streamDatabase.exec(statement, params).then((rows) => {
+        if (isEventsInsert(statement)) {
+          notifyDatabaseChangedSoon();
+          onStored(1);
+        } else if (isWriteStatement(statement)) {
+          notifyDatabaseChangedSoon();
+        }
+        return rows;
+      }).catch((error: unknown) => {
+        onMirrorWriteError(error);
+        throw error;
+      }),
+    batch: (statements, options) =>
+      streamDatabase.batch(statements, options).then(() => {
+        if (statements.some((statement) => isWriteStatement(statement.sql))) {
+          notifyDatabaseChangedSoon();
+        }
+      }).catch((error: unknown) => {
+        onMirrorWriteError(error);
+        throw error;
+      }),
+  };
   const listeners = new Set<() => void>();
   let stream: Awaited<ReturnType<typeof connectStream>> | undefined;
   let subscriptionHandle: { unsubscribe(): void } | undefined;
@@ -50,10 +80,13 @@ export function createStreamBrowserStore(args: {
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   let databaseInfoTimer: ReturnType<typeof setTimeout> | undefined;
+  let databaseChangeTimer: ReturnType<typeof setTimeout> | undefined;
+  let storedEventTimer: ReturnType<typeof setTimeout> | undefined;
   let disposeTimer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
   let started = false;
   let receivedEventCount = 0;
+  let pendingStoredEventCount = 0;
   const browserSubscriberStorageKey = "stream-browser-subscriber-id";
   const browserSubscriberId =
     localStorage.getItem(browserSubscriberStorageKey) ?? crypto.randomUUID();
@@ -97,6 +130,21 @@ export function createStreamBrowserStore(args: {
     }, 1_000);
   }
 
+  function notifyDatabaseChangedSoon() {
+    if (disposed) return;
+    if (databaseChangeTimer !== undefined) return;
+
+    // This must be a leading coalesce, not a trailing "quiet period" debounce.
+    // The browser mirror is a live stream view: when a large replay or append storm is
+    // still writing, the UI should show partial progress instead of waiting until the
+    // SQLite write stream goes silent. We still avoid one React/SQLite-query invalidation
+    // per row by allowing only one notify per short tick.
+    databaseChangeTimer = setTimeout(() => {
+      databaseChangeTimer = undefined;
+      streamDatabase.notifyChanged();
+    }, LIVE_PROGRESS_NOTIFICATION_MS);
+  }
+
   function reconnectAfter(connectionError: string) {
     if (disposed || reconnectTimer !== undefined) return;
     snapshot = { ...snapshot, connectionError, connectionStatus: "reconnecting" };
@@ -122,6 +170,11 @@ export function createStreamBrowserStore(args: {
   async function discardLocalMirror() {
     await streamDatabase.clear();
     await streamDatabase.compact();
+    if (storedEventTimer !== undefined) {
+      clearTimeout(storedEventTimer);
+      storedEventTimer = undefined;
+    }
+    pendingStoredEventCount = 0;
     receivedEventCount = 0;
     snapshot = {
       ...snapshot,
@@ -216,7 +269,7 @@ export function createStreamBrowserStore(args: {
     // can keep the old writer lock after a new tab migrates/drops the shared OPFS
     // table, leaving the new tab as a follower with an empty DB and no replay.
     writerRole = acquireWriterRole({
-      compatibilityVersion: `browser-db-v${BROWSER_DB_SCHEMA_VERSION}`,
+      compatibilityVersion: `browser-db-v${BROWSER_RAW_EVENTS_SCHEMA_VERSION}`,
       streamPath: args.streamPath,
     });
     void writerRole.whenWriter
@@ -225,45 +278,14 @@ export function createStreamBrowserStore(args: {
         if (disposed || stream !== election.connection) return undefined;
         snapshot = { ...snapshot, subscriptionStatus: "leader" };
         emitSnapshot();
+        await ensureRawEventsBrowserSchema(sql);
         await reconcileLocalMirrorWithServer(election.connection.stream);
         const localSummary = await streamDatabase.eventSummary();
         const localMaxOffset = localSummary.maxOffset ?? undefined;
         const replayAfterOffset = localMaxOffset ?? 0;
-        let flushFrame: number | undefined;
-        let pendingEvents: StreamEvent[] = [];
-        let tail = Promise.resolve();
-        const flushSoon = () => {
-          if (flushFrame !== undefined) return;
-          // The server may deliver several batches inside one browser frame. Buffer
-          // them into one SQLite transaction so the local mirror remains high-throughput
-          // and TanStack Virtual sees one large append instead of same-turn count churn.
-          flushFrame = requestAnimationFrame(() => {
-            flushFrame = undefined;
-            const events = pendingEvents;
-            pendingEvents = [];
-            if (events.length === 0) return;
-            // Never let failed SQLite writes disappear into the fire-and-forget
-            // subscription path. A broken local mirror must be visible in both console
-            // and React state, otherwise followers can show an infinite empty spinner.
-            tail = tail
-              .then(() => streamDatabase.insertEventBatch({ events }), () =>
-                streamDatabase.insertEventBatch({ events }),
-              )
-              .then(() => onStored(events))
-              .catch((error: unknown) => {
-                onMirrorWriteError(error);
-              });
-            if (pendingEvents.length > 0) flushSoon();
-          });
-        };
         const processorRunner = createProcessorRunner({
           processor: rawEventsBrowserProcessor,
-          deps: {
-            storeEvent(event) {
-              pendingEvents.push(event);
-              flushSoon();
-            },
-          },
+          deps: { sql },
           storage: {
             load: () =>
               localMaxOffset === undefined ? undefined : { state: {}, offset: localMaxOffset },
@@ -310,10 +332,21 @@ export function createStreamBrowserStore(args: {
       });
   }
 
-  function onStored(events: StreamEvent[]) {
-    receivedEventCount += events.length;
-    snapshot = { ...snapshot, receivedEventCount };
-    emitSnapshot();
+  function onStored(storedEventCount: number) {
+    pendingStoredEventCount += storedEventCount;
+    if (storedEventTimer !== undefined) return;
+
+    // Same rule as database invalidation: this is live progress, so do not wait
+    // for writes to stop. Accumulate rows that finish within the current tick,
+    // publish them, then let a later tick publish the next chunk if processing
+    // is still ongoing.
+    storedEventTimer = setTimeout(() => {
+      storedEventTimer = undefined;
+      receivedEventCount += pendingStoredEventCount;
+      pendingStoredEventCount = 0;
+      snapshot = { ...snapshot, receivedEventCount };
+      emitSnapshot();
+    }, LIVE_PROGRESS_NOTIFICATION_MS);
   }
 
   function onMirrorWriteError(error: unknown) {
@@ -363,6 +396,14 @@ export function createStreamBrowserStore(args: {
     if (databaseInfoTimer !== undefined) {
       clearTimeout(databaseInfoTimer);
       databaseInfoTimer = undefined;
+    }
+    if (databaseChangeTimer !== undefined) {
+      clearTimeout(databaseChangeTimer);
+      databaseChangeTimer = undefined;
+    }
+    if (storedEventTimer !== undefined) {
+      clearTimeout(storedEventTimer);
+      storedEventTimer = undefined;
     }
     stopSubscriptionElection();
     void stream?.[Symbol.asyncDispose]();
@@ -438,4 +479,12 @@ export function createStreamBrowserStore(args: {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isWriteStatement(sql: string) {
+  return /^\s*(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|REPLACE|PRAGMA\s+user_version)/i.test(sql);
+}
+
+function isEventsInsert(sql: string) {
+  return /^\s*INSERT\s+INTO\s+events\b/i.test(sql);
 }

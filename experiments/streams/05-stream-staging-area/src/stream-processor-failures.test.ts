@@ -57,11 +57,11 @@ describe("failure conditions (in-process runner)", () => {
     });
 
     // A re-delivered historical event (offset 4 <= snapshot 5) must be ignored.
-    await runner.processEvent({ event: input(4), streamMaxOffset: 6 });
+    await runner.processEventBatch({ events: [input(4)], streamMaxOffset: 6 });
     expect(committed).toHaveLength(0);
 
     // A genuinely new event resumes from the persisted count.
-    await runner.processEvent({ event: input(6), streamMaxOffset: 6 });
+    await runner.processEventBatch({ events: [input(6)], streamMaxOffset: 6 });
     expect(committed).toMatchObject([{ type: "test.processor.output", payload: { seen: 3 } }]);
     expect(saved?.offset).toBe(6);
   });
@@ -76,8 +76,8 @@ describe("failure conditions (in-process runner)", () => {
       stream,
     });
 
-    await runner.processEvent({ event: input(1), streamMaxOffset: 1 });
-    await runner.processEvent({ event: input(1), streamMaxOffset: 1 }); // exact re-delivery (e.g. after a reconnect)
+    await runner.processEventBatch({ events: [input(1)], streamMaxOffset: 1 });
+    await runner.processEventBatch({ events: [input(1)], streamMaxOffset: 1 }); // exact re-delivery (e.g. after a reconnect)
     expect(committed).toHaveLength(1);
     expect(saved?.state.seen).toBe(1);
   });
@@ -103,13 +103,13 @@ describe("failure conditions (in-process runner)", () => {
 
     // Runner 1: the blocker throws, so the batch rejects and nothing is checkpointed.
     const runner1 = createProcessorRunner({ processor: durable, deps: undefined, storage, stream });
-    await expect(runner1.processEvent({ event: input(1), streamMaxOffset: 1 })).rejects.toThrow();
+    await expect(runner1.processEventBatch({ events: [input(1)], streamMaxOffset: 1 })).rejects.toThrow();
     expect(saved).toBeUndefined();
     expect(committed).toHaveLength(0);
 
     // Runner 2 (restart): the same event is re-delivered; this time the work succeeds.
     const runner2 = createProcessorRunner({ processor: durable, deps: undefined, storage, stream });
-    await runner2.processEvent({ event: input(1), streamMaxOffset: 1 });
+    await runner2.processEventBatch({ events: [input(1)], streamMaxOffset: 1 });
     expect(committed).toHaveLength(1); // side effect happened exactly once, after retry
     expect(saved?.offset).toBe(1);
     expect(attempts).toBe(2);

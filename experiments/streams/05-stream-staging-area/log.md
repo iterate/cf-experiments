@@ -70,7 +70,7 @@ Reworked the staging API around explicit primitives instead of `with*` wrappers:
 - Runtime connection helpers are package-shaped under `src/browser`, `src/node`, and `src/workers`.
 - `createStreamSubscription` owns the capnweb sink, queue, async iterator, `waitForEvent`, and latest `streamMaxOffset`.
 - `createStreamSubscription` and `processorRunner.run({ subscription })` were removed from the active model.
-- `createProcessorRunner` now exposes `snapshot()`, `processEvent(...)`, and `run({ subscription })`; browser, Node/Vitest, and the StreamProcessorRunner Durable Object use the same downstream runner path.
+- `createProcessorRunner` now exposes `snapshot()`, `processEventBatch(...)`, and `run({ subscription })`; browser, Node/Vitest, and the StreamProcessorRunner Durable Object use the same downstream runner path.
 - Delivery batches now call `processEventBatch({ events, streamMaxOffset })`; max-offset terminology replaced the old ambiguous stream-position wording.
 - Subscription replay uses `replayAfterOffset`; omitting it live-tails, while `0` replays from the first event.
 - Processor `afterAppend` remains synchronous and receives the exact stream append API plus `keepAlive(...)` and `blockProcessorUntil(...)`.

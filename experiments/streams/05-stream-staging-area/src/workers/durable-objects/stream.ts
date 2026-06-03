@@ -29,7 +29,25 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.#createTables();
+    this.ctx.storage.sql.exec(`
+      -- Stream-owned append log. This is the same replay source that external
+      -- StreamProcessorRunner DOs consume over subscribe().
+      create table if not exists events (
+        offset integer primary key autoincrement,
+        type text not null,
+        created_at text not null,
+        idempotency_key text unique,
+        raw_json text not null
+      );
+
+      -- Processor-owned durable snapshots, keyed by processor slug. The Stream
+      -- DO stores the built-in "stream" processor here; runner DOs can use the
+      -- same shape later for echo-test or multiple processors in one runner.
+      create table if not exists processor_state (
+        processor_slug text primary key,
+        state text not null
+      );
+    `);
 
     // Hydrate the built-in core processor's durable snapshot. This table is the
     // SQLite version of the StreamProcessorRunner DO's KV "snapshot" concept:
@@ -63,28 +81,6 @@ export class Stream extends DurableObject<Env> implements StreamRpc {
     // Restore outbound connections this stream should have. Without this, a stream
     // that wakes with configured subscriptions but no new appends never reconnects.
     this.#reconcile();
-  }
-
-  #createTables(): void {
-    this.ctx.storage.sql.exec(`
-      -- Stream-owned append log. This is the same replay source that external
-      -- StreamProcessorRunner DOs consume over subscribe().
-      create table if not exists events (
-        offset integer primary key autoincrement,
-        type text not null,
-        created_at text not null,
-        idempotency_key text unique,
-        raw_json text not null
-      );
-
-      -- Processor-owned durable snapshots, keyed by processor slug. The Stream
-      -- DO stores the built-in "stream" processor here; runner DOs can use the
-      -- same shape later for echo-test or multiple processors in one runner.
-      create table if not exists processor_state (
-        processor_slug text primary key,
-        state text not null
-      );
-    `);
   }
 
   #initialCoreState(): CoreStreamState {

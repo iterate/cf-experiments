@@ -2,8 +2,13 @@ import { RpcTarget } from "capnweb";
 import type { StreamEvent } from "@cf-experiments/shared/event";
 import type { SubscriptionSink } from "./types.js";
 
+export type StreamEventBatch = {
+  events: StreamEvent[];
+  streamMaxOffset: number;
+};
+
 export type StreamSubscription = AsyncDisposable &
-  AsyncIterable<StreamEvent> & {
+  AsyncIterable<StreamEventBatch> & {
     readonly subscriptionKey: string | undefined;
     readonly streamMaxOffset: number | undefined;
     readonly sink: SubscriptionSink;
@@ -17,7 +22,7 @@ export function createStreamSubscription(args: {
   subscriptionKey?: string;
   onDispose?: () => void | Promise<void>;
 } = {}): StreamSubscription {
-  const inbox = messageInbox<StreamEvent>();
+  const inbox = messageInbox<StreamEventBatch>();
   const waiters = new Set<{
     predicate(event: StreamEvent): boolean;
     resolve(event: StreamEvent): void;
@@ -28,9 +33,9 @@ export function createStreamSubscription(args: {
   let disposed = false;
   const sink = new ClientSubscriptionSink((batch) => {
     streamMaxOffset = batch.streamMaxOffset;
+    inbox.push(batch);
 
     for (const event of batch.events) {
-      inbox.push(event);
       // Deleting the current element during Set iteration is safe in JS.
       for (const waiter of waiters) {
         if (!waiter.predicate(event)) continue;

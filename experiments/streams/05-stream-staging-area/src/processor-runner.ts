@@ -9,8 +9,13 @@ import {
   runProcessorReduce,
   type ProcessorState,
 } from "@cf-experiments/shared/stream-processors";
-import type { StreamSubscription } from "./subscription.js";
-import type { Processor, RunnableContract } from "./processor.js";
+import type { StreamEventBatch, StreamSubscription } from "./subscription.js";
+import type {
+  Processor,
+  ProcessorSideEffectAnchor,
+  ReducedEvent,
+  RunnableContract,
+} from "./processor.js";
 
 export type Snapshot<State> = { state: State; offset: number };
 
@@ -29,13 +34,18 @@ export function createProcessorRunner<Contract extends RunnableContract<Contract
   deps: Deps;
   storage?: ProcessorStorage<ProcessorState<Contract>>;
   stream: ProcessorStream;
+  sideEffectAnchor?: ProcessorSideEffectAnchor;
 }) {
   const { contract } = args.processor;
   const implementation = args.processor.build(args.deps);
+  if (implementation.afterAppend !== undefined && implementation.afterAppendBatch !== undefined) {
+    throw new Error("Processor implementations must choose afterAppend or afterAppendBatch, not both.");
+  }
   let loaded = false;
   let snapshot: Snapshot<ProcessorState<Contract>> | undefined = undefined;
   let state = getInitialProcessorState(contract);
   const keptAlive = new Set<Promise<unknown>>();
+  const shouldApplySideEffects = makeShouldApplySideEffects(args.sideEffectAnchor);
 
   function keepAlive(work: unknown) {
     if (work === undefined || work === null || typeof (work as Promise<unknown>).then !== "function") {
@@ -62,27 +72,59 @@ export function createProcessorRunner<Contract extends RunnableContract<Contract
     await args.storage?.save(nextSnapshot);
   }
 
-  async function processEvent(argsForEvent: { event: StreamEvent; streamMaxOffset: number }) {
-    await loadSnapshot();
-    if (argsForEvent.event.offset <= (snapshot?.offset ?? -1)) return;
-
+  function reduceBatch(argsForBatch: StreamEventBatch): ReducedBatch<Contract> | undefined {
+    const checkpointOffset = snapshot?.offset ?? -1;
+    let nextOffset = checkpointOffset;
+    let nextState = state;
     const previousState = state;
-    const reduction = runProcessorReduce({
-      processor: { contract },
-      event: argsForEvent.event,
-      state: previousState,
-    });
-    const nextState = reduction?.state ?? previousState;
+    const events: ReducedEvent<Contract>[] = [];
 
-    const blockers: Promise<unknown>[] = [];
-    if (reduction !== undefined && implementation.afterAppend !== undefined) {
-      let acceptsBlockers = true;
-      implementation.afterAppend({
+    for (const event of argsForBatch.events) {
+      if (event.offset <= nextOffset) continue;
+
+      const eventPreviousState = nextState;
+      const reduction = runProcessorReduce({
+        processor: { contract },
+        event,
+        state: eventPreviousState,
+      });
+      nextOffset = event.offset;
+      if (reduction === undefined) continue;
+
+      nextState = reduction.state;
+      events.push({
         event: reduction.event,
-        previousState,
+        previousState: eventPreviousState,
         state: nextState,
-        streamMaxOffset: argsForEvent.streamMaxOffset,
+      });
+    }
+
+    if (nextOffset === checkpointOffset) return undefined;
+
+    return {
+      previousState,
+      state: nextState,
+      checkpointOffset: nextOffset,
+      events,
+    };
+  }
+
+  async function applySideEffects(argsForEffects: {
+    batch: ReducedBatch<Contract>;
+    streamMaxOffset: number;
+  }) {
+    const blockers: Promise<unknown>[] = [];
+
+    if (implementation.afterAppendBatch !== undefined && argsForEffects.batch.events.length > 0) {
+      let acceptsBlockers = true;
+      implementation.afterAppendBatch({
+        events: argsForEffects.batch.events,
+        previousState: argsForEffects.batch.previousState,
+        state: argsForEffects.batch.state,
+        checkpointOffset: argsForEffects.batch.checkpointOffset,
+        streamMaxOffset: argsForEffects.streamMaxOffset,
         stream: args.stream,
+        shouldApplySideEffects,
         blockProcessorUntil: (work) => {
           if (!acceptsBlockers) throw new Error("blockProcessorUntil must be synchronous");
           const blocker = work();
@@ -94,27 +136,52 @@ export function createProcessorRunner<Contract extends RunnableContract<Contract
       acceptsBlockers = false;
     }
 
-    state = nextState;
-    const nextSnapshot = { state, offset: argsForEvent.event.offset };
+    if (implementation.afterAppend !== undefined) {
+      for (const reducedEvent of argsForEffects.batch.events) {
+        let acceptsBlockers = true;
+        implementation.afterAppend({
+          event: reducedEvent.event,
+          previousState: reducedEvent.previousState,
+          state: reducedEvent.state,
+          streamMaxOffset: argsForEffects.streamMaxOffset,
+          stream: args.stream,
+          shouldApplySideEffects,
+          blockProcessorUntil: (work) => {
+            if (!acceptsBlockers) throw new Error("blockProcessorUntil must be synchronous");
+            const blocker = work();
+            blockers.push(blocker);
+            keepAlive(blocker);
+          },
+          keepAlive,
+        });
+        acceptsBlockers = false;
+      }
+    }
+
     if (blockers.length > 0) await Promise.all(blockers);
-    await saveSnapshot(nextSnapshot);
+  }
+
+  async function processEventBatch(argsForBatch: StreamEventBatch) {
+    await loadSnapshot();
+    const batch = reduceBatch(argsForBatch);
+    if (batch === undefined) return;
+
+    await applySideEffects({ batch, streamMaxOffset: argsForBatch.streamMaxOffset });
+    state = batch.state;
+    await saveSnapshot({ state, offset: batch.checkpointOffset });
   }
 
   return {
     async snapshot() {
       return loadSnapshot();
     },
-    processEvent,
+    processEventBatch,
     run(argsForRun: { subscription: StreamSubscription }) {
       let stopped = false;
       const processing = (async () => {
-        for await (const event of argsForRun.subscription) {
+        for await (const batch of argsForRun.subscription) {
           if (stopped) break;
-          const streamMaxOffset = argsForRun.subscription.streamMaxOffset;
-          if (streamMaxOffset === undefined) {
-            throw new Error("subscription yielded an event before streamMaxOffset was known");
-          }
-          await processEvent({ event, streamMaxOffset });
+          await processEventBatch(batch);
         }
       })();
 
@@ -130,3 +197,28 @@ export function createProcessorRunner<Contract extends RunnableContract<Contract
 }
 
 export type ProcessorRunner = ReturnType<typeof createProcessorRunner>;
+
+type ReducedBatch<Contract> = {
+  previousState: ProcessorState<Contract>;
+  state: ProcessorState<Contract>;
+  checkpointOffset: number;
+  events: ReducedEvent<Contract>[];
+};
+
+function makeShouldApplySideEffects(anchor: ProcessorSideEffectAnchor | undefined) {
+  return (args: {
+    event: Pick<StreamEvent, "offset" | "createdAt">;
+    gracePeriodMs?: number;
+  }) => {
+    if (anchor === undefined) return true;
+    if (args.event.offset >= anchor.offset) return true;
+
+    const gracePeriodMs = args.gracePeriodMs ?? 0;
+    if (gracePeriodMs <= 0) return false;
+
+    const anchorTime = Date.parse(anchor.createdAt);
+    const eventTime = Date.parse(args.event.createdAt);
+    if (!Number.isFinite(anchorTime) || !Number.isFinite(eventTime)) return false;
+    return eventTime >= anchorTime - gracePeriodMs;
+  };
+}

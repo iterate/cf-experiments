@@ -420,12 +420,12 @@ function StreamTopBar({
         <SidebarIcon />
       </button>
       <div className="flex min-w-0 flex-1 items-center gap-1.5 w-full">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
           {editingPath ? (
             <>
               <input
                 aria-label="Stream path"
-                className="min-w-0 flex-1 rounded-md border border-[#bac2cf] px-2 py-1.5 font-mono text-[13px]"
+                className="min-w-0 flex-1 rounded border border-[#bac2cf] px-1.5 py-1 font-mono text-xs leading-snug"
                 id="stream-path"
                 ref={pathInputRef}
                 value={editedPath}
@@ -441,27 +441,36 @@ function StreamTopBar({
                   goToDraftPath();
                 }}
               />
-              <button
-                className="shrink-0 cursor-pointer whitespace-nowrap rounded-md bg-[#1f6feb] px-2.5 py-1.5 text-xs font-semibold text-white no-underline disabled:cursor-default disabled:opacity-55"
-                disabled={!pathChanged}
-                type="button"
-                onClick={() => goToDraftPath()}
-              >
-                Go to stream
-              </button>
             </>
           ) : (
-            <span className="min-w-0 truncate font-mono text-xs leading-snug text-slate-950">{streamPath}</span>
+            <button
+              className="min-w-0 cursor-pointer truncate border-0 bg-transparent p-0 text-left font-mono text-xs leading-snug text-[#16181d]"
+              title="Edit stream path"
+              type="button"
+              onClick={() => startEditingPath()}
+            >
+              {streamPath}
+            </button>
           )}
         </div>
         {editingPath ? (
-          <button
-            className="shrink-0 cursor-pointer border-0 bg-transparent px-0 py-1 text-[11px] text-[#98a2b3] hover:text-[#475467] hover:underline"
-            type="button"
-            onClick={() => cancelEditingPath()}
-          >
-            Cancel
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              className="cursor-pointer border-0 bg-transparent px-0 py-1 text-[11px] font-semibold text-[#667085] disabled:cursor-default disabled:opacity-40"
+              disabled={!pathChanged}
+              type="button"
+              onClick={() => goToDraftPath()}
+            >
+              Go
+            </button>
+            <button
+              className="cursor-pointer border-0 bg-transparent px-0 py-1 text-[11px] text-[#98a2b3] hover:text-[#475467] hover:underline"
+              type="button"
+              onClick={() => cancelEditingPath()}
+            >
+              Cancel
+            </button>
+          </div>
         ) : (
           <button
             aria-label="Edit stream path"
@@ -500,21 +509,31 @@ function EventRows({
   onEventTypeFilterChange(eventType: string): void;
 }) {
   const topScrollAffordanceHeight = 48;
+  const estimatedEventRowHeight = 38;
   const parentRef = useRef<HTMLDivElement>(null);
   const previousEventCount = useRef(eventCount);
   const settledInitialEndScroll = useRef(false);
+  const initialScrollOffset = useRef(
+    eventCount > 50 ? topScrollAffordanceHeight + eventCount * estimatedEventRowHeight : 0,
+  );
   const [expandedOffsets, setExpandedOffsets] = useState(() => new Set<number>());
   const [newEventCount, setNewEventCount] = useState(0);
   const [scrollPosition, setScrollPosition] = useState({ isAtTop: true, isAtEnd: true });
   const virtualizer = useVirtualizer({
     count: eventCount,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 38,
+    estimateSize: () => estimatedEventRowHeight,
     // This stream is append-only, so the virtual index is a stable item key.
     // If this grows older-history prepends later, switch this to a persisted row id.
     getItemKey: (index) => index,
     anchorTo: "end",
     followOnAppend: true,
+    // TanStack's chat docs recommend `initialOffset` for restored screens.
+    // `EventRows` mounts after the SQLite count query is ready, so a reload of
+    // an already-populated local mirror is a restored screen: start near the
+    // estimated end. For fresh/tiny streams omit the option entirely so live
+    // append behavior stays on TanStack's normal `followOnAppend` path.
+    ...(initialScrollOffset.current === 0 ? {} : { initialOffset: initialScrollOffset.current }),
     paddingStart: topScrollAffordanceHeight,
     scrollEndThreshold: 80,
     overscan: 24,
@@ -960,17 +979,17 @@ function SubscriptionTool({
   const serverActionBusy = actionFeedback === "killing" || actionFeedback === "resetting";
 
   return (
-    <section className="border-b border-slate-200 py-4 first:pt-0">
-      <h2 className="mb-3 text-sm font-semibold text-slate-900">Subscription</h2>
-      <dl className="grid gap-1 text-xs">
+    <section className="grid gap-2 py-4 first:pt-0">
+      <h2 className="m-0 text-[11px] font-semibold uppercase tracking-[0.04em] text-[#98a2b3]">Subscription</h2>
+      <dl className="m-0 grid gap-1 text-xs [&_dd]:m-0 [&_div]:flex [&_div]:items-center [&_div]:justify-between [&_dt]:text-[11px] [&_dt]:font-medium [&_dt]:text-[#98a2b3]">
         <div title="Connection to the stream Durable Object over a capnweb WebSocket: connecting → connected → subscribing → subscribed (or reconnecting / error).">
           <dt>Status</dt>
           <dd>
             <output
               className={
                 snapshot.connectionStatus === "error"
-                  ? "font-mono text-xs text-slate-500 text-red-700"
-                  : "font-mono text-xs text-slate-500"
+                  ? "whitespace-nowrap font-mono text-[11px] text-[#b42318]"
+                  : "whitespace-nowrap font-mono text-[11px] text-[#263142]"
               }
               data-testid="stream-status"
             >
@@ -981,14 +1000,14 @@ function SubscriptionTool({
         <div title="This tab's role in the Web Locks election. leader = the single writer (it subscribes to the stream and writes events into the shared local DB); follower = a reader that mirrors the leader's writes from the same on-disk DB; electing/idle = before a role is assigned.">
           <dt>Subscription</dt>
           <dd>
-            <output className="font-mono text-xs text-slate-500" data-testid="subscription-status">{snapshot.subscriptionStatus}</output>
+            <output className="whitespace-nowrap font-mono text-[11px] text-[#263142]" data-testid="subscription-status">{snapshot.subscriptionStatus}</output>
           </dd>
         </div>
         {snapshot.connectionError === undefined ? null : (
           <div title="The most recent connection or subscription error, if any.">
             <dt>Error</dt>
             <dd>
-              <output className="font-mono text-xs text-slate-500 text-red-700 whitespace-normal break-words">
+              <output className="block max-w-[150px] break-words text-right font-mono text-[11px] text-[#b42318]">
                 {snapshot.connectionError}
               </output>
             </dd>
@@ -997,13 +1016,13 @@ function SubscriptionTool({
         <div title="Number of events stored in this tab's local SQLite mirror (one row per stream offset).">
           <dt>Events</dt>
           <dd>
-            <output className="font-mono text-xs text-slate-500" data-testid="event-count">{eventCount}</output>
+            <output className="whitespace-nowrap font-mono text-[11px] text-[#263142]" data-testid="event-count">{eventCount}</output>
           </dd>
         </div>
         <div title="Whether the page is crossOriginIsolated (the COOP+COEP / SharedArrayBuffer mode). Deliberately false: wa-sqlite's OPFSCoopSyncVFS needs no isolation, and enabling it would re-introduce the SharedArrayBuffer OPFS deadlock. Not a problem — it's expected.">
           <dt>Cross-origin isolated</dt>
           <dd>
-            <output className="font-mono text-xs text-slate-500">
+            <output className="whitespace-nowrap font-mono text-[11px] text-[#263142]">
               {String(snapshot.databaseInfo?.crossOriginIsolated ?? false)}
             </output>
           </dd>
@@ -1011,7 +1030,7 @@ function SubscriptionTool({
         <div title="Where the SQLite database lives. opfs = the browser's Origin Private File System — a real file on disk that survives reloads.">
           <dt>Storage</dt>
           <dd>
-            <output className="font-mono text-xs text-slate-500">
+            <output className="whitespace-nowrap font-mono text-[11px] text-[#263142]">
               {snapshot.databaseInfo?.storageType ?? "pending"}
             </output>
           </dd>
@@ -1019,7 +1038,7 @@ function SubscriptionTool({
         <div title="Whether the browser granted eviction-protected ('persistent') storage to this origin. false = best-effort: the data IS saved to disk, but the browser may evict it under storage pressure. Chrome only grants this to engaged/installed origins; there's no API to force it.">
           <dt>Persisted</dt>
           <dd>
-            <output className="font-mono text-xs text-slate-500">
+            <output className="whitespace-nowrap font-mono text-[11px] text-[#263142]">
               {String(snapshot.databaseInfo?.persisted ?? false)}
             </output>
           </dd>
@@ -1027,7 +1046,7 @@ function SubscriptionTool({
         <div title="On-disk size of this tab's local SQLite database file.">
           <dt>DB file size</dt>
           <dd>
-            <output className="font-mono text-xs text-slate-500">
+            <output className="whitespace-nowrap font-mono text-[11px] text-[#263142]">
               {formatByteSize(snapshot.databaseInfo?.databaseSizeBytes ?? 0)}
             </output>
           </dd>
@@ -1035,7 +1054,7 @@ function SubscriptionTool({
       </dl>
       <div className="flex flex-wrap gap-1.5">
         <button
-          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
+          className="min-h-0 flex-[1_1_calc(50%_-_3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={actionFeedback === "downloading" || serverActionBusy}
           type="button"
           onClick={() => {
@@ -1049,7 +1068,7 @@ function SubscriptionTool({
           Download
         </button>
         <button
-          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
+          className="min-h-0 flex-[1_1_calc(50%_-_3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={actionFeedback === "clearing" || serverActionBusy}
           type="button"
           onClick={() => {
@@ -1063,7 +1082,7 @@ function SubscriptionTool({
           Clear local
         </button>
         <button
-          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
+          className="min-h-0 flex-[1_1_calc(50%_-_3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={serverActionBusy}
           title="Abort the stream DO; durable log is kept and a woken event is appended on restart."
           type="button"
@@ -1078,7 +1097,7 @@ function SubscriptionTool({
           Kill
         </button>
         <button
-          className="min-h-0 flex-[1_1_calc(50%-3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
+          className="min-h-0 flex-[1_1_calc(50%_-_3px)] cursor-pointer whitespace-nowrap rounded border border-[#d8dde4] bg-white px-1.5 py-1 text-center text-[11px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
           disabled={serverActionBusy}
           title="Wipe all stream DO storage, then abort — next connection starts a fresh stream."
           type="button"
@@ -1097,8 +1116,8 @@ function SubscriptionTool({
         <output
           className={
             actionFeedback === "error"
-              ? "min-h-5 text-xs text-slate-500 text-red-700"
-              : "min-h-5 text-xs text-slate-500"
+              ? "min-h-4 font-mono text-xs uppercase text-[#b42318]"
+              : "min-h-4 font-mono text-xs uppercase text-[#667085]"
           }
         >
           {actionFeedback}
@@ -1235,12 +1254,12 @@ function InsertEventsTool({
   }
 
   return (
-    <section className="border-b border-slate-200 py-4 first:pt-0">
-      <h2 className="mb-3 text-sm font-semibold text-slate-900">Insert events</h2>
-      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+    <section className="mt-4 grid gap-2 py-4 first:pt-0">
+      <h2 className="m-0 text-[11px] font-semibold uppercase tracking-[0.04em] text-[#98a2b3]">Insert events</h2>
+      <label className="grid gap-1 text-[11px] font-medium text-[#667085]">
         <span>Count</span>
         <input
-          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
+          className="min-w-0 rounded-md border border-[#e1e5eb] bg-white/70 px-2 py-1.5 font-mono text-xs"
           min="1"
           step="1"
           type="number"
@@ -1253,10 +1272,10 @@ function InsertEventsTool({
           }
         />
       </label>
-      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+      <label className="grid gap-1 text-[11px] font-medium text-[#667085]">
         <span>Seconds</span>
         <input
-          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
+          className="min-w-0 rounded-md border border-[#e1e5eb] bg-white/70 px-2 py-1.5 font-mono text-xs"
           min="0"
           step="0.1"
           type="number"
@@ -1269,10 +1288,10 @@ function InsertEventsTool({
           }
         />
       </label>
-      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+      <label className="grid gap-1 text-[11px] font-medium text-[#667085]">
         <span>Batch size</span>
         <input
-          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
+          className="min-w-0 rounded-md border border-[#e1e5eb] bg-white/70 px-2 py-1.5 font-mono text-xs"
           min="1"
           step="1"
           type="number"
@@ -1285,10 +1304,10 @@ function InsertEventsTool({
           }
         />
       </label>
-      <label className="grid gap-1.5 text-xs font-medium text-slate-600">
+      <label className="grid gap-1 text-[11px] font-medium text-[#667085]">
         <span>appendBatch response</span>
         <select
-          className="min-w-0 rounded-md border border-slate-300 px-2.5 py-2 font-mono text-sm"
+          className="min-w-0 rounded-md border border-[#e1e5eb] bg-white/70 px-2 py-1.5 font-mono text-xs"
           value={insertState.appendResponseMode}
           onChange={(event) =>
             dispatchInsertState({
@@ -1308,14 +1327,14 @@ function InsertEventsTool({
         </select>
       </label>
       <button
-        className="cursor-pointer whitespace-nowrap rounded-md bg-blue-600 px-3 py-2 text-sm font-semibold text-white no-underline disabled:cursor-not-allowed disabled:opacity-55"
+        className="cursor-pointer whitespace-nowrap rounded-md bg-[#1f6feb] px-3 py-2 text-[13px] font-semibold text-white no-underline disabled:cursor-default disabled:opacity-55"
         disabled={insertState.insertState === "inserting"}
         type="button"
         onClick={() => void insertRandomEvents()}
       >
         Stream random events
       </button>
-      <output className="min-h-5 text-xs text-slate-500" data-testid="insert-state">{insertState.insertState}</output>
+      <output className="min-h-4 font-mono text-xs uppercase text-[#667085]" data-testid="insert-state">{insertState.insertState}</output>
     </section>
   );
 }

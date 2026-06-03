@@ -6,9 +6,9 @@
 // per-tab connections of every open tab, so each tab reads locally and only ONE tab
 // (elected via Web Locks on the main thread) writes.
 //
-// This worker is intentionally generic: it speaks `exec` / `batch` / `export`. The
-// stream-specific schema lives on the main thread in stream-browser-db.ts, where it is
-// easier to read next to the browser stream runtime.
+// This worker is intentionally generic: it speaks `exec` / `batch` / `export`. Table
+// schemas are owned by browser stream processors and run through the same `exec` /
+// `batch` surface on the main thread.
 import SQLiteESMFactory from "@journeyapps/wa-sqlite/dist/wa-sqlite.mjs";
 import wasmUrl from "@journeyapps/wa-sqlite/dist/wa-sqlite.wasm?url";
 import { Factory } from "@journeyapps/wa-sqlite";
