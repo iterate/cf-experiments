@@ -58,11 +58,6 @@ function HydratedStreamPage({ streamPath }: { streamPath: string }) {
 function StreamHydrationFallback({ streamPath }: { streamPath: string }) {
   return (
     <main className="stream-page">
-      <StreamTopBar
-        sidebarOpen={false}
-        streamPath={streamPath}
-        onSidebarOpenChange={() => {}}
-      />
       <div className="stream-page__hydrate">
         <div className="stream-page__spinner" aria-hidden="true" />
         <span>SSR done, hydrating client</span>
@@ -130,29 +125,44 @@ function StreamPageLayout({
   databaseStatus: "pending" | "ok" | "error";
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => globalThis.matchMedia("(min-width: 761px)").matches,
+  );
 
   return (
     <main className="stream-page">
-      <StreamTopBar
-        key={`top:${streamPath}`}
-        sidebarOpen={sidebarOpen}
-        streamPath={streamPath}
-        onSidebarOpenChange={setSidebarOpen}
-      />
-      <StreamSidebar
-        className={sidebarOpen ? "stream-page__sidebar--open" : undefined}
-        eventCount={eventCount}
-        key={`sidebar:${streamPath}`}
-        snapshot={snapshot}
-        sqliteWriteMode={sqliteWriteMode}
-        streamDatabase={streamDatabase}
-        streamStore={streamStore}
-        streamPath={streamPath}
-        onSqliteWriteModeChange={onSqliteWriteModeChange}
-      />
       <div className="stream-page__body">
-        <div className="stream-page__main">
+        <StreamSidebar
+          className={sidebarOpen ? undefined : "stream-page__sidebar--hidden"}
+          eventCount={eventCount}
+          key={`sidebar:${streamPath}`}
+          snapshot={snapshot}
+          sqliteWriteMode={sqliteWriteMode}
+          streamDatabase={streamDatabase}
+          streamStore={streamStore}
+          streamPath={streamPath}
+          onSidebarOpenChange={setSidebarOpen}
+          onSqliteWriteModeChange={onSqliteWriteModeChange}
+        />
+        <div
+          className={
+            sidebarOpen
+              ? "stream-page__main"
+              : "stream-page__main stream-page__main--sidebar-hidden"
+          }
+        >
+          {sidebarOpen ? null : (
+            <button
+              aria-controls="stream-sidebar"
+              aria-label="Show sidebar"
+              className="stream-page__sidebar-button stream-page__show-sidebar-button"
+              title="Show sidebar"
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+            >
+              <SidebarIcon />
+            </button>
+          )}
           {!databaseReady ? (
             <StreamLoadingPanel
               message={
@@ -191,13 +201,65 @@ function StreamLoadingPanel({ message }: { message: string }) {
   );
 }
 
+function EditStreamIcon() {
+  return (
+    <svg
+      aria-hidden
+      className="stream-page__edit-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function SidebarIcon() {
+  return (
+    <svg
+      aria-hidden
+      className="stream-page__sidebar-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect height="18" rx="2" width="18" x="3" y="3" />
+      <path d="M9 3v18" />
+    </svg>
+  );
+}
+
+function AppendEventIcon() {
+  return (
+    <svg
+      aria-hidden
+      className="stream-page__append-icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M22 2 11 13" />
+      <path d="m22 2-7 20-4-9-9-4Z" />
+    </svg>
+  );
+}
+
 function StreamTopBar({
   streamPath,
-  sidebarOpen,
   onSidebarOpenChange,
 }: {
   streamPath: string;
-  sidebarOpen: boolean;
   onSidebarOpenChange(open: boolean): void;
 }) {
   const navigate = useNavigate();
@@ -248,73 +310,70 @@ function StreamTopBar({
 
   return (
     <header className="stream-page__top-bar">
+      <button
+        aria-controls="stream-sidebar"
+        aria-label="Hide sidebar"
+        className="stream-page__sidebar-button stream-page__hide-sidebar-button"
+        title="Hide sidebar"
+        type="button"
+        onClick={() => onSidebarOpenChange(false)}
+      >
+        <SidebarIcon />
+      </button>
       <div className="stream-page__controls">
-        {editingPath ? (
-          <>
-            <input
-              aria-label="Stream path"
-              className="stream-page__input stream-page__path-input"
-              id="stream-path"
-              ref={pathInputRef}
-              value={editedPath}
-              onChange={(event) => setEditedPath(event.currentTarget.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
+        <div className="stream-page__path-area">
+          {editingPath ? (
+            <>
+              <input
+                aria-label="Stream path"
+                className="stream-page__input stream-page__path-input"
+                id="stream-path"
+                ref={pathInputRef}
+                value={editedPath}
+                onChange={(event) => setEditedPath(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    cancelEditingPath();
+                    return;
+                  }
+                  if (event.key !== "Enter") return;
                   event.preventDefault();
-                  cancelEditingPath();
-                  return;
-                }
-                if (event.key !== "Enter") return;
-                event.preventDefault();
-                goToDraftPath();
-              }}
-            />
-            <button
-              className="stream-page__button stream-page__path-submit"
-              disabled={!pathChanged}
-              type="button"
-              onClick={() => goToDraftPath()}
-            >
-              Go
-            </button>
-          </>
+                  goToDraftPath();
+                }}
+              />
+              <button
+                className="stream-page__button stream-page__path-submit"
+                disabled={!pathChanged}
+                type="button"
+                onClick={() => goToDraftPath()}
+              >
+                Go
+              </button>
+            </>
+          ) : (
+            <span className="stream-page__path-display">{streamPath}</span>
+          )}
+        </div>
+        {editingPath ? (
+          <button
+            className="stream-page__text-link"
+            type="button"
+            onClick={() => cancelEditingPath()}
+          >
+            Cancel
+          </button>
         ) : (
           <button
-            className="stream-page__path-headline"
+            aria-label="Edit stream path"
+            className="stream-page__edit-button"
+            title="Edit stream path"
             type="button"
             onClick={() => startEditingPath()}
           >
-            {streamPath}
+            <EditStreamIcon />
           </button>
         )}
-        {editingPath ? null : (
-          <button
-            aria-label="Go to another stream path"
-            className="stream-page__top-bar-button stream-page__path-navigate"
-            type="button"
-            onClick={() => startEditingPath()}
-          >
-            <span aria-hidden>✎</span>
-          </button>
-        )}
-        <button
-          aria-controls="stream-sidebar"
-          aria-expanded={sidebarOpen}
-          aria-label={sidebarOpen ? "Hide tools" : "Show tools"}
-          className={
-            sidebarOpen
-              ? "stream-page__top-bar-button stream-page__sidebar-toggle stream-page__sidebar-toggle--open"
-              : "stream-page__top-bar-button stream-page__sidebar-toggle"
-          }
-          type="button"
-          onClick={() => onSidebarOpenChange(!sidebarOpen)}
-        >
-          <span aria-hidden className="stream-page__menu-icon">
-            <span />
-            <span />
-            <span />
-          </span>
-        </button>
       </div>
     </header>
   );
@@ -333,10 +392,13 @@ function EventRows({
   streamPath: string;
   streamStore: StreamBrowserStore;
 }) {
+  const topScrollAffordanceHeight = 48;
   const parentRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
   const settledInitialEndScroll = useRef(false);
   const previousEventCount = useRef(eventCount);
   const userHasMovedAwayFromEnd = useRef(false);
+  const [footerHeight, setFooterHeight] = useState(0);
   const [expandedOffsets, setExpandedOffsets] = useState(() => new Set<number>());
   const [scrollState, dispatchScrollState] = useReducer(
     (
@@ -379,18 +441,39 @@ function EventRows({
     getItemKey: (index) => index,
     anchorTo: "end",
     followOnAppend: true,
+    paddingStart: topScrollAffordanceHeight,
+    paddingEnd: footerHeight,
     scrollEndThreshold: 80,
     overscan: 6,
     onChange(instance) {
+      const scrollElement = parentRef.current;
+      const distanceFromEnd =
+        scrollElement === null
+          ? 0
+          : scrollElement.scrollHeight - scrollElement.clientHeight - scrollElement.scrollTop;
       const nextScrollPosition = {
         isAtTop: (instance.scrollOffset ?? 0) <= 4,
-        isAtEnd: instance.isAtEnd(),
+        isAtEnd: distanceFromEnd <= 4,
       };
       if (nextScrollPosition.isAtEnd) userHasMovedAwayFromEnd.current = false;
       dispatchScrollState({ type: "set-scroll-position", scrollPosition: nextScrollPosition });
     },
   });
   const virtualItems = virtualizer.getVirtualItems();
+
+  useLayoutEffect(() => {
+    const footerElement = footerRef.current;
+    if (footerElement === null) return;
+
+    function updateFooterHeight(element: HTMLDivElement) {
+      setFooterHeight(Math.ceil(element.getBoundingClientRect().height));
+    }
+
+    updateFooterHeight(footerElement);
+    const resizeObserver = new ResizeObserver(() => updateFooterHeight(footerElement));
+    resizeObserver.observe(footerElement);
+    return () => resizeObserver.disconnect();
+  }, []);
 
   useLayoutEffect(() => {
     const appendedEventCount = Math.max(0, eventCount - previousEventCount.current);
@@ -417,6 +500,7 @@ function EventRows({
 
   const showBottomFade = eventCount > 0 && !scrollState.scrollPosition.isAtEnd;
   const showScrollToBottom = eventCount > 0 && !scrollState.scrollPosition.isAtEnd;
+  const showScrollToTop = eventCount > 0 && !scrollState.scrollPosition.isAtTop;
 
   function stopFollowingEnd() {
     userHasMovedAwayFromEnd.current = true;
@@ -424,6 +508,24 @@ function EventRows({
 
   return (
     <div className="stream-page__feed">
+      {showScrollToTop ? (
+        <div className="stream-page__feed-top-fade">
+          <div className="stream-page__feed-top-fade-mask" aria-hidden />
+          <div className="stream-page__scroll-affordance stream-page__scroll-affordance--in-top-fade">
+            <button
+              aria-label="Scroll to top"
+              className="stream-page__scroll-button"
+              type="button"
+              onClick={() => {
+                stopFollowingEnd();
+                virtualizer.scrollToOffset(0);
+              }}
+            >
+              ↑
+            </button>
+          </div>
+        </div>
+      ) : null}
       <section
         aria-label="Stream events"
         className={
@@ -457,21 +559,6 @@ function EventRows({
           </div>
         ) : (
           <>
-            {!scrollState.scrollPosition.isAtTop ? (
-              <div className="stream-page__scroll-affordance stream-page__scroll-affordance--top">
-                <button
-                  aria-label="Scroll to top"
-                  className="stream-page__scroll-button"
-                  type="button"
-                  onClick={() => {
-                    stopFollowingEnd();
-                    virtualizer.scrollToIndex(0, { align: "start" });
-                  }}
-                >
-                  ↑
-                </button>
-              </div>
-            ) : null}
             <div
               className="stream-page__virtual-content"
               style={{ height: virtualizer.getTotalSize() }}
@@ -498,7 +585,7 @@ function EventRows({
           </>
         )}
       </section>
-      <div className="stream-page__feed-footer">
+      <div className="stream-page__feed-footer" ref={footerRef}>
         {showBottomFade ? (
           <div className="stream-page__feed-fade">
             <div className="stream-page__feed-fade-mask" aria-hidden />
@@ -588,10 +675,15 @@ function EventRowWindow({
   return virtualItems.map((virtualItem) => {
     const event = rowsByVirtualizerIndex.get(virtualItem.index);
     const isExpanded = event !== undefined && expandedOffsets.has(event.offset);
+    const isLastEventRow = virtualItem.index === eventCount - 1;
 
     return (
       <div
-        className="stream-page__virtual-row"
+        className={
+          isLastEventRow
+            ? "stream-page__virtual-row stream-page__virtual-row--last"
+            : "stream-page__virtual-row"
+        }
         data-index={virtualItem.index}
         key={virtualItem.key}
         ref={measureElement}
@@ -600,7 +692,13 @@ function EventRowWindow({
         {event === undefined ? (
           <article className="stream-page__event-row stream-page__event-row--pending" />
         ) : (
-          <article className="stream-page__event-row">
+          <article
+            className={
+              isExpanded
+                ? "stream-page__event-row stream-page__event-row--expanded"
+                : "stream-page__event-row stream-page__event-row--collapsed"
+            }
+          >
             <button
               aria-expanded={isExpanded}
               className="stream-page__event-meta"
@@ -629,6 +727,7 @@ function StreamSidebar({
   streamDatabase,
   streamStore,
   eventCount,
+  onSidebarOpenChange,
   onSqliteWriteModeChange,
 }: {
   className?: string;
@@ -638,6 +737,7 @@ function StreamSidebar({
   streamDatabase: StreamBrowserDatabase;
   streamStore: StreamBrowserStore;
   eventCount: number;
+  onSidebarOpenChange(open: boolean): void;
   onSqliteWriteModeChange(writeMode: StreamDatabaseWriteMode): void;
 }) {
   return (
@@ -645,6 +745,7 @@ function StreamSidebar({
       className={className === undefined ? "stream-page__sidebar" : `stream-page__sidebar ${className}`}
       id="stream-sidebar"
     >
+      <StreamTopBar streamPath={streamPath} onSidebarOpenChange={onSidebarOpenChange} />
       <SubscriptionTool
         eventCount={eventCount}
         snapshot={snapshot}
@@ -672,10 +773,10 @@ function SubscriptionTool({
   streamStore: StreamBrowserStore;
   eventCount: number;
 }) {
-  const [databaseActionState, setDatabaseActionState] = useState<
-    "idle" | "downloading" | "clearing" | "done" | "error"
+  const [actionFeedback, setActionFeedback] = useState<
+    "idle" | "downloading" | "clearing" | "killing" | "resetting" | "done" | "error"
   >("idle");
-  const [killActionState, setKillActionState] = useState<"idle" | "killing" | "sent">("idle");
+  const serverActionBusy = actionFeedback === "killing" || actionFeedback === "resetting";
 
   return (
     <section className="stream-page__tool">
@@ -750,59 +851,77 @@ function SubscriptionTool({
           </dd>
         </div>
       </dl>
-      <div className="stream-page__button-row">
+      <div className="stream-page__action-grid">
         <button
           className="stream-page__button"
-          disabled={databaseActionState === "downloading"}
+          disabled={actionFeedback === "downloading" || serverActionBusy}
           type="button"
           onClick={() => {
-            setDatabaseActionState("downloading");
+            setActionFeedback("downloading");
             void streamDatabase.download().then(
-              () => setDatabaseActionState("done"),
-              () => setDatabaseActionState("error"),
+              () => setActionFeedback("done"),
+              () => setActionFeedback("error"),
             );
           }}
         >
-          Download DB
+          Download
         </button>
         <button
-          className="stream-page__button stream-page__button--secondary"
-          disabled={databaseActionState === "clearing"}
+          className="stream-page__button"
+          disabled={actionFeedback === "clearing" || serverActionBusy}
           type="button"
           onClick={() => {
-            setDatabaseActionState("clearing");
+            setActionFeedback("clearing");
             void streamStore.clearLocalDatabase().then(
-              () => setDatabaseActionState("done"),
-              () => setDatabaseActionState("error"),
+              () => setActionFeedback("done"),
+              () => setActionFeedback("error"),
             );
           }}
         >
-          Clear local DB
+          Clear local
         </button>
         <button
-          className="stream-page__button stream-page__button--danger"
-          disabled={killActionState === "killing"}
+          className="stream-page__button"
+          disabled={serverActionBusy}
+          title="Abort the stream DO; durable log is kept and a woken event is appended on restart."
           type="button"
           onClick={() => {
-            setKillActionState("killing");
+            setActionFeedback("killing");
             void streamStore.kill().then(
-              () => setKillActionState("sent"),
-              () => setKillActionState("sent"),
+              () => setActionFeedback("done"),
+              () => setActionFeedback("error"),
             );
           }}
         >
-          Kill stream
+          Kill
+        </button>
+        <button
+          className="stream-page__button"
+          disabled={serverActionBusy}
+          title="Wipe all stream DO storage, then abort — next connection starts a fresh stream."
+          type="button"
+          onClick={() => {
+            setActionFeedback("resetting");
+            void streamStore.reset().then(
+              () => setActionFeedback("done"),
+              () => setActionFeedback("error"),
+            );
+          }}
+        >
+          Reset
         </button>
       </div>
-      <output
-        className={
-          databaseActionState === "error"
-            ? "stream-page__insert-state stream-page__insert-state--error"
-          : "stream-page__insert-state"
-        }
-      >
-        {killActionState === "idle" ? databaseActionState : killActionState}
-      </output>
+      {actionFeedback === "idle" ? null : (
+        <output
+          className={
+            actionFeedback === "error"
+              ? "stream-page__insert-state stream-page__insert-state--error"
+              : "stream-page__insert-state"
+          }
+        >
+          {actionFeedback}
+        </output>
+      )}
     </section>
   );
 }
@@ -1072,31 +1191,30 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
 
   return (
     <section className="stream-page__composer" aria-label="Append event">
-      <textarea
-        aria-label="Event JSON"
-        className="stream-page__textarea"
-        spellCheck={false}
-        value={composerText}
-        onChange={(event) => setComposerText(event.currentTarget.value)}
-      />
-      <div className="stream-page__composer-actions">
+      <div className="stream-page__composer-input">
+        <textarea
+          aria-label="Event JSON"
+          className="stream-page__textarea"
+          spellCheck={false}
+          value={composerText}
+          onChange={(event) => setComposerText(event.currentTarget.value)}
+        />
         <button
-          className="stream-page__button"
+          aria-label={
+            appendState === "error" ? "Append failed; retry append event" : "Append event"
+          }
+          title={appendState === "appending" ? "Appending" : "Append event"}
+          className={
+            appendState === "error"
+              ? "stream-page__composer-submit stream-page__composer-submit--error"
+              : "stream-page__composer-submit"
+          }
           disabled={appendState === "appending"}
           type="button"
           onClick={() => void appendComposerEvent()}
         >
-          Append
+          <AppendEventIcon />
         </button>
-        <output
-          className={
-            appendState === "error"
-              ? "stream-page__insert-state stream-page__insert-state--error"
-              : "stream-page__insert-state"
-          }
-        >
-          {appendState}
-        </output>
       </div>
     </section>
   );
