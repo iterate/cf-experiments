@@ -61,7 +61,7 @@ Use the browser client library with a full stream URL:
 ```ts
 import { connectStream } from "./src/browser/connect.js";
 
-await using connection = await connectStream({ url: "wss://stream-staging-area.iterate-dev-preview.workers.dev/stream/example" });
+await using connection = await connectStream({ url: "wss://stream-staging-area.iterate-dev-preview.workers.dev/api/streams/example" });
 const event = await connection.stream.append({ event: { type: "example", payload: {} } });
 ```
 

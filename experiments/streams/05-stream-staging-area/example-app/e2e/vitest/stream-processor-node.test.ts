@@ -126,8 +126,13 @@ async function waitUntil(predicate: () => boolean, timeoutMs: number) {
 
 function toStreamWebSocketUrl(path: string) {
   const url = new URL(workerUrl);
-  url.pathname = `/stream/${encodeURIComponent(path)}`;
+  url.pathname = streamApiPath(path);
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   return url.toString();
+}
+
+function streamApiPath(path: string) {
+  if (path === "" || path === "/") return "/api/streams";
+  return `/api/streams/${path.startsWith("/") ? encodeURIComponent(path) : path.split("/").map(encodeURIComponent).join("/")}`;
 }

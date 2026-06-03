@@ -13,8 +13,11 @@ export default createServerEntry({
       return env.STREAM_PROCESSOR_RUNNER.getByName(name).fetch(request);
     }
 
-    if (url.pathname.startsWith("/stream/")) {
-      const path = decodeURIComponent(url.pathname.slice("/stream/".length));
+    if (url.pathname === "/api/streams" || url.pathname.startsWith("/api/streams/")) {
+      const path =
+        url.pathname === "/api/streams"
+          ? "/"
+          : decodeURIComponent(url.pathname.slice("/api/streams/".length));
       // Stream DOs are named `${namespace}:${path}`; the browser namespace is "default".
       return env.STREAM.getByName(`default:${path}`).fetch(request);
     }

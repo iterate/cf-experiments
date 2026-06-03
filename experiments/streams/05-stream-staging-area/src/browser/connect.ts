@@ -32,3 +32,10 @@ export async function connectStream(args: {
   );
   return streamConnectionFromWebSocket(webSocket);
 }
+
+/** HTTP URL path for the browser Stream Durable Object RPC endpoint. */
+export function streamRpcPath(streamPath: string) {
+  const normalized = streamPath === "" ? "/" : streamPath.startsWith("/") ? streamPath : `/${streamPath}`;
+  if (normalized === "/") return "/api/streams";
+  return `/api/streams/${encodeURIComponent(normalized)}`;
+}

@@ -14,7 +14,7 @@
 
 import type { RpcPromise, RpcStub } from "capnweb";
 import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event";
-import { connectStream, type StreamBrowserConnectionStatus } from "./connect.js";
+import { connectStream, streamRpcPath, type StreamBrowserConnectionStatus } from "./connect.js";
 import { createProcessorRunner } from "../processor-runner.js";
 import type { Processor } from "../processor.js";
 import type { StreamPersistedProcessorState, StreamRpc } from "../types.js";
@@ -258,7 +258,7 @@ function createStreamRuntime(
 
   function connect() {
     if (stream !== undefined || disposed) return;
-    const streamUrl = new URL(`/stream/${args.streamPath}`, window.location.href);
+    const streamUrl = new URL(streamRpcPath(args.streamPath), window.location.href);
 
     void connectStream({
       url: streamUrl,

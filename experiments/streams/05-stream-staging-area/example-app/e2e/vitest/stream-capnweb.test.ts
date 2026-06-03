@@ -711,10 +711,15 @@ function newRecordingWebSocket(url: string, wsMessages: WsMessage[]) {
 
 function toStreamWebSocketUrl(path: string) {
   const url = new URL(workerUrl);
-  url.pathname = `/stream/${path}`;
+  url.pathname = streamApiPath(path);
   if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol === "https:") url.protocol = "wss:";
   return url.toString();
+}
+
+function streamApiPath(path: string) {
+  if (path === "" || path === "/") return "/api/streams";
+  return `/api/streams/${path.startsWith("/") ? encodeURIComponent(path) : path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 function toStreamProcessorRunnerWebSocketUrl(path: string) {

@@ -403,7 +403,7 @@ Created `stream-staging-area` as the CapnWeb-only staging version of the handwri
 experiment.
 
 Converted the worker entrypoint into a minimal TanStack Start React app using Vite and the
-Cloudflare Vite plugin. The same worker still dispatches `/stream/*` and
+Cloudflare Vite plugin. The same worker still dispatches `/api/streams/*` and
 `/stream-processor-runner/*` to the stream Durable Objects before falling back to the React app.
 
 Verification:
