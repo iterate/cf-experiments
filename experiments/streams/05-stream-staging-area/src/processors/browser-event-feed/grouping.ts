@@ -33,7 +33,20 @@ export type OpenGroup = {
   lastOffset: number;
   eventCount: number;
   eventType: string;
+  /** Full committed events in this group row, in offset order. */
+  events: StreamEvent[];
 };
+
+export type GroupFeedData = {
+  eventType: string;
+  events: StreamEvent[];
+};
+
+export type SingletonFeedData = {
+  events: StreamEvent[];
+};
+
+export type FeedItemData = GroupFeedData | SingletonFeedData;
 
 export type FeedState = {
   /** The current open, extendable group row, or null when the last row is a singleton. */
@@ -52,14 +65,14 @@ export type FeedOp =
       firstOffset: number;
       lastOffset: number;
       eventCount: number;
-      data: unknown;
+      data: FeedItemData;
     }
   | {
       kind: "update";
       localIndex: number;
       lastOffset: number;
       eventCount: number;
-      data: unknown;
+      data: GroupFeedData;
     };
 
 /**
@@ -87,7 +100,7 @@ export function planFeedOps(
         firstOffset: event.offset,
         lastOffset: event.offset,
         eventCount: 1,
-        data: event.payload ?? {},
+        data: { events: [event] },
       });
       nextLocalIndex += 1;
       open = null;
@@ -96,24 +109,32 @@ export function planFeedOps(
 
     if (open !== null && open.eventType === event.type) {
       // Extend the open group for this event type.
-      open = { ...open, lastOffset: event.offset, eventCount: open.eventCount + 1 };
+      const events = [...open.events, event];
+      open = {
+        ...open,
+        lastOffset: event.offset,
+        eventCount: open.eventCount + 1,
+        events,
+      };
       ops.push({
         kind: "update",
         localIndex: open.localIndex,
         lastOffset: open.lastOffset,
         eventCount: open.eventCount,
-        data: { eventType: open.eventType },
+        data: groupFeedData(open.eventType, events),
       });
       continue;
     }
 
     // Start a new group (no open row, or the type changed).
+    const events = [event];
     open = {
       localIndex: nextLocalIndex,
       firstOffset: event.offset,
       lastOffset: event.offset,
       eventCount: 1,
       eventType: event.type,
+      events,
     };
     nextLocalIndex += 1;
     ops.push({
@@ -123,9 +144,55 @@ export function planFeedOps(
       firstOffset: open.firstOffset,
       lastOffset: open.lastOffset,
       eventCount: open.eventCount,
-      data: { eventType: event.type },
+      data: groupFeedData(event.type, events),
     });
   }
 
   return { ops, endState: { open, nextLocalIndex } };
+}
+
+export function groupFeedData(eventType: string, events: readonly StreamEvent[]): GroupFeedData {
+  return { eventType, events: [...events] };
+}
+
+/** Read grouping metadata back out of a feed_items.data blob. */
+export function parseGroupFeedData(data: unknown): GroupFeedData | undefined {
+  const record = feedDataRecord(data);
+  if (record === undefined || typeof record.eventType !== "string") return undefined;
+  if (!Array.isArray(record.events)) return { eventType: record.eventType, events: [] };
+  const events = record.events.flatMap((entry) => {
+    if (entry === null || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    if (typeof row.offset !== "number" || typeof row.type !== "string" || typeof row.createdAt !== "string") {
+      return [];
+    }
+    return [
+      {
+        offset: row.offset,
+        type: row.type,
+        createdAt: row.createdAt,
+        ...(row.payload !== undefined ? { payload: row.payload } : {}),
+        ...(row.metadata !== undefined && row.metadata !== null && typeof row.metadata === "object"
+          ? { metadata: row.metadata as Record<string, unknown> }
+          : {}),
+        ...(row.source !== undefined ? { source: row.source as StreamEvent["source"] } : {}),
+        ...(typeof row.idempotencyKey === "string" ? { idempotencyKey: row.idempotencyKey } : {}),
+      },
+    ];
+  });
+  return { eventType: record.eventType, events };
+}
+
+function feedDataRecord(data: unknown): Record<string, unknown> | undefined {
+  if (data === null || typeof data !== "object") {
+    if (typeof data !== "string") return undefined;
+    try {
+      const parsed: unknown = JSON.parse(data);
+      if (parsed === null || typeof parsed !== "object") return undefined;
+      return parsed as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+  }
+  return data as Record<string, unknown>;
 }

@@ -7,13 +7,19 @@ import { implementProcessor } from "../../processor.js";
 import { createSchemaEnsurer } from "../../browser/ensure-schema-once.js";
 import type { SqlClient, SqlValue } from "../../browser/stream-browser-db.js";
 import { browserEventFeedContract } from "./contract.js";
-import { GROUP_COMPONENT, planFeedOps, type FeedOp, type FeedState } from "./grouping.js";
+import {
+  GROUP_COMPONENT,
+  parseGroupFeedData,
+  planFeedOps,
+  type FeedOp,
+  type FeedState,
+} from "./grouping.js";
 
 /** The table this processor owns. */
 export const BROWSER_EVENT_FEED_TABLE = "feed_items";
 
 /** Bumped into the writer-lock name so a feed_items schema change lets a fresh tab take over. */
-export const BROWSER_EVENT_FEED_SCHEMA_VERSION = 1;
+export const BROWSER_EVENT_FEED_SCHEMA_VERSION = 2;
 
 /**
  * Reconstruct the processor's resume cursor + grouping state purely from `feed_items`.
@@ -32,16 +38,19 @@ export async function loadBrowserEventFeedCheckpoint(
   if (row === undefined) return undefined;
   const localIndex = Number(row.local_index);
   const lastOffset = Number(row.last_offset);
+  const groupData =
+    row.component === GROUP_COMPONENT ? parseGroupFeedData(row.data) : undefined;
   const open =
-    row.component === GROUP_COMPONENT
-      ? {
+    groupData === undefined
+      ? null
+      : {
           localIndex,
           firstOffset: Number(row.first_offset),
           lastOffset,
           eventCount: Number(row.event_count),
-          eventType: feedItemEventType(row.data),
-        }
-      : null;
+          eventType: groupData.eventType,
+          events: groupData.events,
+        };
   return { state: { open, nextLocalIndex: localIndex + 1 }, offset: lastOffset };
 }
 
@@ -99,16 +108,7 @@ export const browserEventFeed = implementProcessor(
 );
 
 function feedItemEventType(data: unknown) {
-  if (typeof data !== "string") return "";
-  try {
-    const parsed: unknown = JSON.parse(data);
-    if (parsed !== null && typeof parsed === "object" && "eventType" in parsed) {
-      return typeof parsed.eventType === "string" ? parsed.eventType : "";
-    }
-  } catch {
-    return "";
-  }
-  return "";
+  return parseGroupFeedData(data)?.eventType ?? "";
 }
 
 function feedOpToStatement(op: FeedOp): { sql: string; params: SqlValue[] } {

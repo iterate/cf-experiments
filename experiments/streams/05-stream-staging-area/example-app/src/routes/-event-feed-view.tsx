@@ -1,9 +1,16 @@
 // The "event-feed" sibling view: grouped feed_items from the browser-event-feed processor.
 // Consecutive events of the same type collapse into one row; specific-renderer types
-// (created/woken) always get their own singleton row.
+// (created/woken) always get their own singleton row. Uses the same virtualized tail-following
+// scroll shell as the raw-events view.
 
 import { useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { acquireStreamRuntime } from "../../../src/browser/stream-browser-store.js";
+import { useVirtualizer, type VirtualItem } from "@tanstack/react-virtual";
+import {
+  acquireStreamRuntime,
+  type StreamBrowserSnapshot,
+  type StreamBrowserStore,
+} from "../../../src/browser/stream-browser-store.js";
+import type { StreamBrowserDatabase } from "../../../src/browser/stream-browser-db.js";
 import {
   BROWSER_EVENT_FEED_SCHEMA_VERSION,
   BROWSER_EVENT_FEED_TABLE,
@@ -43,15 +50,6 @@ export function EventFeedView({ streamPath }: { streamPath: string }) {
 
   const countResult = useStreamQuery(db, `SELECT COUNT(*) AS count FROM feed_items`);
   const itemCount = Number(countResult.data[0]?.count ?? 0);
-  const rowsResult = useStreamQuery(
-    db,
-    `SELECT local_index, component, first_offset, last_offset, event_count, json(data) AS data
-     FROM feed_items ORDER BY local_index ASC`,
-  );
-  const rows = rowsResult.data.flatMap((row) => {
-    const parsed = parseFeedItem(row);
-    return parsed === undefined ? [] : [parsed];
-  });
 
   if (countResult.status !== "ok") {
     return (
@@ -68,102 +66,404 @@ export function EventFeedView({ streamPath }: { streamPath: string }) {
   }
 
   return (
+    <FeedItemRows
+      itemCount={itemCount}
+      key={`feed:${streamPath}:${snapshot.clearVersion}`}
+      snapshot={snapshot}
+      streamDatabase={db}
+      streamPath={streamPath}
+      streamStore={store}
+    />
+  );
+}
+
+function FeedItemRows({
+  streamDatabase,
+  itemCount,
+  snapshot,
+  streamPath,
+  streamStore,
+}: {
+  streamDatabase: StreamBrowserDatabase;
+  itemCount: number;
+  snapshot: StreamBrowserSnapshot;
+  streamPath: string;
+  streamStore: StreamBrowserStore;
+}) {
+  const topScrollAffordanceHeight = 48;
+  const estimatedFeedRowHeight = 38;
+  const parentRef = useRef<HTMLDivElement>(null);
+  const previousItemCount = useRef(itemCount);
+  const settledInitialEndScroll = useRef(false);
+  const pendingTailScroll = useRef(false);
+  const initialScrollOffset = useRef(
+    itemCount > 50 ? topScrollAffordanceHeight + itemCount * estimatedFeedRowHeight : 0,
+  );
+  const [expandedLocalIndexes, setExpandedLocalIndexes] = useState(() => new Set<number>());
+  const [newItemCount, setNewItemCount] = useState(0);
+  const [scrollPosition, setScrollPosition] = useState({ isAtTop: true, isAtEnd: true });
+  const virtualizer = useVirtualizer({
+    count: itemCount,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => estimatedFeedRowHeight,
+    getItemKey: (index) => index,
+    anchorTo: "end",
+    followOnAppend: true,
+    ...(initialScrollOffset.current === 0 ? {} : { initialOffset: initialScrollOffset.current }),
+    paddingStart: topScrollAffordanceHeight,
+    scrollEndThreshold: 80,
+    overscan: 24,
+    directDomUpdates: true,
+    onChange(instance) {
+      const nextScrollPosition = {
+        isAtTop: (instance.scrollOffset ?? 0) <= 4,
+        isAtEnd: instance.isAtEnd(),
+      };
+      setScrollPosition((current) =>
+        current.isAtTop === nextScrollPosition.isAtTop &&
+          current.isAtEnd === nextScrollPosition.isAtEnd
+          ? current
+          : nextScrollPosition,
+      );
+    },
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+
+  useLayoutEffect(() => {
+    if (settledInitialEndScroll.current || itemCount === 0) return;
+    settledInitialEndScroll.current = true;
+    virtualizer.scrollToEnd();
+  }, [itemCount, virtualizer]);
+
+  useLayoutEffect(() => {
+    if (!pendingTailScroll.current) return;
+    pendingTailScroll.current = false;
+    virtualizer.scrollToEnd();
+    requestAnimationFrame(() => {
+      virtualizer.scrollToEnd();
+    });
+  }, [expandedLocalIndexes, itemCount, virtualizer]);
+
+  useLayoutEffect(() => {
+    const appendedCount = itemCount - previousItemCount.current;
+    const wasAtEnd = scrollPosition.isAtEnd;
+    previousItemCount.current = itemCount;
+    if (appendedCount <= 0) {
+      if (itemCount === 0) setNewItemCount(0);
+      return;
+    }
+    if (wasAtEnd) {
+      pendingTailScroll.current = true;
+      return;
+    }
+    setNewItemCount((current) => current + appendedCount);
+  }, [itemCount, scrollPosition.isAtEnd]);
+
+  useLayoutEffect(() => {
+    if (scrollPosition.isAtEnd) setNewItemCount(0);
+  }, [scrollPosition.isAtEnd]);
+
+  useLayoutEffect(() => {
+    const composerChrome = document.querySelector("[data-testid='stream-composer-chrome']");
+    if (!(composerChrome instanceof HTMLElement)) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
+    });
+    resizeObserver.observe(composerChrome);
+    return () => resizeObserver.disconnect();
+  }, [scrollPosition.isAtEnd]);
+
+  const showScrollToBottom = itemCount > 0 && !scrollPosition.isAtEnd;
+  const showScrollToTop = itemCount > 0 && !scrollPosition.isAtTop;
+
+  return (
     <div className="relative flex min-h-0 flex-1 flex-col">
+      {showScrollToTop ? (
+        <div className="pointer-events-none absolute left-0 right-3.5 top-11 z-10 flex h-12 items-start justify-center pt-2">
+          <div className="absolute inset-0 bg-gradient-to-b from-white via-white/80 to-transparent" aria-hidden />
+          <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 top-3">
+            <button
+              aria-label="Scroll to top"
+              className="pointer-events-auto grid size-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
+              type="button"
+              onClick={() => {
+                virtualizer.scrollToOffset(0);
+              }}
+            >
+              ↑
+            </button>
+          </div>
+        </div>
+      ) : null}
       <section
         aria-label="Event feed"
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-white pr-4"
         data-testid="event-feed"
-        className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-white pr-4 [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
       >
-        <div
-          className="sticky top-0 z-3 grid min-h-11 flex-none grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 border-b border-[#eef1f5] bg-white/95 pr-4 backdrop-blur-sm"
-          data-testid="feed-summary-bar"
+        <section
+          className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
+          data-testid="event-feed-scroll"
+          ref={parentRef}
         >
-          <span className="text-xs font-semibold text-[#667085]">Event feed</span>
-          <output className="whitespace-nowrap font-mono text-xs text-[#667085]" data-testid="feed-item-count">
-            {itemCount.toLocaleString()} feed {itemCount === 1 ? "item" : "items"}
-          </output>
-        </div>
-
-        {rows.length === 0 ? (
-          <div className="flex min-h-60 flex-1 items-center justify-center gap-2.5 text-sm text-slate-500">
-            {snapshot.connectionStatus === "subscribed" ? null : (
-              <div className="size-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
-            )}
-            <span>
-              {snapshot.connectionError === undefined
-                ? snapshot.connectionStatus === "subscribed"
-                  ? "No feed items yet"
-                  : `Stream connection is ${snapshot.connectionStatus}`
-                : `Stream connection is ${snapshot.connectionStatus}: ${snapshot.connectionError}`}
-            </span>
+          <div
+            className="sticky top-0 z-3 grid min-h-11 flex-none grid-cols-[minmax(0,1fr)_auto] items-center gap-2.5 border-b border-[#eef1f5] bg-white/95 pr-4 backdrop-blur-sm"
+            data-testid="feed-summary-bar"
+          >
+            <span className="text-xs font-semibold text-[#667085]">Event feed</span>
+            <output className="whitespace-nowrap font-mono text-xs text-[#667085]" data-testid="feed-item-count">
+              {itemCount.toLocaleString()} feed {itemCount === 1 ? "item" : "items"}
+            </output>
           </div>
-        ) : (
-          <div className="flex-1 pb-2">
-            {rows.map((row, index) => (
-              <FeedItem key={row.local_index} isLast={index === rows.length - 1} row={row} />
-            ))}
-          </div>
-        )}
-
-        <div className="sticky bottom-0 z-[2] bg-white">
-          <FeedComposer streamStore={store} />
+          <FeedRuntimeNotice itemCount={itemCount} snapshot={snapshot} />
+          {itemCount === 0 ? (
+            <div className="flex min-h-60 flex-1 items-center justify-center gap-2.5 text-sm text-slate-500">
+              {snapshot.connectionStatus === "subscribed" ? null : (
+                <div className="size-4 animate-spin rounded-full border-2 border-slate-300 border-t-slate-600" aria-hidden="true" />
+              )}
+              <span>
+                {snapshot.connectionError === undefined
+                  ? snapshot.connectionStatus === "subscribed"
+                    ? "No feed items yet"
+                    : `Stream connection is ${snapshot.connectionStatus}`
+                  : `Stream connection is ${snapshot.connectionStatus}: ${snapshot.connectionError}`}
+              </span>
+            </div>
+          ) : (
+            <div className="relative w-full flex-1" style={{ minHeight: virtualizer.getTotalSize() }}>
+              <FeedItemWindow
+                expandedLocalIndexes={expandedLocalIndexes}
+                itemCount={itemCount}
+                streamDatabase={streamDatabase}
+                virtualItems={virtualItems}
+                measureElement={virtualizer.measureElement}
+                onToggleLocalIndex={(localIndex) => {
+                  if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
+                  setExpandedLocalIndexes((current) => {
+                    const next = new Set(current);
+                    if (next.has(localIndex)) {
+                      next.delete(localIndex);
+                    } else {
+                      next.add(localIndex);
+                    }
+                    return next;
+                  });
+                }}
+              />
+            </div>
+          )}
+          {showScrollToBottom ? (
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex min-h-[72px] items-end justify-center pb-2.5">
+              <div className="absolute inset-0 bg-gradient-to-t from-white via-white/80 to-transparent" aria-hidden />
+              <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 bottom-4">
+                <button
+                  aria-label={
+                    newItemCount === 0
+                      ? "Scroll to bottom"
+                      : `Scroll to bottom, ${newItemCount} new ${
+                          newItemCount === 1 ? "item" : "items"
+                        }`
+                  }
+                  className={
+                    newItemCount === 0
+                      ? "pointer-events-auto grid size-8 cursor-pointer place-items-center rounded-full border border-[#e8ebf0] bg-white text-base leading-none text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
+                      : "pointer-events-auto inline-grid h-8 auto-cols-max grid-flow-col place-items-center gap-1.5 rounded-full border border-[#e8ebf0] bg-white px-2.5 text-[13px] text-[#16181d] opacity-60 shadow-[0_4px_12px_rgb(15_23_42_/_8%)] hover:opacity-90"
+                  }
+                  type="button"
+                  onClick={() => {
+                    setNewItemCount(0);
+                    virtualizer.scrollToEnd();
+                  }}
+                >
+                  <span className="text-base leading-none">↓</span>
+                  {newItemCount === 0 ? null : (
+                    <span className="font-mono text-xs leading-none">{newItemCount}</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          ) : null}
+        </section>
+        <div className="flex-none bg-white" data-testid="stream-composer-chrome">
+          <FeedComposer key={`composer:${streamPath}`} streamStore={streamStore} />
         </div>
       </section>
     </div>
   );
 }
 
-function FeedItem({ row, isLast }: { row: FeedItemRow; isLast: boolean }) {
-  const [expanded, setExpanded] = useState(false);
+function FeedRuntimeNotice({
+  itemCount,
+  snapshot,
+}: {
+  itemCount: number;
+  snapshot: StreamBrowserSnapshot;
+}) {
+  if (snapshot.connectionError !== undefined) {
+    return (
+      <div
+        className="grid gap-[3px] border-b border-[#fecdca] bg-[#fff4f2] py-[9px] pr-4 text-xs text-[#912018]"
+        data-testid="stream-error"
+        role="alert"
+      >
+        <strong>Stream error</strong>
+        <span>{snapshot.connectionError}</span>
+      </div>
+    );
+  }
+
+  if (itemCount === 0 && snapshot.subscriptionStatus === "follower") {
+    return (
+      <output
+        className="grid gap-[3px] border-b border-[#fedf89] bg-[#fff8e6] py-[9px] pr-4 text-xs text-[#7a4b00]"
+        data-testid="stream-warning"
+      >
+        <strong>Follower with empty feed mirror</strong>
+        <span>
+          This tab is waiting for the elected writer tab to mirror feed items into local SQLite.
+          Reload or close older tabs if this does not resolve.
+        </span>
+      </output>
+    );
+  }
+
+  return null;
+}
+
+function FeedItemWindow({
+  streamDatabase,
+  virtualItems,
+  expandedLocalIndexes,
+  itemCount,
+  measureElement,
+  onToggleLocalIndex,
+}: {
+  streamDatabase: StreamBrowserDatabase;
+  virtualItems: VirtualItem[];
+  expandedLocalIndexes: Set<number>;
+  itemCount: number;
+  measureElement: (node: Element | null) => void;
+  onToggleLocalIndex(localIndex: number): void;
+}) {
+  const firstIndex = virtualItems[0]?.index ?? 0;
+  const lastIndex = virtualItems.at(-1)?.index ?? -1;
+  const rowQueryResult = useStreamQuery(
+    streamDatabase,
+    `SELECT local_index, component, first_offset, last_offset, event_count, json(data) AS data
+     FROM feed_items
+     WHERE local_index >= ? AND local_index < ?
+     ORDER BY local_index ASC`,
+    [firstIndex, lastIndex + 1],
+  );
+  const rowsByLocalIndex = useMemo(() => {
+    const rows = new Map<number, FeedItemRow>();
+    for (const row of rowQueryResult.data) {
+      const parsed = parseFeedItem(row);
+      if (parsed !== undefined) rows.set(parsed.local_index, parsed);
+    }
+    return rows;
+  }, [rowQueryResult.data]);
+
+  return virtualItems.map((virtualItem) => {
+    const row = rowsByLocalIndex.get(virtualItem.index);
+    const isExpanded = row !== undefined && expandedLocalIndexes.has(row.local_index);
+    const isLastFeedRow = virtualItem.index === itemCount - 1;
+
+    return (
+      <div
+        className={
+          isLastFeedRow
+            ? "absolute left-0 top-0 w-full pb-2"
+            : "absolute left-0 top-0 w-full pb-2 after:absolute after:bottom-1 after:left-0 after:right-0 after:h-px after:bg-[#eef1f5]"
+        }
+        data-index={virtualItem.index}
+        data-testid="virtual-row"
+        key={virtualItem.key}
+        ref={row === undefined ? undefined : measureElement}
+        style={{ transform: `translateY(${virtualItem.start}px)` }}
+      >
+        {row === undefined ? (
+          <article className="box-border h-[30px] rounded-md border border-[#e1e5eb]" data-testid="feed-item-pending" />
+        ) : (
+          <FeedItem
+            expanded={isExpanded}
+            isLast={isLastFeedRow}
+            row={row}
+            onToggle={() => onToggleLocalIndex(row.local_index)}
+          />
+        )}
+      </div>
+    );
+  });
+}
+
+function FeedItem({
+  row,
+  isLast,
+  expanded,
+  onToggle,
+}: {
+  row: FeedItemRow;
+  isLast: boolean;
+  expanded: boolean;
+  onToggle(): void;
+}) {
   const eventType = feedItemEventType(row);
   const offsetLabel =
     row.event_count === 1 ? String(row.first_offset) : `${row.first_offset}–${row.last_offset}`;
   const detailLabel =
-    row.event_count === 1
-      ? "1 event"
-      : `${row.event_count.toLocaleString()} events`;
+    row.event_count === 1 ? "1 event" : `${row.event_count.toLocaleString()} events`;
 
   return (
-    <div
-      className={
-        isLast
-          ? "pb-2"
-          : "pb-2 after:absolute after:bottom-1 after:left-0 after:right-0 after:h-px after:bg-[#eef1f5] relative"
-      }
+    <article
+      data-testid="feed-item"
+      data-component={row.component}
+      data-event-type={eventType}
+      data-first-offset={row.first_offset}
+      data-last-offset={row.last_offset}
+      data-event-count={row.event_count}
+      className={isLast ? "min-w-0 overflow-hidden bg-white" : "relative min-w-0 overflow-hidden bg-white"}
     >
-      <article
-        data-testid="feed-item"
-        data-component={row.component}
-        data-event-type={eventType}
-        data-first-offset={row.first_offset}
-        data-last-offset={row.last_offset}
-        data-event-count={row.event_count}
-        className="min-w-0 overflow-hidden bg-white"
+      <button
+        aria-expanded={expanded}
+        className="grid w-full cursor-pointer grid-cols-[64px_minmax(0,1fr)_auto] items-center gap-3 border-0 bg-transparent px-2.5 py-2 text-left font-mono text-xs text-[#536073] hover:bg-[#f8fafc]"
+        data-testid="feed-item-meta"
+        type="button"
+        onClick={onToggle}
       >
-        <button
-          aria-expanded={expanded}
-          className="grid w-full cursor-pointer grid-cols-[64px_minmax(0,1fr)_auto] items-center gap-3 border-0 bg-transparent px-2.5 py-2 text-left font-mono text-xs text-[#536073] hover:bg-[#f8fafc]"
-          data-testid="feed-item-meta"
-          type="button"
-          onClick={() => setExpanded((current) => !current)}
+        <span>{offsetLabel}</span>
+        <span className="truncate">{eventType}</span>
+        <span className="whitespace-nowrap text-[#667085]">{detailLabel}</span>
+      </button>
+      {expanded ? (
+        <pre
+          className="m-0 overflow-auto whitespace-pre-wrap break-words p-2.5 font-mono text-[13px] leading-normal"
+          data-testid="feed-item-json"
         >
-          <span>{offsetLabel}</span>
-          <span className="truncate">{eventType}</span>
-          <span className="whitespace-nowrap text-[#667085]">{detailLabel}</span>
-        </button>
-        {expanded ? (
-          <pre className="m-0 overflow-auto whitespace-pre-wrap break-words p-2.5 font-mono text-[13px] leading-normal" data-testid="feed-item-json">
-            {JSON.stringify(row.data, null, 2)}
-          </pre>
-        ) : null}
-      </article>
-    </div>
+          {JSON.stringify(feedItemExpandedJson(row), null, 2)}
+        </pre>
+      ) : null}
+    </article>
   );
 }
 
 function feedItemEventType(row: FeedItemRow) {
   if (typeof row.data.eventType === "string") return row.data.eventType;
+  const first = feedItemEvents(row)[0];
+  if (first !== undefined && typeof first.type === "string") return first.type;
   return SPECIFIC_RENDERER_TYPES[row.component] ?? row.component;
+}
+
+function feedItemEvents(row: FeedItemRow): Record<string, unknown>[] {
+  if (!Array.isArray(row.data.events)) return [];
+  return row.data.events.flatMap((entry) =>
+    entry !== null && typeof entry === "object" ? [entry as Record<string, unknown>] : [],
+  );
+}
+
+function feedItemExpandedJson(row: FeedItemRow) {
+  const events = feedItemEvents(row);
+  return events.length === 0 ? row.data : events;
 }
 
 function parseFeedItem(row: Record<string, unknown>): FeedItemRow | undefined {
@@ -195,7 +495,7 @@ function parseFeedItem(row: Record<string, unknown>): FeedItemRow | undefined {
   };
 }
 
-function FeedComposer({ streamStore }: { streamStore: ReturnType<typeof acquireStreamRuntime> }) {
+function FeedComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [composerText, setComposerText] = useState(() =>
     JSON.stringify(

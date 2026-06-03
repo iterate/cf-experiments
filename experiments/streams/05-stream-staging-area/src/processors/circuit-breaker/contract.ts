@@ -11,8 +11,10 @@ import { z } from "zod";
 import { defineProcessorContract } from "@cf-experiments/shared/stream-processors";
 import { coreProcessorContract } from "../core/contract.js";
 
-export const DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY = 500;
-export const DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE = 500;
+// Experiment defaults: effectively no rate limiting for normal browser/load tests.
+// Refill is per minute in the token bucket; 6_000_000/min ≈ 100k events/s sustained.
+export const DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY = 100_000;
+export const DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE = 6_000_000;
 
 const circuitBreakerStateSchema = z.object({
   availableTokens: z.number(),

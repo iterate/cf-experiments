@@ -1,4 +1,6 @@
+/// <reference types="vite/client" />
 import { createRootRoute } from "@tanstack/react-router";
+import appCss from "../styles/app.css?url";
 import { RootComponent } from "./-root-document.js";
 
 export const Route = createRootRoute({
@@ -8,6 +10,7 @@ export const Route = createRootRoute({
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Stream Staging Area" },
     ],
+    links: [{ rel: "stylesheet", href: appCss }],
   }),
   component: RootComponent,
 });

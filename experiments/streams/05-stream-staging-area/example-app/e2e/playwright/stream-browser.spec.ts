@@ -292,10 +292,9 @@ test("split view keeps different streams isolated", async ({ page }) => {
   await expect(eventMeta(rightPane, leftType)).toHaveCount(0);
 });
 
-// Regression for the composer/scrollbar layout. The composer deliberately lives inside the
-// native stream scroller, but outside TanStack Virtual's row content, so the browser scrollbar
-// runs beside the composer while Virtual still only sizes rows. Growing the textarea must not
-// require feeding composer height into the virtualizer or break tail-following.
+// Regression for the composer/scrollbar layout. The event list scrolls in its own pane and the
+// composer sits below it (vanilla TanStack chat layout), so tail rows can grow without sliding
+// under a sticky overlay. Growing the textarea must not break tail-following.
 test("auto-growing composer stays in the stream scrollbar and preserves tail appends", async ({ page }) => {
   const streamPath = `/e2e/${crypto.randomUUID()}`;
   await page.goto(streamRoute(streamPath));
@@ -303,7 +302,7 @@ test("auto-growing composer stays in the stream scrollbar and preserves tail app
 
   await expect.poll(async () => {
     return await page.evaluate(() => {
-      const scroller = document.querySelector("[data-testid='stream-events']");
+      const scroller = document.querySelector("[data-testid='stream-events-scroll']");
       const filterBar = document.querySelector("[data-testid='event-type-filter-bar']");
       if (!(scroller instanceof HTMLElement) || !(filterBar instanceof HTMLElement)) {
         throw new Error("missing stream scroller or filter bar");
@@ -339,21 +338,21 @@ test("auto-growing composer stays in the stream scrollbar and preserves tail app
   await expect.poll(async () =>
     await textarea.evaluate((element) => {
       if (!(element instanceof HTMLTextAreaElement)) throw new Error("composer must be a textarea");
-      return element.getBoundingClientRect().height;
+      return element.scrollHeight > element.clientHeight + 50;
     }),
-  ).toBeGreaterThan(initialTextareaHeight + 100);
+  ).toBe(true);
   await expect.poll(async () => {
     const alignment = await page.evaluate(() => {
-      const eventRow = document.querySelector("[data-testid=\"event-row\"]");
+      const scroller = document.querySelector("[data-testid='stream-events-scroll']");
       const composerTextarea = document.querySelector("[data-testid=\"composer-textarea\"]");
-      if (!(eventRow instanceof HTMLElement) || !(composerTextarea instanceof HTMLTextAreaElement)) {
-        throw new Error("missing stream row or composer textarea");
+      if (!(scroller instanceof HTMLElement) || !(composerTextarea instanceof HTMLTextAreaElement)) {
+        throw new Error("missing stream scroller or composer textarea");
       }
-      const eventRect = eventRow.getBoundingClientRect();
+      const scrollerRect = scroller.getBoundingClientRect();
       const textareaRect = composerTextarea.getBoundingClientRect();
       return {
-        left: Math.round(Math.abs(eventRect.left - textareaRect.left)),
-        right: Math.round(Math.abs(eventRect.right - textareaRect.right)),
+        left: Math.round(Math.abs(scrollerRect.left - textareaRect.left)),
+        right: Math.round(Math.abs(scrollerRect.right - textareaRect.right)),
       };
     });
     return `${alignment.left}:${alignment.right}`;
@@ -407,17 +406,12 @@ test("scroll to bottom affordance keeps counting while scrolling older rows duri
   await page.goto(streamRoute(streamPath));
   await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
 
-  // Raise the stream's burst limit so the 5000-event burst below isn't rate-limited. This
-  // appends one idempotency-keyed circuit-breaker/configured event (offset 3), so counts
-  // below are created + woken + that event + inserted.
-  await page.getByLabel("Raise rate limit before burst").check();
-
   await page.getByLabel("Count").fill("100");
   await page.getByLabel("Batch size").fill("100");
   await page.getByLabel("Seconds").fill("0");
   await page.getByRole("button", { name: "Stream random events" }).click();
   await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
-  await expect(page.getByTestId("event-count")).toHaveText("103", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("102", { timeout: 30_000 });
   await expectAtStreamEnd(page);
 
   await scrollStreamBy(page, -500);
@@ -434,13 +428,50 @@ test("scroll to bottom affordance keeps counting while scrolling older rows duri
     expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 60_000 }),
   ]);
 
-  await expect(page.getByTestId("event-count")).toHaveText("5103", { timeout: 60_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("5102", { timeout: 60_000 });
   await expect(page.getByRole("button", { name: "Scroll to bottom, 5000 new events" })).toBeVisible();
   await expect.poll(() => streamDistanceFromEnd(page)).toBeGreaterThan(0);
   await expectComposerAtScrollerBottom(page);
 
   await page.getByRole("button", { name: "Scroll to bottom, 5000 new events" }).click();
   await expect(page.getByRole("button", { name: "Scroll to bottom, 5000 new events" })).toHaveCount(0);
+  await expectAtStreamEnd(page);
+});
+
+// Tail row expansion must stay above the composer. The list scrolls separately from the
+// composer (vanilla TanStack chat layout) so end anchoring can follow measured growth.
+test("expanding the tail event row at stream end stays above the composer", async ({ page }) => {
+  const streamPath = `/e2e/${crypto.randomUUID()}`;
+  await page.goto(streamRoute(streamPath));
+  await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
+
+  await page.getByLabel("Count").fill("120");
+  await page.getByLabel("Batch size").fill("120");
+  await page.getByLabel("Seconds").fill("0");
+  await page.getByRole("button", { name: "Stream random events" }).click();
+  await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
+  await expect(page.getByTestId("event-count")).toHaveText("122", { timeout: 30_000 });
+  await expectAtStreamEnd(page);
+
+  const tailRow = page.locator("[data-testid='virtual-row']").last().getByTestId("event-meta");
+  await tailRow.click();
+  await expect(tailRow).toHaveAttribute("aria-expanded", "true");
+
+  const expandedJson = page.getByTestId("event-json").last();
+  await expect(expandedJson).toBeVisible();
+  await expect.poll(async () => {
+    const layout = await page.evaluate(() => {
+      const json = document.querySelector("[data-testid='event-json']:last-of-type");
+      const composer = document.querySelector("[data-testid='stream-composer']");
+      if (!(json instanceof HTMLElement) || !(composer instanceof HTMLElement)) {
+        throw new Error("missing expanded json or composer");
+      }
+      const jsonRect = json.getBoundingClientRect();
+      const composerRect = composer.getBoundingClientRect();
+      return Math.round(composerRect.top - jsonRect.bottom);
+    });
+    return layout;
+  }).toBeGreaterThan(4);
   await expectAtStreamEnd(page);
 });
 
@@ -535,10 +566,6 @@ test("large streams stay virtualized and can scroll from tail to earliest rows",
   await page.goto(streamRoute(streamPath));
   await expect(eventMeta(page, "events.iterate.com/stream/created").first()).toBeVisible();
 
-  // Raise the burst limit so the 1500-event burst isn't rate-limited; this adds one
-  // idempotency-keyed circuit-breaker/configured event, hence created + woken + that + inserted.
-  await page.getByLabel("Raise rate limit before burst").check();
-
   const insertedCount = 1_500;
   await page.getByLabel("Count").fill(String(insertedCount));
   await page.getByLabel("Batch size").fill("250");
@@ -546,7 +573,7 @@ test("large streams stay virtualized and can scroll from tail to earliest rows",
   await page.getByRole("button", { name: "Stream random events" }).click();
   await expect(page.getByTestId("insert-state")).toHaveText("done", { timeout: 30_000 });
 
-  const expectedCount = insertedCount + 3;
+  const expectedCount = insertedCount + 2;
   await expect(page.getByTestId("event-count")).toHaveText(String(expectedCount), { timeout: 30_000 });
   await expect.poll(
     () => page.locator("[data-testid='event-meta']").count(),
@@ -804,7 +831,7 @@ async function scrollDistanceFromEnd(page: Page) {
 }
 
 async function streamDistanceFromEnd(page: Page) {
-  return await page.getByTestId("stream-events").evaluate((element) => {
+  return await page.getByTestId("stream-events-scroll").evaluate((element) => {
     if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
     return Math.round(element.scrollHeight - element.clientHeight - element.scrollTop);
   });
@@ -816,12 +843,12 @@ async function expectAtStreamEnd(page: Page) {
 
 async function composerDistanceFromScrollerBottom(page: Page) {
   return await page.evaluate(() => {
-    const scroller = document.querySelector("[data-testid='stream-events']");
+    const scroller = document.querySelector("[data-testid='stream-events-scroll']");
     const composer = document.querySelector("[data-testid=\"stream-composer\"]");
     if (!(scroller instanceof HTMLElement) || !(composer instanceof HTMLElement)) {
       throw new Error("missing stream scroller or composer");
     }
-    return Math.round(scroller.getBoundingClientRect().bottom - composer.getBoundingClientRect().bottom);
+    return Math.round(composer.getBoundingClientRect().top - scroller.getBoundingClientRect().bottom);
   });
 }
 
@@ -830,7 +857,7 @@ async function expectComposerAtScrollerBottom(page: Page) {
 }
 
 async function scrollStreamBy(page: Page, delta: number) {
-  await page.getByTestId("stream-events").evaluate((element, scrollDelta) => {
+  await page.getByTestId("stream-events-scroll").evaluate((element, scrollDelta) => {
     if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
     element.scrollTop += scrollDelta;
   }, delta);
@@ -840,7 +867,7 @@ async function jitterScrollAwayFromBottom(
   page: Page,
   options: { durationMs: number; delta: number },
 ) {
-  await page.getByTestId("stream-events").evaluate(async (element, jitterOptions) => {
+  await page.getByTestId("stream-events-scroll").evaluate(async (element, jitterOptions) => {
     if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
 
     let direction = -1;
@@ -866,14 +893,14 @@ async function waitForVisibleRowsSettled(page: Page) {
 }
 
 async function scrollToMiddle(page: Page) {
-  await page.getByTestId("stream-events").evaluate((element) => {
+  await page.getByTestId("stream-events-scroll").evaluate((element) => {
     if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
     element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) / 2);
   });
 }
 
 async function sampleUpwardScroll(page: Page, options: { stepCount: number; scrollDelta: number }) {
-  return await page.getByTestId("stream-events").evaluate(async (element, scrollOptions) => {
+  return await page.getByTestId("stream-events-scroll").evaluate(async (element, scrollOptions) => {
     if (!(element instanceof HTMLElement)) throw new Error("stream scroller must be an HTMLElement");
 
     function frame() {

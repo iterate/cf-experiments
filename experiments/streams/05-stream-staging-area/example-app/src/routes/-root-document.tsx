@@ -15,7 +15,7 @@ function RootDocument({ children }: Readonly<{ children: ReactNode }>) {
       <head>
         <HeadContent />
       </head>
-      <body style={{ margin: 0 }}>
+      <body>
         {children}
         <Scripts />
       </body>

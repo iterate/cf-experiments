@@ -17,7 +17,7 @@ import type { StreamEvent, StreamEventInput } from "@cf-experiments/shared/event
 import { connectStream, type StreamBrowserConnectionStatus } from "./connect.js";
 import { createProcessorRunner } from "../processor-runner.js";
 import type { Processor } from "../processor.js";
-import type { StreamRpc } from "../types.js";
+import type { StreamPersistedProcessorState, StreamRpc } from "../types.js";
 import { createStreamSubscription, type StreamSubscription } from "../subscription.js";
 import { acquireWriterRole, streamWriterLockName, type WriterRole } from "./stream-leader.js";
 import { StreamBrowserDatabase, type SqlClient, type StreamDatabaseInfo } from "./stream-browser-db.js";
@@ -51,9 +51,17 @@ export type BrowserProcessorConfig = {
   loadCheckpoint(sql: SqlClient): Promise<{ state: unknown; offset: number } | undefined>;
 };
 
+export type StreamRuntimeState = {
+  state: StreamPersistedProcessorState;
+  runtime: {
+    connections: Record<string, unknown>;
+  };
+};
+
 export type StreamBrowserStore = Disposable & {
   readonly streamDatabase: StreamBrowserDatabase;
   appendBatch(args: { events: StreamEventInput[] }): RpcPromise<StreamEvent[]>;
+  runtimeState(): RpcPromise<StreamRuntimeState>;
   clearLocalDatabase(): Promise<void>;
   kill(): RpcPromise<void>;
   reset(): RpcPromise<void>;
@@ -405,6 +413,11 @@ function createStreamRuntime(
       reconnectNow();
       if (stream === undefined) throw new Error("stream connection is disposed");
       return stream.stream.appendBatch(appendArgs);
+    },
+    runtimeState() {
+      reconnectNow();
+      if (stream === undefined) throw new Error("stream connection is disposed");
+      return stream.stream.runtimeState();
     },
     async clearLocalDatabase() {
       stopSubscriptionElection();

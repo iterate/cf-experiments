@@ -237,7 +237,7 @@ describe("stream capnweb protocol", () => {
       },
     });
 
-    expect(state.config.simulatedStorageSyncDelayMs).toBe(25);
+    expect(state.core.config.simulatedStorageSyncDelayMs).toBe(25);
   });
 
   e2eIt("replays history and then delivers live batches to inbound subscribers", async () => {
@@ -362,7 +362,7 @@ describe("stream capnweb protocol", () => {
       return (
         status.processorSlug === "echo-example" &&
         status.snapshot?.offset === configured.offset &&
-        status.snapshot?.state.seen === 0
+        (status.snapshot?.state as { seen: number } | undefined)?.seen === 0
       );
     }, 1_000);
 
@@ -375,7 +375,12 @@ describe("stream capnweb protocol", () => {
 
     await waitFor(async () => {
       const status = await processor.rpc.runtimeState();
-      return status.snapshot?.state.seen === 1 && status.snapshot.offset > configured.offset;
+      const snapshot = status.snapshot;
+      return (
+        snapshot !== undefined &&
+        (snapshot.state as { seen: number }).seen === 1 &&
+        snapshot.offset > configured.offset
+      );
     }, 1_000);
   });
 

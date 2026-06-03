@@ -1,7 +1,6 @@
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import "./-stream-page.css";
 
 type ReproFooter = "none" | "normal" | "overlay-measured";
 type ReproMode = "single" | "microtask" | "raf" | "timeout";

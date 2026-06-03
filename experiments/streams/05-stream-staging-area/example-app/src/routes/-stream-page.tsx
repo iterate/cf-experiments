@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useLayoutEffect,
   useMemo,
   useReducer,
@@ -14,7 +15,12 @@ import {
   type BrowserProcessorConfig,
   type StreamBrowserSnapshot,
   type StreamBrowserStore,
+  type StreamRuntimeState,
 } from "../../../src/browser/stream-browser-store.js";
+import {
+  DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY,
+  DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE,
+} from "../../../src/processors/circuit-breaker/contract.js";
 import {
   type StreamBrowserDatabase,
   type StreamEventRow,
@@ -28,7 +34,6 @@ import { useStreamQuery } from "../../../src/browser/hooks/use-stream-query.js";
 import { EventFeedView } from "./-event-feed-view.js";
 import { StreamStateView } from "./-stream-state-view.js";
 import { ViewSwitcher } from "./-view-switcher.js";
-import "./-stream-page.css";
 
 export function StreamPage({ streamPath, viewSlug }: { streamPath: string; viewSlug: string }) {
   return (
@@ -486,6 +491,7 @@ function EventRows({
   const parentRef = useRef<HTMLDivElement>(null);
   const previousEventCount = useRef(eventCount);
   const settledInitialEndScroll = useRef(false);
+  const pendingTailScroll = useRef(false);
   const initialScrollOffset = useRef(
     eventCount > 50 ? topScrollAffordanceHeight + eventCount * estimatedEventRowHeight : 0,
   );
@@ -536,19 +542,42 @@ function EventRows({
   }, [eventCount, virtualizer]);
 
   useLayoutEffect(() => {
+    if (!pendingTailScroll.current) return;
+    pendingTailScroll.current = false;
+    virtualizer.scrollToEnd();
+    requestAnimationFrame(() => {
+      virtualizer.scrollToEnd();
+    });
+  }, [expandedOffsets, eventCount, virtualizer]);
+
+  useLayoutEffect(() => {
     const appendedCount = eventCount - previousEventCount.current;
+    const wasAtEnd = scrollPosition.isAtEnd;
     previousEventCount.current = eventCount;
     if (appendedCount <= 0) {
       if (eventCount === 0) setNewEventCount(0);
       return;
     }
-    if (!scrollPosition.isAtEnd) {
-      setNewEventCount((current) => current + appendedCount);
+    if (wasAtEnd) {
+      pendingTailScroll.current = true;
+      return;
     }
+    setNewEventCount((current) => current + appendedCount);
   }, [eventCount, scrollPosition.isAtEnd]);
 
   useLayoutEffect(() => {
     if (scrollPosition.isAtEnd) setNewEventCount(0);
+  }, [scrollPosition.isAtEnd]);
+
+  useLayoutEffect(() => {
+    const composerChrome = document.querySelector("[data-testid='stream-composer-chrome']");
+    if (!(composerChrome instanceof HTMLElement)) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
+    });
+    resizeObserver.observe(composerChrome);
+    return () => resizeObserver.disconnect();
   }, [scrollPosition.isAtEnd]);
 
   const showScrollToBottom = eventCount > 0 && !scrollPosition.isAtEnd;
@@ -575,10 +604,14 @@ function EventRows({
       ) : null}
       <section
         aria-label="Stream events"
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-white pr-4"
         data-testid="stream-events"
-        className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto bg-white pr-4 [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
-        ref={parentRef}
       >
+        <section
+          className="relative flex min-h-0 flex-1 flex-col overflow-x-hidden overflow-y-auto [scrollbar-color:rgb(22_24_29_/_12%)_transparent] [scrollbar-gutter:stable_both-edges] [scrollbar-width:thin]"
+          data-testid="stream-events-scroll"
+          ref={parentRef}
+        >
         <EventTypeFilterBar
           eventCount={eventCount}
           eventTypeFilter={eventTypeFilter}
@@ -616,6 +649,7 @@ function EventRows({
                 virtualItems={virtualItems}
                 measureElement={virtualizer.measureElement}
                 onToggleOffset={(offset) => {
+                  if (scrollPosition.isAtEnd) pendingTailScroll.current = true;
                   setExpandedOffsets((current) => {
                     const next = new Set(current);
                     if (next.has(offset)) {
@@ -630,9 +664,8 @@ function EventRows({
             </div>
           </>
         )}
-        <div className="sticky bottom-0 z-[2] bg-white">
           {showScrollToBottom ? (
-            <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex min-h-[72px] -translate-y-full items-end justify-center pb-2.5">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 flex min-h-[72px] items-end justify-center pb-2.5">
               <div className="absolute inset-0 bg-gradient-to-t from-white via-white/80 to-transparent" aria-hidden />
               <div className="pointer-events-auto absolute left-1/2 z-20 -translate-x-1/2 bottom-4">
                 <button
@@ -662,6 +695,8 @@ function EventRows({
               </div>
             </div>
           ) : null}
+        </section>
+        <div className="flex-none bg-white" data-testid="stream-composer-chrome">
           <StreamComposer key={`composer:${streamPath}`} streamStore={streamStore} />
         </div>
       </section>
@@ -935,6 +970,7 @@ function StreamSidebar({
         streamDatabase={streamDatabase}
         streamStore={streamStore}
       />
+      <StreamControlTool snapshot={snapshot} streamStore={streamStore} />
       <InsertEventsTool
         streamStore={streamStore}
         streamPath={streamPath}
@@ -1108,6 +1144,259 @@ function SubscriptionTool({
   );
 }
 
+const RUNTIME_STATE_POLL_MS = 1_000;
+
+function useStreamRuntimeState(streamStore: StreamBrowserStore, connectionStatus: string) {
+  const [runtimeState, setRuntimeState] = useState<StreamRuntimeState | undefined>();
+  const [pollError, setPollError] = useState<string | undefined>();
+
+  useEffect(() => {
+    if (connectionStatus === "connecting" || connectionStatus === "closed") {
+      setRuntimeState(undefined);
+      setPollError(undefined);
+      return;
+    }
+
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      try {
+        const next = await streamStore.runtimeState();
+        if (!disposed) {
+          setRuntimeState(next);
+          setPollError(undefined);
+        }
+      } catch (caught) {
+        if (!disposed) {
+          setPollError(caught instanceof Error ? caught.message : String(caught));
+        }
+      }
+      if (!disposed) timer = setTimeout(() => void poll(), RUNTIME_STATE_POLL_MS);
+    };
+
+    void poll();
+
+    return () => {
+      disposed = true;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [connectionStatus, streamStore]);
+
+  return { runtimeState, pollError };
+}
+
+function StreamControlTool({
+  snapshot,
+  streamStore,
+}: {
+  snapshot: StreamBrowserSnapshot;
+  streamStore: StreamBrowserStore;
+}) {
+  const { runtimeState, pollError } = useStreamRuntimeState(
+    streamStore,
+    snapshot.connectionStatus,
+  );
+  const core = runtimeState?.state.core;
+  const circuitBreaker = runtimeState?.state["circuit-breaker"];
+  const paused = core?.paused ?? false;
+  const pauseReason = core?.pauseReason ?? null;
+
+  const [burstCapacity, setBurstCapacity] = useState(
+    () => String(DEFAULT_CIRCUIT_BREAKER_BURST_CAPACITY),
+  );
+  const [refillRatePerMinute, setRefillRatePerMinute] = useState(
+    () => String(DEFAULT_CIRCUIT_BREAKER_REFILL_RATE_PER_MINUTE),
+  );
+  const [controlAction, setControlAction] = useState<
+    "idle" | "resuming" | "configuring" | "done" | "error"
+  >("idle");
+
+  useEffect(() => {
+    if (circuitBreaker === undefined) return;
+    setBurstCapacity(String(circuitBreaker.burstCapacity));
+    setRefillRatePerMinute(String(circuitBreaker.refillRatePerMinute));
+  }, [circuitBreaker?.burstCapacity, circuitBreaker?.refillRatePerMinute]);
+
+  async function resumeStream() {
+    setControlAction("resuming");
+    try {
+      await streamStore.appendBatch({
+        events: [
+          {
+            type: "events.iterate.com/stream/resumed",
+            payload: { reason: "operator resume from sidebar" },
+          },
+        ],
+      });
+      setControlAction("done");
+    } catch {
+      setControlAction("error");
+    }
+  }
+
+  async function applyCircuitBreakerConfig() {
+    const burst = Math.floor(Number(burstCapacity));
+    const refill = Math.floor(Number(refillRatePerMinute));
+    if (!Number.isFinite(burst) || burst <= 0 || !Number.isFinite(refill) || refill <= 0) {
+      return;
+    }
+
+    setControlAction("configuring");
+    try {
+      await streamStore.appendBatch({
+        events: [
+          {
+            type: "events.iterate.com/circuit-breaker/configured",
+            payload: { burstCapacity: burst, refillRatePerMinute: refill },
+            idempotencyKey: `circuit-breaker:${burst}:${refill}`,
+          },
+        ],
+      });
+      setControlAction("done");
+    } catch {
+      setControlAction("error");
+    }
+  }
+
+  const gateLabel = runtimeState === undefined ? "…" : paused ? "Paused" : "Active";
+  const gateClass =
+    runtimeState === undefined
+      ? "text-[#667085]"
+      : paused
+        ? "text-[#b42318]"
+        : "text-[#067647]";
+
+  return (
+    <section className="grid gap-2 border-t border-[#eef1f5] py-4">
+      <h2 className="m-0 text-[11px] font-semibold uppercase tracking-[0.04em] text-[#98a2b3]">
+        Stream gate
+      </h2>
+      <dl className="m-0 grid gap-1 text-xs [&_dd]:m-0 [&_div]:flex [&_div]:items-center [&_div]:justify-between [&_dt]:text-[11px] [&_dt]:font-medium [&_dt]:text-[#98a2b3]">
+        <div title="Whether the core processor is rejecting ordinary appends (paused) or accepting them (active).">
+          <dt>Gate</dt>
+          <dd>
+            <output
+              className={`whitespace-nowrap font-mono text-[11px] font-semibold ${gateClass}`}
+              data-testid="stream-gate-status"
+            >
+              {gateLabel}
+            </output>
+          </dd>
+        </div>
+        {pauseReason === null ? null : (
+          <div title="Why the stream was paused, from the latest stream/paused event.">
+            <dt>Pause reason</dt>
+            <dd>
+              <output
+                className="block max-w-[150px] break-words text-right font-mono text-[11px] text-[#b42318]"
+                data-testid="stream-pause-reason"
+              >
+                {pauseReason}
+              </output>
+            </dd>
+          </div>
+        )}
+        {circuitBreaker === undefined ? null : (
+          <div title="Token-bucket balance after the latest committed event. Trips below zero and appends stream/paused.">
+            <dt>Tokens</dt>
+            <dd>
+              <output className="whitespace-nowrap font-mono text-[11px] text-[#263142]" data-testid="circuit-breaker-tokens">
+                {circuitBreaker.availableTokens} / {circuitBreaker.burstCapacity}
+              </output>
+            </dd>
+          </div>
+        )}
+      </dl>
+      {paused ? (
+        <button
+          className="w-full cursor-pointer whitespace-nowrap rounded-md bg-[#067647] px-3 py-2 text-[13px] font-semibold text-white disabled:cursor-default disabled:opacity-55"
+          data-testid="stream-resume-button"
+          disabled={controlAction === "resuming" || snapshot.connectionStatus !== "subscribed"}
+          type="button"
+          onClick={() => void resumeStream()}
+        >
+          Resume stream
+        </button>
+      ) : null}
+      {pollError === undefined ? null : (
+        <output className="font-mono text-[11px] text-[#b42318]" data-testid="stream-control-error" role="alert">
+          {pollError}
+        </output>
+      )}
+      <h3 className="m-0 pt-1 text-[11px] font-semibold uppercase tracking-[0.04em] text-[#98a2b3]">
+        Circuit breaker
+      </h3>
+      <form
+        className="grid gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void applyCircuitBreakerConfig();
+        }}
+      >
+        <label className="grid gap-1 text-[11px] font-medium text-[#667085]">
+          <span>Burst capacity</span>
+          <input
+            className="min-w-0 rounded-md border border-[#e1e5eb] bg-white/70 px-2 py-1.5 font-mono text-xs"
+            data-testid="circuit-breaker-burst-capacity"
+            min="1"
+            step="1"
+            type="number"
+            value={burstCapacity}
+            onChange={(event) => setBurstCapacity(event.currentTarget.value)}
+          />
+        </label>
+        <label className="grid gap-1 text-[11px] font-medium text-[#667085]">
+          <span>Refill / minute</span>
+          <input
+            className="min-w-0 rounded-md border border-[#e1e5eb] bg-white/70 px-2 py-1.5 font-mono text-xs"
+            data-testid="circuit-breaker-refill-rate"
+            min="1"
+            step="1"
+            type="number"
+            value={refillRatePerMinute}
+            onChange={(event) => setRefillRatePerMinute(event.currentTarget.value)}
+          />
+        </label>
+        <button
+          className="cursor-pointer whitespace-nowrap rounded-md border border-[#d8dde4] bg-white px-3 py-2 text-[13px] font-medium text-[#475467] hover:border-[#bac2cf] hover:bg-[#f8f9fb] disabled:cursor-default disabled:opacity-55"
+          data-testid="circuit-breaker-apply"
+          disabled={
+            controlAction === "configuring" ||
+            paused ||
+            snapshot.connectionStatus !== "subscribed"
+          }
+          title={
+            paused
+              ? "Resume the stream first — circuit-breaker/configured cannot append while paused."
+              : undefined
+          }
+          type="submit"
+        >
+          Apply limits
+        </button>
+        {paused ? (
+          <p className="m-0 text-[11px] leading-snug text-[#667085]">
+            Limits can only be changed while the gate is active. Resume the stream first.
+          </p>
+        ) : null}
+      </form>
+      {controlAction === "idle" ? null : (
+        <output
+          className={
+            controlAction === "error"
+              ? "min-h-4 font-mono text-xs uppercase text-[#b42318]"
+              : "min-h-4 font-mono text-xs uppercase text-[#667085]"
+          }
+          data-testid="stream-control-action"
+        >
+          {controlAction}
+        </output>
+      )}
+    </section>
+  );
+}
+
 function formatByteSize(bytes: number) {
   const units = ["B", "KB", "MB", "GB"];
   let size = bytes;
@@ -1137,7 +1426,6 @@ function InsertEventsTool({
         insertBatchSize: string;
         periodSeconds: string;
         appendResponseMode: "await" | "background" | "dispose";
-        raiseCircuitBreaker: boolean;
         insertState: "idle" | "inserting" | "done" | "error";
       },
       action:
@@ -1145,12 +1433,9 @@ function InsertEventsTool({
         | { type: "set-insert-batch-size"; value: string }
         | { type: "set-period-seconds"; value: string }
         | { type: "set-append-response-mode"; value: "await" | "background" | "dispose" }
-        | { type: "set-raise-circuit-breaker"; value: boolean }
         | { type: "set-insert-state"; value: "idle" | "inserting" | "done" | "error" },
     ) => {
       switch (action.type) {
-        case "set-raise-circuit-breaker":
-          return { ...state, raiseCircuitBreaker: action.value };
         case "set-insert-event-count":
           return { ...state, insertEventCount: action.value };
         case "set-insert-batch-size":
@@ -1168,7 +1453,6 @@ function InsertEventsTool({
       insertBatchSize: "100",
       periodSeconds: "5",
       appendResponseMode: "await",
-      raiseCircuitBreaker: false,
       insertState: "idle",
     },
   );
@@ -1189,20 +1473,6 @@ function InsertEventsTool({
     dispatchInsertState({ type: "set-insert-state", value: "inserting" });
 
     try {
-      // Optionally lift the stream's token-bucket circuit breaker first, so a large burst
-      // isn't paused. Idempotency-keyed, so repeated runs append it at most once.
-      if (insertState.raiseCircuitBreaker) {
-        await streamStore.appendBatch({
-          events: [
-            {
-              type: "events.iterate.com/circuit-breaker/configured",
-              payload: { burstCapacity: 1_000_000_000, refillRatePerMinute: 1_000_000_000 },
-              idempotencyKey: "raise-circuit-breaker",
-            },
-          ],
-        });
-      }
-
       const pendingResponses: Promise<unknown>[] = [];
       const batchCount = Math.ceil(count / batchSize);
       const batchDelayMs = batchCount <= 1 ? 0 : periodMs / (batchCount - 1);
@@ -1325,21 +1595,6 @@ function InsertEventsTool({
           <option value="background">Background</option>
           <option value="dispose">Dispose</option>
         </select>
-      </label>
-      <label className="flex items-center gap-2 text-[11px] font-medium text-[#667085]">
-        <input
-          type="checkbox"
-          checked={insertState.raiseCircuitBreaker}
-          onChange={(event) =>
-            dispatchInsertState({
-              type: "set-raise-circuit-breaker",
-              value: event.currentTarget.checked,
-            })
-          }
-        />
-        <span title="Append a circuit-breaker/configured event raising the burst/refill limits before inserting, so a large burst isn't rate-limited.">
-          Raise rate limit before burst
-        </span>
       </label>
       <button
         className="cursor-pointer whitespace-nowrap rounded-md bg-[#1f6feb] px-3 py-2 text-[13px] font-semibold text-white no-underline disabled:cursor-default disabled:opacity-55"
@@ -1467,8 +1722,10 @@ function StreamComposer({ streamStore }: { streamStore: StreamBrowserStore }) {
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (textarea === null) return;
+    const maxHeight = Math.floor(window.innerHeight * 0.35);
     textarea.style.height = "auto";
-    textarea.style.height = `${textarea.scrollHeight}px`;
+    textarea.style.maxHeight = `${maxHeight}px`;
+    textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
   }, [composerText]);
 
   async function appendComposerEvent() {
